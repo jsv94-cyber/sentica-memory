@@ -56,3 +56,58 @@ on host port 5433: **3140 passed, 53 skipped, 0 failed** (132.83s). The
 no skips. M0 acceptance: `tests/sentica/test_m0_baseline.py`, 7 passed.
 
 Open questions: none for M0.
+
+## M1. Single tenant
+
+Built:
+
+- `src/sentica/`: startup checks, broker tokens, proxy TLS, queue tenant stamps.
+- Production database connections have no password, use `sslmode=verify-full`,
+  and keep tables in schema `memory`.
+- Every non-probe request and every deriver task must carry this instance's
+  tenant. Admin tokens are refused.
+- A dropped proxy connection rolls the transaction back. The API returns
+  503 `memory unavailable`. The deriver backs off and retries.
+- `docker-compose.sentica.yml` runs two local instances behind PgBouncer
+  with a local test CA. Postgres data and Redis data are tmpfs.
+- `docs/INSTANCE.md` says the API listens on the broker's private interface
+  and must not be exposed to the internet or an agent container.
+
+Decisions:
+
+- `SENTICA_MODE` unset keeps upstream behavior. The unit suite imports
+  `src.db` at startup, and a default of production would refuse to boot
+  without certificates. Unknown values still refuse to start. This is not
+  a default tenant.
+- `AUTH_USE_AUTH` is not required in production. The production check runs
+  first and never takes the upstream admin bypass, so the instance does not
+  need a symmetric `JWT_SECRET`. Requiring `AUTH_USE_AUTH=true` forced that
+  secret through the existing settings validator.
+- Refusal counts live in an in-process dict (`src/sentica/refusals.py`).
+  They are not Prometheus series yet. Adding a series here would have to
+  update the metric zero-init registry. Export is left for M9.
+- `docker-compose.yml` still has the development database password. The
+  certificate proxy is `docker-compose.sentica.yml`. M0's `docker compose up`
+  keeps working.
+- On the local proof network, Postgres accepts the proxy with `trust` and
+  no password. The instance environment has no password. Blocking a client
+  that skips the proxy is network policy, recorded for a later milestone.
+- `/health` and `/metrics` stay unauthenticated so a healthcheck can run.
+  They return no memory content. Every other path requires a token.
+- Representation queue payloads still include message text. Same deferral
+  as M0. The tenant stamp is an extra id on the payload and is removed
+  before upstream validation.
+- The two-instance test is skipped unless `SENTICA_M1_STACK=1`. GitHub
+  Actions runs the unit suite. The compose proof was run on this machine.
+
+Deviations from GOALS.md: the unit suite still uses a password database,
+because that is the M0 stack. The production-shaped stack does not. Queue
+message text is still present, as recorded under M0.
+
+Test counts: `uv run pytest` on 2026-10-11, against the local Postgres
+on host port 5433, with `SENTICA_M1_STACK=1`: **3158 passed, 53 skipped,
+0 failed** (260.44s). The 53 skips are the same upstream skips as M0.
+That run includes `tests/sentica/test_m1_stack.py` (6 passed). Unit checks
+for startup and tokens are `tests/sentica/test_m1_startup.py` and
+`tests/sentica/test_m1_tokens.py`. `ruff check` and `basedpyright` were
+clean on this branch.

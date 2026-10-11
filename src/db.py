@@ -12,6 +12,10 @@ from sqlalchemy.orm import declarative_base
 from sqlalchemy.pool import NullPool, QueuePool
 
 from src.config import settings
+from src.sentica.db_connect import (
+    apply_production_engine_args,
+    install_certificate_reload,
+)
 from src.telemetry.prometheus.metrics import (
     db_connections_established_counter,
     db_connections_open_gauge,
@@ -32,13 +36,15 @@ request_context: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "request_context", default=None
 )
 
-engine_kwargs = {}
+engine_kwargs: dict[str, Any] = {}
+
+_sentica_instance = apply_production_engine_args(connect_args, engine_kwargs)
 
 if settings.DB.POOL_CLASS == "null":
     engine_kwargs["poolclass"] = NullPool
 else:
     # Only add pool-related kwargs for pooled connections
-    engine_kwargs.update(  # pyright: ignore
+    engine_kwargs.update(
         {
             "pool_pre_ping": settings.DB.POOL_PRE_PING,
             "pool_size": settings.DB.POOL_SIZE,
@@ -48,13 +54,24 @@ else:
             "pool_use_lifo": settings.DB.POOL_USE_LIFO,
         }
     )
+    if _sentica_instance is not None:
+        engine_kwargs["pool_recycle"] = min(int(engine_kwargs["pool_recycle"]), 3600)
+
+_connection_uri = settings.DB.CONNECTION_URI
+if _sentica_instance is not None:
+    _connection_uri = _sentica_instance.connection_uri()
+    settings.DB.SCHEMA = "memory"
+    settings.DB.CONNECTION_URI = _connection_uri
 
 engine = create_async_engine(
-    settings.DB.CONNECTION_URI,
+    _connection_uri,
     connect_args=connect_args,
     echo=settings.DB.SQL_DEBUG,
     **engine_kwargs,
 )
+
+if _sentica_instance is not None:
+    install_certificate_reload(engine, _sentica_instance)
 
 # A vanilla AsyncSession is lazy: it checks out a pooled connection on the first
 # DB-touching call (not at construction) and couples the checkout to the

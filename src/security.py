@@ -203,13 +203,22 @@ async def auth(
     allow_member_read: bool = False,
 ) -> JWTParams:
     """Authenticate the given JWT and return the decoded parameters."""
-    if not settings.AUTH.USE_AUTH:
-        return JWTParams(t="", ad=True)
-    if not credentials or not credentials.credentials:
-        logger.warning("No access token provided")
-        raise AuthenticationException("No access token provided")
+    from src.sentica.runtime import production_enabled
+    from src.sentica.tokens import verify_sentica_token
 
-    jwt_params = verify_jwt(credentials.credentials)
+    if production_enabled():
+        # Broker public key only. Admin claims are rejected inside
+        # verify_sentica_token. Scope checks below are unchanged.
+        if not credentials or not credentials.credentials:
+            raise AuthenticationException("missing token")
+        jwt_params = verify_sentica_token(credentials.credentials)
+    elif not settings.AUTH.USE_AUTH:
+        return JWTParams(t="", ad=True)
+    else:
+        if not credentials or not credentials.credentials:
+            logger.warning("No access token provided")
+            raise AuthenticationException("No access token provided")
+        jwt_params = verify_jwt(credentials.credentials)
 
     # Authorize by the token's narrowest scope, not by the route's. A
     # narrower-than-workspace token must NOT fall back to workspace access:

@@ -52,6 +52,9 @@ async def process_item(queue_item: models.QueueItem) -> None:
     # extra_forbidden on the reclaim that was supposed to retry it.
     queue_payload = dict(queue_item.payload or {})
     queue_payload.pop(RETRY_ATTEMPTS_PAYLOAD_KEY, None)
+    from src.sentica.queue import pop_and_check_tenant
+
+    pop_and_check_tenant(queue_payload)
     workspace_name = queue_item.workspace_name
 
     # Handle reconciler first - it's the only task type that doesn't require workspace_name

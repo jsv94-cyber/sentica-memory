@@ -223,6 +223,34 @@ app.include_router(deriver_metrics.router)
 # Prometheus metrics endpoint
 app.add_route("/metrics", metrics_endpoint, methods=["GET"])
 
+# Probes only. Every other path in production requires a broker token.
+_SENTICA_PROBE_PATHS = frozenset({"/health", "/metrics"})
+
+
+@app.middleware("http")
+async def sentica_production_token(
+    request: Request,
+    call_next: Callable[[Request], Awaitable[Response]],
+) -> Response:
+    """Refuse any non-probe request whose token is not for this tenant."""
+    from src.exceptions import AuthenticationException
+    from src.sentica.runtime import production_enabled
+    from src.sentica.tokens import verify_sentica_token
+
+    if production_enabled() and request.url.path not in _SENTICA_PROBE_PATHS:
+        header = request.headers.get("authorization", "")
+        token = ""
+        if header.lower().startswith("bearer "):
+            token = header.split(" ", 1)[1].strip()
+        try:
+            verify_sentica_token(token)
+        except AuthenticationException as exc:
+            return JSONResponse(
+                status_code=exc.status_code,
+                content={"detail": exc.detail},
+            )
+    return await call_next(request)
+
 
 @app.get("/health")
 async def health_check():
@@ -242,9 +270,35 @@ async def honcho_exception_handler(_request: Request, exc: HonchoException):
     )
 
 
+def _memory_unavailable(exc: Exception) -> bool:
+    """Return whether a database or proxy failure should be a clean 503."""
+    from sqlalchemy.exc import DisconnectionError, InterfaceError, OperationalError
+
+    from src.sentica.runtime import production_enabled
+
+    if not production_enabled():
+        return False
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, OperationalError | InterfaceError | DisconnectionError):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 @app.exception_handler(Exception)
 async def global_exception_handler(_request: Request, exc: Exception):
     """Handle all unhandled exceptions."""
+    if _memory_unavailable(exc):
+        # Class name only. The driver message can contain a connection target.
+        logger.error("memory unavailable: %s", exc.__class__.__name__)
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "memory unavailable"},
+        )
+
     logger.error(f"Unhandled exception: {str(exc)}", exc_info=True)
 
     if SENTRY_ENABLED:

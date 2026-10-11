@@ -668,6 +668,10 @@ class QueueManager:
 
                             try:
                                 # Extract observers from the payload (handle both old and new format)
+                                from src.sentica.queue import pop_and_check_tenant
+
+                                for item in items_to_process:
+                                    pop_and_check_tenant(dict(item.payload or {}))
                                 payload = items_to_process[0].payload
                                 observers = payload.get("observers")
                                 if observers is None:

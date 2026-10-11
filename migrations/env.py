@@ -138,7 +138,18 @@ def _prepare_schema(connection: Connection) -> None:
     schema = connection.dialect.identifier_preparer.quote_schema(target_metadata.schema)
     connection.execute(text(f"CREATE SCHEMA IF NOT EXISTS {schema}"))
     connection.execute(text(f"GRANT ALL ON SCHEMA {schema} TO current_user"))
-    connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+    # A tenant role is not a superuser. The instance init script already
+    # installs vector in the memory schema. A privilege error here means the
+    # extension is present and the role must not be able to install another.
+    try:
+        with connection.begin_nested():
+            connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+    except DBAPIError as e:
+        if getattr(e.orig, "sqlstate", None) not in OPTIONAL_EXTENSION_ERRORS:
+            raise
+        logging.getLogger("alembic").warning(
+            "Could not create extension vector; using the one already installed"
+        )
     # region ai
     # pg_trgm backs the message-search ILIKE index. Where it can't be created
     # (no privilege, or not installed on the server) it is skipped; the revision
@@ -225,14 +236,21 @@ def run_migrations_online() -> None:
     validated_url = ensure_session_pooler(url)
     configuration["sqlalchemy.url"] = validated_url
 
+    connect_args = {
+        "prepare_threshold": None,
+        "options": "-c statement_timeout=300000",  # 5 minutes in milliseconds
+    }
+    # Alembic builds its own engine, so it must repeat the proxy TLS
+    # arguments. The application engine sets the same ones in src/db.py.
+    from src.sentica.db_connect import production_connect_args
+
+    connect_args.update(production_connect_args())
+
     connectable = engine_from_config(
         configuration,
         prefix="sqlalchemy.",
         echo=False,
-        connect_args={
-            "prepare_threshold": None,
-            "options": "-c statement_timeout=300000",  # 5 minutes in milliseconds
-        },
+        connect_args=connect_args,
     )
 
     try:
