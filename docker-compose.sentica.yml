@@ -39,6 +39,8 @@ services:
     environment:
       POSTGRES_DB: postgres
       POSTGRES_USER: postgres
+      # Test-only. The instance has no password. Production network rules
+      # must make this database reachable only through the certificate proxy.
       POSTGRES_HOST_AUTH_METHOD: trust
     volumes:
       - ./database/init.sql:/docker-entrypoint-initdb.d/00-init.sql:ro

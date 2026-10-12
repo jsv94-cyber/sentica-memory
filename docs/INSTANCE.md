@@ -21,8 +21,10 @@ the process. They return no memory content. Every other path, including
 
 ## Production configuration
 
-`SENTICA_MODE=production` turns the checks on. When `SENTICA_MODE` is unset,
-the process keeps upstream behavior so the existing test suite can run.
+`SENTICA_MODE` must be `production` or `test`. Unset, empty, and any other
+value refuse to start. `production` is the single-tenant instance. `test`
+keeps upstream behavior for the suite. The image defaults to `production`.
+The local `docker-compose.yml` stack and the test commands set `test`.
 
 Required settings, with no defaults:
 
@@ -75,15 +77,13 @@ CERT_DIR="$CERT_DIR" docker compose -f docker-compose.sentica.yml up -d --build
 The acceptance test does this itself:
 
 ```bash
-SENTICA_M1_STACK=1 uv run pytest tests/sentica/test_m1_stack.py -n0
+SENTICA_MODE=test SENTICA_M1_STACK=1 uv run pytest tests/sentica/test_m1_stack.py -n0
 ```
 
 Postgres on that compose network accepts the proxy with `trust` and no
-password. The instance environment does not contain a password. Direct
-connections that skip the proxy are a network-policy concern for a later
-milestone. Do not publish the database port.
+password. That trust setting is test-only. The instance environment does
+not contain a password. Do not publish the database port.
 
 Nothing in this stack writes memory content to the host disk. Postgres data,
-Redis data, `/tmp`, and the certificate directory are tmpfs. Queue rows
-carry a tenant id. Message text in representation payloads is still the
-upstream shape and is called out in `PROGRESS.md`.
+Redis data, `/tmp`, and the certificate directory are tmpfs. Queue payloads
+live in Postgres. See `PROGRESS.md`.

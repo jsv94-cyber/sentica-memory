@@ -41,6 +41,7 @@ services:
       - CACHE_URL=redis://redis:6379/0?suppress=true
       - CACHE_ENABLED=true
       - AUTH_USE_AUTH=false
+      - SENTICA_MODE=test
     env_file:
       - path: .env
         required: false
@@ -67,6 +68,7 @@ services:
       - CACHE_URL=redis://redis:6379/0?suppress=true
       - CACHE_ENABLED=true
       - AUTH_USE_AUTH=false
+      - SENTICA_MODE=test
     env_file:
       - path: .env
         required: false

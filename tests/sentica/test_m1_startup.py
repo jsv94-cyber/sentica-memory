@@ -47,15 +47,24 @@ def _production_env(tmp_path: Path, **overrides: str) -> dict[str, str]:
     return env
 
 
-def test_unset_mode_is_not_a_tenant(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("SENTICA_MODE", raising=False)
-    assert load_instance() is None
-
-
-def test_unknown_mode_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SENTICA_MODE", "staging")
-    with pytest.raises(SenticaStartupError, match="Unknown SENTICA_MODE"):
+@pytest.mark.parametrize(
+    "value",
+    [None, "", "   ", "staging", "prod", "Production", "TEST", "Test"],
+)
+def test_rejected_modes_refuse(
+    monkeypatch: pytest.MonkeyPatch, value: str | None
+) -> None:
+    if value is None:
+        monkeypatch.delenv("SENTICA_MODE", raising=False)
+    else:
+        monkeypatch.setenv("SENTICA_MODE", value)
+    with pytest.raises(SenticaStartupError, match="production"):
         load_instance()
+
+
+def test_test_mode_does_not_load_a_tenant(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SENTICA_MODE", "test")
+    assert load_instance() is None
 
 
 def test_missing_tenant_refuses(
@@ -105,6 +114,35 @@ def test_public_bind_refuses(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) ->
         monkeypatch.delenv(key, raising=False)
     with pytest.raises(SenticaStartupError, match="private interface"):
         load_instance()
+
+
+@pytest.mark.parametrize(
+    "value",
+    [None, "", "staging", "Production"],
+)
+def test_import_refuses_bad_mode(value: str | None) -> None:
+    env = os.environ.copy()
+    if value is None:
+        env.pop("SENTICA_MODE", None)
+    else:
+        env["SENTICA_MODE"] = value
+    completed = subprocess.run(
+        [sys.executable, "-c", "import src.db"],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode != 0
+    combined = completed.stderr + completed.stdout
+    assert "SENTICA_MODE" in combined
+    assert "production" in combined
+
+
+def test_dockerfile_defaults_to_production() -> None:
+    text = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    assert "ENV SENTICA_MODE=production" in text
 
 
 def test_import_refuses_without_tenant() -> None:

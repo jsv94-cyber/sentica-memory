@@ -8,6 +8,8 @@ from pathlib import Path
 from urllib.parse import quote
 
 PRODUCTION_MODE = "production"
+TEST_MODE = "test"
+_ACCEPTED_MODES = frozenset({PRODUCTION_MODE, TEST_MODE})
 
 # Names only. Values are read from the environment and never logged.
 _REQUIRED = (
@@ -63,10 +65,21 @@ class SenticaInstance:
         return f"postgresql+psycopg://{user}@{host}:{self.proxy_port}/{self.db_name}"
 
 
-def mode() -> str | None:
-    """Return the sentica mode, or None when this process is the upstream suite."""
-    raw = os.environ.get("SENTICA_MODE", "").strip()
-    return raw or None
+def mode() -> str:
+    """Return ``production`` or ``test``. Anything else refuses to start."""
+    raw = os.environ.get("SENTICA_MODE")
+    if raw is None or not raw.strip():
+        raise SenticaStartupError(
+            "Refusing to start: SENTICA_MODE must be 'production' or 'test'"
+        )
+    selected = raw.strip()
+    if selected not in _ACCEPTED_MODES:
+        message = (
+            "Refusing to start: SENTICA_MODE "
+            + f"{selected!r} must be 'production' or 'test'"
+        )
+        raise SenticaStartupError(message)
+    return selected
 
 
 def production_enabled() -> bool:
@@ -75,21 +88,15 @@ def production_enabled() -> bool:
 
 
 def load_instance() -> SenticaInstance | None:
-    """Load production config, or return None when sentica mode is unset.
+    """Load production config, or return None in test mode.
 
     Raises:
-        SenticaStartupError: Mode is set but not production, or a required
-            value is missing, unknown, or a database password is present.
+        SenticaStartupError: Mode is missing or not production or test, or a
+            required production value is missing or a database password is set.
     """
     selected = mode()
-    if selected is None:
+    if selected == TEST_MODE:
         return None
-    if selected != PRODUCTION_MODE:
-        message = (
-            f"Unknown SENTICA_MODE {selected!r}. "
-            "The only accepted value is 'production'."
-        )
-        raise SenticaStartupError(message)
 
     missing = [name for name in _REQUIRED if not os.environ.get(name, "").strip()]
     present_passwords = [

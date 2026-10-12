@@ -9,9 +9,9 @@ release v3.3.0 (`608aec8a928da13c540262ed980c569448fb53ab`).
 | `FORK_CHANGES.md` | Record divergences from upstream. | Ground rule 1 |
 | `PROGRESS.md` | Milestone log. | Ground rule 8 |
 | `docs/MAP.md` | Map of the pinned runtime: database, auth, storage, queue, model calls, prompts. | M0 |
-| `docker-compose.yml` | Tracked local stack so `docker compose up` starts the API, deriver, Postgres with pgvector, and Redis. Redis persistence is off and its data directory is tmpfs. API and deriver `/tmp` are tmpfs. No LanceDB volume. Host ports default to 8000, 5432, and 6379 and can be moved with `SENTICA_API_PORT`, `SENTICA_POSTGRES_PORT`, and `SENTICA_REDIS_PORT`. | M0, ground rule 5 |
+| `docker-compose.yml` | Tracked local stack so `docker compose up` starts the API, deriver, Postgres with pgvector, and Redis. Redis persistence is off and its data directory is tmpfs. API and deriver `/tmp` are tmpfs. No LanceDB volume. Host ports default to 8000, 5432, and 6379 and can be moved with `SENTICA_API_PORT`, `SENTICA_POSTGRES_PORT`, and `SENTICA_REDIS_PORT`. `SENTICA_MODE=test` because the image defaults to production. Postgres `trust` auth on this file is test-only. | M0, M1, ground rule 5 |
 | `.gitignore` | Stop ignoring `/docker-compose.yml` and `/compose.yml` so the local stack can be committed. | M0 |
-| `.github/workflows/unittest.yml` | Run the upstream test suite on every pull request and every push to `main`. Removed path filters and the changes gate. | M0 |
+| `.github/workflows/unittest.yml` | Run the upstream test suite on every pull request and every push to `main`. Removed path filters and the changes gate. The job sets `SENTICA_MODE=test`. | M0, M1 |
 | `.github/workflows/push-gcp-registry-prod.yml` | Manual dispatch only, and both jobs are `if: false`. Do not push to Plastic Labs GCP or call its production webhook. | Ground rule 2 |
 | `.github/workflows/push-gcp-registry-staging.yml` | Same as production, for the staging registry and webhook. | Ground rule 2 |
 | `.github/workflows/unified-tests.yml` | Manual dispatch only. Fly and AWS jobs are `if: false`. | Ground rule 2 |
@@ -27,11 +27,14 @@ release v3.3.0 (`608aec8a928da13c540262ed980c569448fb53ab`).
 | `src/deriver/queue_manager.py` | Same tenant check on representation batches. | M1 |
 | `migrations/env.py` | Pass the proxy TLS arguments into Alembic's own engine. Treat a privilege error creating `vector` as "already installed" so a non-superuser tenant role can migrate. | M1 |
 | `docker/entrypoint.sh` | In production, bind the private interface. `private` resolves to the container's outbound address. | M1 |
-| `docker-compose.sentica.yml` | Local two-instance proof: PgBouncer client certificates, schema `memory`, tmpfs Postgres and Redis, no database password in the instance environment. | M1 |
+| `Dockerfile` | The runtime image sets `SENTICA_MODE=production`. | M1 |
+| `docker-compose.sentica.yml` | Local two-instance proof: PgBouncer client certificates, schema `memory`, tmpfs Postgres and Redis, no database password in the instance environment. Postgres `trust` auth in this file is test-only. | M1 |
+| `.github/workflows/staticanalysis.yml` | The OpenAPI drift job sets `SENTICA_MODE=test` because it imports the app. | M1 |
+| `tests/sentica/conftest.py` | The two-instance proof is not collected unless `SENTICA_M1_STACK=1`. It is not a skip. | M1 |
 | `docker/sentica/` | PgBouncer config and the SQL that creates one role and one database per tenant. | M1 |
 | `scripts/sentica_test_ca.py` | Local test CA, 48-hour client certificates, and Ed25519 token keys. No real certificates. | M1 |
 | `docs/INSTANCE.md` | How the private bind, the proxy, and the local proof fit together. | M1 |
 | `docs/MAP.md` | Line citations updated after the production engine block. | M1 |
 | `tests/sentica/test_m1_startup.py` | Startup refuses missing config, a public bind, and a database password. | M1 |
 | `tests/sentica/test_m1_tokens.py` | Tokens: expiry, issuer, tenant, admin claim, lifetime. | M1 |
-| `tests/sentica/test_m1_stack.py` | Two-instance compose proof. Skipped unless `SENTICA_M1_STACK=1`. | M1 |
+| `tests/sentica/test_m1_stack.py` | Two-instance compose proof. Run with `SENTICA_M1_STACK=1`. | M1 |

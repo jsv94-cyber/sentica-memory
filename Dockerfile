@@ -40,6 +40,7 @@ WORKDIR /app
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
+ENV SENTICA_MODE=production
 
 # Create the runtime user before copying dependencies with their final owner.
 # A recursive chown in a later layer would copy the whole virtualenv and nearly

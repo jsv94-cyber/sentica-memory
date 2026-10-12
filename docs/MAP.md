@@ -39,9 +39,10 @@ extension before migrations run.
 ## Auth and tokens
 
 Auth is off unless `AUTH_USE_AUTH` is set. `src/config.py:753` `AuthSettings`
-defaults `USE_AUTH` to false at `src/config.py:756`. When auth is off and sentica production mode is unset,
+defaults `USE_AUTH` to false at `src/config.py:756`. When auth is off and `SENTICA_MODE=test`,
 `src/security.py:215` treats every caller as an admin JWT and does not read a
 token. `SENTICA_MODE=production` is checked first and does not take that path.
+Unset, empty, and any other mode refuse to start.
 
 When auth is on, tokens are HS256 JWTs signed with `AUTH_JWT_SECRET`.
 `src/security.py:31` `JWTParams` is the claim set:
@@ -188,11 +189,11 @@ Payload shapes are `src/utils/queue_payload.py`. Task types: `representation`,
 
 The representation payload includes the message text
 (`src/utils/queue_payload.py:28` `content: str`). Summary, dream, scope, and
-deletion payloads do not. This is upstream behavior on the pin. The queue
-still lives in Postgres, which is the database, not a file on the API
-container. A later milestone has to stop putting message text in queue rows.
-M0 does not change that shape, because the pinned deriver reads `content`
-from the payload.
+deletion payloads do not. Every payload is written only to the Postgres
+`queue.payload` column (`src/models.py:594`) by the inserts in
+`src/deriver/enqueue.py`. Redis is the cache (`src/cache/client.py`), not a
+copy of the queue. The message text in that column is in the database, which
+is the store.
 
 The worker process is `python -m src.deriver` (`src/deriver/__main__.py:22`
 calls `src/deriver/queue_manager.py:1251` `main`). `src/deriver/queue_manager.py:140`

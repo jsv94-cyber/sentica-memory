@@ -28,10 +28,9 @@ Decisions:
   `AUTH_USE_AUTH=false`. Removing the password and requiring a client
   certificate is M1. Doing it in M0 would leave the pinned stack unable to
   boot, because the certificate proxy does not exist yet.
-- Representation queue payloads still include message text
-  (`src/utils/queue_payload.py:28`). The pinned deriver reads that field.
-  Changing it here would diverge from the release and break the worker.
-  Recorded in `docs/MAP.md`. A later milestone removes content from queue rows.
+- Representation queue payloads include message text
+  (`src/utils/queue_payload.py:28`). M1 checked where those payloads live
+  and closed this note. See M1.
 - Redis persistence is off and `/data` is tmpfs. API and deriver `/tmp` are
   tmpfs. Postgres data stays in the `pgdata` volume because the database is
   the store. The default vector store is pgvector, so the compose file does
@@ -46,13 +45,13 @@ Decisions:
   This machine already had an unrelated Postgres container on 5432. The
   local proof used port 5433 and did not connect to that container.
 
-Deviations from GOALS.md: none in the M0 deliverables. The two items above
-(database password, queue message text) are left as upstream behavior until
-the milestone that replaces them.
+Deviations from GOALS.md: none in the M0 deliverables. The development
+database password stayed until M1's certificate proxy. Queue message text
+was checked in M1 and stays in Postgres only.
 
 Test counts: `uv run pytest` on 2026-10-11, against the local Postgres
 on host port 5433: **3140 passed, 53 skipped, 0 failed** (132.83s). The
-53 skips are upstream (live provider and optional store tests). M0 adds
+53 skips are upstream (live provider tests and two pagination cases). M0 adds
 no skips. M0 acceptance: `tests/sentica/test_m0_baseline.py`, 7 passed.
 
 Open questions: none for M0.
@@ -75,10 +74,11 @@ Built:
 
 Decisions:
 
-- `SENTICA_MODE` unset keeps upstream behavior. The unit suite imports
-  `src.db` at startup, and a default of production would refuse to boot
-  without certificates. Unknown values still refuse to start. This is not
-  a default tenant.
+- `SENTICA_MODE` must be exactly `production` or `test`. Unset, empty,
+  misspelled, and wrong-case values refuse to start. The runtime image
+  sets `production`. The unit suite and `docker-compose.yml` set `test`
+  explicitly. Test mode does not load a tenant and does not apply the
+  production checks.
 - `AUTH_USE_AUTH` is not required in production. The production check runs
   first and never takes the upstream admin bypass, so the instance does not
   need a symmetric `JWT_SECRET`. Requiring `AUTH_USE_AUTH=true` forced that
@@ -90,24 +90,34 @@ Decisions:
   certificate proxy is `docker-compose.sentica.yml`. M0's `docker compose up`
   keeps working.
 - On the local proof network, Postgres accepts the proxy with `trust` and
-  no password. The instance environment has no password. Blocking a client
-  that skips the proxy is network policy, recorded for a later milestone.
+  no password. That trust setting is test-only, recorded in
+  `FORK_CHANGES.md`. The instance environment has no password. M9's network
+  rules must make the database reachable only through the certificate proxy.
 - `/health` and `/metrics` stay unauthenticated so a healthcheck can run.
   They return no memory content. Every other path requires a token.
-- Representation queue payloads still include message text. Same deferral
-  as M0. The tenant stamp is an extra id on the payload and is removed
-  before upstream validation.
-- The two-instance test is skipped unless `SENTICA_M1_STACK=1`. GitHub
-  Actions runs the unit suite. The compose proof was run on this machine.
+- Queue payloads live only in Postgres. The table is `queue`
+  (`src/models.py:583`). The JSONB column is `payload` (`src/models.py:594`).
+  Inserts are `src/deriver/enqueue.py:74`, `:559`, `:685`, and `:814`.
+  Representation text is `src/utils/queue_payload.py:28`. Redis
+  (`src/cache/client.py`) caches workspace, session, and collection rows. It
+  does not receive queue payloads, and the deriver does not write them to a
+  file. That satisfies ground rule 5: the database is the store. The M0
+  deferral is closed. The tenant stamp is an extra id and is removed before
+  upstream validation.
+- The two-instance proof is `tests/sentica/test_m1_stack.py`. The default
+  suite does not collect it unless `SENTICA_M1_STACK=1`. It is not marked
+  skip.
 
-Deviations from GOALS.md: the unit suite still uses a password database,
-because that is the M0 stack. The production-shaped stack does not. Queue
-message text is still present, as recorded under M0.
+Deviations from GOALS.md: the unit suite and `docker-compose.yml` still use
+a password database, with `SENTICA_MODE=test`. The production image and
+`docker-compose.sentica.yml` do not.
 
 Test counts: `uv run pytest` on 2026-10-11, against the local Postgres
-on host port 5433, with `SENTICA_M1_STACK=1`: **3158 passed, 53 skipped,
-0 failed** (260.44s). The 53 skips are the same upstream skips as M0.
-That run includes `tests/sentica/test_m1_stack.py` (6 passed). Unit checks
-for startup and tokens are `tests/sentica/test_m1_startup.py` and
-`tests/sentica/test_m1_tokens.py`. `ruff check` and `basedpyright` were
-clean on this branch.
+on host port 5433, with `SENTICA_MODE=test` and `SENTICA_M1_STACK` unset:
+**3164 passed, 53 skipped, 0 failed** (133.98s). The stack file is not in
+that count. The 53 skips are upstream and are listed in
+`.review/M1-summary.md`. The fork adds no skip.
+`SENTICA_MODE=test SENTICA_M1_STACK=1 uv run pytest tests/sentica/test_m1_stack.py -n0`:
+**6 passed, 0 failed** (71.38s). Unit checks for startup and tokens are
+`tests/sentica/test_m1_startup.py` and `tests/sentica/test_m1_tokens.py`.
+`ruff check` was clean on this branch.

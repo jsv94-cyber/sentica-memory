@@ -1,6 +1,15 @@
 #!/bin/sh
 set -e
 
+case "${SENTICA_MODE-}" in
+    production|test)
+        ;;
+    *)
+        echo "Refusing to start: SENTICA_MODE must be 'production' or 'test'" >&2
+        exit 1
+        ;;
+esac
+
 echo "Running database migrations..."
 /app/.venv/bin/python scripts/provision_db.py
 

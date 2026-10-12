@@ -1,8 +1,9 @@
 """Two-instance proof for the local certificate proxy.
 
-Skipped unless SENTICA_M1_STACK=1. The stack is Docker Compose on this
-machine: a local test CA, two PgBouncers, two APIs, two derivers, two
-Redis processes, and one Postgres whose data directory is tmpfs.
+Run with SENTICA_M1_STACK=1. The default suite does not collect this file.
+The stack is Docker Compose on this machine: a local test CA, two
+PgBouncers, two APIs, two derivers, two Redis processes, and one Postgres
+whose data directory is tmpfs.
 """
 
 from __future__ import annotations
@@ -26,11 +27,6 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519, rsa
 from cryptography.hazmat.primitives.hashes import SHA256
 from cryptography.x509.oid import NameOID
-
-pytestmark = pytest.mark.skipif(
-    os.environ.get("SENTICA_M1_STACK") != "1",
-    reason="set SENTICA_M1_STACK=1 to run the two-instance compose proof",
-)
 
 ROOT = Path(__file__).resolve().parents[2]
 COMPOSE_FILE = ROOT / "docker-compose.sentica.yml"
@@ -486,7 +482,9 @@ def test_revocation_rolls_back_and_reports_unavailable(stack: Path) -> None:
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             try:
-                with _connect(PROXY_A, stack, "tenant_a", "tenant_a", "tenant_a") as conn:
+                with _connect(
+                    PROXY_A, stack, "tenant_a", "tenant_a", "tenant_a"
+                ) as conn:
                     conn.close()
                 break
             except psycopg.Error:
@@ -535,9 +533,13 @@ def test_deriver_refuses_other_tenant(stack: Path) -> None:
                 break
         time.sleep(1)
     if error is None:
-        logs = _compose(["logs", "deriver-a", "--no-color", "--tail", "80"], check=False)
+        logs = _compose(
+            ["logs", "deriver-a", "--no-color", "--tail", "80"], check=False
+        )
         ps = _compose(["ps", "deriver-a"], check=False)
-        raise AssertionError(ps.stdout + ps.stderr + logs.stdout[-3000:] + logs.stderr[-2000:])
+        raise AssertionError(
+            ps.stdout + ps.stderr + logs.stdout[-3000:] + logs.stderr[-2000:]
+        )
     assert "SenticaTenantRefused" in str(error)
     logs = _compose(["logs", "deriver-a", "--no-color"], check=False)
     combined = logs.stdout + logs.stderr

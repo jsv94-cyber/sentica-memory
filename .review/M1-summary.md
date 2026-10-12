@@ -3,8 +3,10 @@
 One process, one tenant. The database is reached only through PgBouncer
 with a client certificate. The instance has no database password.
 
-`SENTICA_MODE` unset leaves the upstream suite unchanged. `production` is
-the only accepted mode. Anything else refuses to start.
+`SENTICA_MODE` must be `production` or `test` (`src/sentica/runtime.py:68`).
+Unset, empty, and any other value refuse to start. The runtime image sets
+`production` (`Dockerfile`). The unit suite sets `test`
+(`.github/workflows/unittest.yml`).
 
 ## Where isolation is enforced
 
@@ -66,13 +68,45 @@ init script because the role is not a superuser.
 | Killing the proxy mid-transaction leaves no inserted rows, and a later API write returns 503 `memory unavailable` | `tests/sentica/test_m1_stack.py:431` |
 | After stop, Postgres and Redis data are tmpfs and no project volume remains | `tests/sentica/test_m1_stack.py:547` and the fixture teardown |
 
-Local run on 2026-10-11: `uv run pytest` with `SENTICA_M1_STACK=1` against
-Postgres on 127.0.0.1:5433. 3158 passed, 53 skipped, 0 failed. The stack
-file itself was 6 passed. `ruff check` and `basedpyright` were clean.
+Local run on 2026-10-11, `SENTICA_MODE=test`, `SENTICA_M1_STACK` unset,
+against Postgres on 127.0.0.1:5433: 3164 passed, 53 skipped, 0 failed
+(133.98s). The stack file was not collected. Run separately with
+`SENTICA_M1_STACK=1`: 6 passed, 0 failed (71.38s). `ruff check` was clean.
+
+## Queue payloads
+
+Queue rows are inserted only into Postgres `queue.payload`
+(`src/models.py:594`) from `src/deriver/enqueue.py:74`, `:559`, `:685`, and
+`:814`. Representation text is `src/utils/queue_payload.py:28`. Redis
+(`src/cache/client.py`) is not on that path. No host file receives a queue
+payload. This is the database, which ground rule 5 names as the store. The
+M0 deferral is closed.
+
+## Skipped tests
+
+The full suite's 53 skips are all upstream. None are under `tests/sentica/`.
+The fork adds no `pytest.mark.skip` or `skipif`. `tests/sentica/test_m1_stack.py`
+is left out of collection unless `SENTICA_M1_STACK=1` (`tests/sentica/conftest.py`).
+That is not a skip.
+
+Files, from `pytest -rs` on 2026-10-11:
+
+- `tests/live_llm/test_live_anthropic.py` (2)
+- `tests/live_llm/test_live_embeddings.py` (22)
+- `tests/live_llm/test_live_gemini.py` (2)
+- `tests/live_llm/test_live_openai.py` (9)
+- `tests/live_llm/test_live_structured_output_unions.py` (6)
+- `tests/live_llm/test_live_timeouts.py` (4)
+- `tests/live_llm/test_live_tools_structured_output.py` (6)
+- `tests/routes/test_pagination_shim.py` (2)
+
+The live-provider files are skipped because `--live-llm` is not passed, or
+because a provider has an empty model set. The pagination file skips two
+cases whose endpoint has no reverse parameter.
 
 ## Decisions a reviewer should see
 
-- Unset `SENTICA_MODE` is the upstream suite, not a default tenant.
+- `SENTICA_MODE` is exactly `production` or `test`. There is no unset default.
 - Production does not set `AUTH_USE_AUTH`. Doing so required `JWT_SECRET`,
   and the instance must not hold a symmetric signing key.
 - Refusal counts are in-process (`src/sentica/refusals.py`), not Prometheus.
@@ -81,11 +115,12 @@ file itself was 6 passed. `ruff check` and `basedpyright` were clean.
   `docker compose up` keeps working. The production-shaped stack is
   `docker-compose.sentica.yml`.
 - On that compose network, Postgres trusts the proxy and has no password.
-  The instance environment does not contain one. A client that skips the
-  proxy is a network-policy item for a later milestone.
+  That trust setting is test-only (`FORK_CHANGES.md`). The instance
+  environment does not contain one. M9's network rules must make the
+  database reachable only through the certificate proxy.
 - `/health` and `/metrics` have no token. They return no memory content.
-- Representation payloads still contain message text. That is the M0
-  deferral. The tenant stamp is an id and is removed before upstream
+- Representation payloads still contain message text, and that text is only
+  in Postgres. The tenant stamp is an id and is removed before upstream
   payload models validate.
 - The local CA and certificate files are generated into `/dev/shm` by the
   test. They are not in git.

@@ -159,6 +159,8 @@ def test_compose_starts_required_services() -> None:
         service = cast(dict[str, Any], services[name])
         tmpfs = cast(list[str], service["tmpfs"])
         assert "/tmp" in tmpfs
+        environment = cast(list[str], service["environment"])
+        assert "SENTICA_MODE=test" in environment
     assert "redis-data" not in _text("docker-compose.yml")
     ignored = set(_text(".gitignore").splitlines())
     assert "/docker-compose.yml" not in ignored
@@ -177,6 +179,7 @@ def test_ci_runs_the_suite_on_every_pull_request() -> None:
     assert "if" not in test_python
     rendered = _text(".github/workflows/unittest.yml")
     assert "uv run pytest" in rendered
+    assert "SENTICA_MODE: test" in rendered
 
 
 def test_external_deploy_workflows_do_not_run_automatically() -> None:

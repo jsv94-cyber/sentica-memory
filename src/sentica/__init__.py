@@ -1,5 +1,6 @@
 """Sentica single-tenant instance controls.
 
-Production behavior is active only when ``SENTICA_MODE=production``.
-The upstream test suite leaves that variable unset and is unchanged.
+``SENTICA_MODE`` must be ``production`` or ``test``. Any other value,
+including unset, refuses to start. Production is the single-tenant instance.
+Test keeps the upstream behavior for the suite.
 """

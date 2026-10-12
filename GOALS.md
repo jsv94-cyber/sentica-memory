@@ -120,7 +120,7 @@ sentica-memory is Sentica's memory service: a public fork of plastic-labs/honcho
 
 - Production Docker images for the API and the deriver; health and readiness endpoints; Prometheus metrics (requests, latency, queue depth, model tokens by purpose, filtered conclusions, decay and prune counts).
 - The instance runs beside Sentica's agent container on the tenant's VM, so images run hardened: a dedicated non-root Linux user distinct from the agent's, a read-only root filesystem with tmpfs for temporary files and certificates, all Linux capabilities dropped, a seccomp profile, no volumes shared with any other container, and verified to run under the gVisor runtime (`runsc`). Document the exact run flags in `docs/DEPLOY.md`.
-- Network: outbound only to the database proxy and the model gateway; inbound only from the broker's connection on the private interface; no route from the agent container to the instance or to the database proxy. Document the rules Sentica must apply.
+- Network: outbound only to the database proxy and the model gateway; inbound only from the broker's connection on the private interface; no route from the agent container to the instance or to the database proxy. Network rules must make the database reachable only through the certificate proxy. Document the rules Sentica must apply.
 - Measure and record in `docs/DEPLOY.md`: memory and CPU for the instance at idle and under a load test of 1,000 messages per hour, so Sentica can size tenant VMs.
 - `docs/CONFIG.md` (every setting), `SECURITY.md` (the isolation model and how to report a vulnerability), `docs/UPSTREAM_SYNC.md` (how to merge a new upstream release with the fork changes).
 - Tag `v0.1.0-sentica` and write release notes.
