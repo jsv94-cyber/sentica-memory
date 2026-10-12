@@ -683,3 +683,8 @@ class SessionPeer(Base):
     internal_metadata: Mapped[dict[str, Any]]
     joined_at: Mapped[datetime.datetime]
     left_at: Mapped[datetime.datetime | None]
+
+
+from src.sentica.queue import install_queue_stamp  # noqa: E402
+
+install_queue_stamp(QueueItem)

@@ -1,9 +1,12 @@
+import asyncio
 import logging
+import os
 import re
 import time
 import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
+from typing import Any
 
 import sentry_sdk
 from fastapi import FastAPI, Request, Response
@@ -262,7 +265,12 @@ async def health_check():
 @app.exception_handler(HonchoException)
 async def honcho_exception_handler(_request: Request, exc: HonchoException):
     """Handle all Honcho-specific exceptions."""
-    logger.error(f"{exc.__class__.__name__}: {exc.detail}", exc_info=exc)
+    from src.sentica.runtime import production_enabled
+
+    if production_enabled():
+        logger.error("%s", exc.__class__.__name__)
+    else:
+        logger.error(f"{exc.__class__.__name__}: {exc.detail}", exc_info=exc)
 
     return JSONResponse(
         status_code=exc.status_code,
@@ -273,6 +281,7 @@ async def honcho_exception_handler(_request: Request, exc: HonchoException):
 def _memory_unavailable(exc: Exception) -> bool:
     """Return whether a database or proxy failure should be a clean 503."""
     from sqlalchemy.exc import DisconnectionError, InterfaceError, OperationalError
+    from sqlalchemy.exc import TimeoutError as SqlTimeoutError
 
     from src.sentica.runtime import production_enabled
 
@@ -282,7 +291,14 @@ def _memory_unavailable(exc: Exception) -> bool:
     seen: set[int] = set()
     while current is not None and id(current) not in seen:
         seen.add(id(current))
-        if isinstance(current, OperationalError | InterfaceError | DisconnectionError):
+        if isinstance(
+            current,
+            OperationalError
+            | InterfaceError
+            | DisconnectionError
+            | SqlTimeoutError
+            | TimeoutError,
+        ):
             return True
         current = current.__cause__ or current.__context__
     return False
@@ -299,7 +315,12 @@ async def global_exception_handler(_request: Request, exc: Exception):
             content={"detail": "memory unavailable"},
         )
 
-    logger.error(f"Unhandled exception: {str(exc)}", exc_info=True)
+    from src.sentica.runtime import production_enabled
+
+    if production_enabled():
+        logger.error("unhandled: %s", exc.__class__.__name__)
+    else:
+        logger.error(f"Unhandled exception: {str(exc)}", exc_info=True)
 
     if SENTRY_ENABLED:
         sentry_sdk.capture_exception(exc)
@@ -347,3 +368,62 @@ async def track_request(
     finally:
         reset_client_context(client_tokens)
         request_context.reset(token)
+
+
+class _BoundRequest:
+    """Return 503 when a request does not finish within 8 seconds.
+
+    The handler may be blocked in a driver call that does not notice
+    cancellation. This middleware answers the client anyway and shuts
+    the database sockets that call is using.
+    """
+
+    def __init__(self, asgi_app: Callable[..., Awaitable[None]]) -> None:
+        self.asgi_app: Callable[..., Awaitable[None]] = asgi_app
+
+    async def __call__(self, scope: dict[str, object], receive: Any, send: Any) -> None:
+        if scope.get("type") != "http":
+            await self.asgi_app(scope, receive, send)
+            return
+        if os.environ.get("SENTICA_MODE", "").strip() != "production":
+            await self.asgi_app(scope, receive, send)
+            return
+        started = False
+
+        async def send_wrapper(message: dict[str, object]) -> None:
+            nonlocal started
+            if message.get("type") == "http.response.start":
+                started = True
+            await send(message)
+
+        async def _run() -> None:
+            await self.asgi_app(scope, receive, send_wrapper)
+
+        task: asyncio.Task[None] = asyncio.create_task(_run())
+        done, _pending = await asyncio.wait({task}, timeout=8)
+        if task in done:
+            error = task.exception()
+            if error is not None:
+                raise error
+            return
+        from src.sentica.db_connect import abort_checked_out_connections
+
+        abort_checked_out_connections()
+        task.cancel()
+        if started:
+            return
+        body = b'{"detail":"memory unavailable"}'
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 503,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(len(body)).encode()),
+                ],
+            }
+        )
+        await send({"type": "http.response.body", "body": body})
+
+
+app.add_middleware(_BoundRequest)

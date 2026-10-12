@@ -611,9 +611,18 @@ class QueueManager:
                 )
                 return True
 
-        error_msg = f"{error.__class__.__name__}: {str(error)}"
+        from src.sentica.queue import SenticaTenantRefused
+
+        error_msg = error.__class__.__name__
+        if not isinstance(error, SenticaTenantRefused):
+            error_msg = f"{error.__class__.__name__}: {str(error)}"
         try:
-            if items:
+            if items and isinstance(error, SenticaTenantRefused):
+                for item in items:
+                    await self.mark_queue_item_as_errored(
+                        item, work_unit_key, error.__class__.__name__
+                    )
+            elif items:
                 # Clear retry metadata only after the terminal mark commits so a
                 # failed mark leaves the shared budget intact for the next claim.
                 await self.mark_queue_item_as_errored(
@@ -651,6 +660,12 @@ class QueueManager:
                         break
                     try:
                         if work_unit.task_type == "representation":
+                            # Tenant is on the queue row. Check it before the
+                            # message query in get_queue_item_batch.
+                            if not await self.reject_foreign_queue_rows(
+                                work_unit_key, ownership.aqs_id
+                            ):
+                                break
                             batch_result = await self.get_queue_item_batch(
                                 work_unit.task_type, work_unit_key, ownership.aqs_id
                             )
@@ -799,6 +814,50 @@ class QueueManager:
                     logger.debug(
                         f"Work unit {work_unit_key} already cleaned up by another worker, skipping webhook"
                     )
+
+    async def reject_foreign_queue_rows(self, work_unit_key: str, aqs_id: str) -> bool:
+        """Error every queue row for another tenant before messages are loaded.
+
+        Returns:
+            True when at least one row for this tenant is still unprocessed.
+        """
+        from src.sentica.queue import SenticaTenantRefused, pop_and_check_tenant
+        from src.sentica.runtime import production_enabled
+
+        if not production_enabled():
+            return True
+        async with tracked_db("reject_foreign_queue_rows") as db:
+            ownership = await db.execute(
+                select(models.ActiveQueueSession.id)
+                .where(models.ActiveQueueSession.work_unit_key == work_unit_key)
+                .where(models.ActiveQueueSession.id == aqs_id)
+            )
+            if ownership.scalar_one_or_none() is None:
+                return False
+            result = await db.execute(
+                select(models.QueueItem)
+                .where(models.QueueItem.work_unit_key == work_unit_key)
+                .where(~models.QueueItem.processed)
+                .order_by(models.QueueItem.id)
+            )
+            rows = list(result.scalars().all())
+            mismatched: list[int] = []
+            matched = 0
+            for item in rows:
+                try:
+                    pop_and_check_tenant(dict(item.payload or {}))
+                except SenticaTenantRefused:
+                    mismatched.append(int(item.id))
+                else:
+                    matched += 1
+            if mismatched:
+                await db.execute(
+                    update(models.QueueItem)
+                    .where(models.QueueItem.id.in_(mismatched))
+                    .values(processed=True, error="SenticaTenantRefused")
+                )
+            await db.commit()
+        return matched > 0
 
     @sentry_sdk.trace
     async def get_next_queue_item(

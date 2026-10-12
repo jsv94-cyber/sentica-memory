@@ -89,10 +89,17 @@ Decisions:
 - `docker-compose.yml` still has the development database password. The
   certificate proxy is `docker-compose.sentica.yml`. M0's `docker compose up`
   keeps working.
-- On the local proof network, Postgres accepts the proxy with `trust` and
-  no password. That trust setting is test-only, recorded in
-  `FORK_CHANGES.md`. The instance environment has no password. M9's network
-  rules must make the database reachable only through the certificate proxy.
+- Jose accepted queue content in the Postgres `queue` table. Ground rule 5
+  now says host-local stores (Redis, files) carry ids only, and the Postgres
+  queue table may hold content because the database is the store. The M9
+  sentence stays: network rules must make the database reachable only
+  through the certificate proxy. The M1 proof stack already isolates it.
+- The proof stack uses three networks. Postgres `pg_hba.conf` accepts TCP
+  only from the two PgBouncer addresses, as the matching tenant role. The
+  image variable `POSTGRES_HOST_AUTH_METHOD=trust` is only there because the
+  official image refuses to boot without it. The mounted `hba_file` is what
+  Postgres uses. Redis generates a password at start and keeps it on a
+  tmpfs volume. That password is not in the compose file.
 - `/health` and `/metrics` stay unauthenticated so a healthcheck can run.
   They return no memory content. Every other path requires a token.
 - Queue payloads live only in Postgres. The table is `queue`
@@ -104,20 +111,20 @@ Decisions:
   file. That satisfies ground rule 5: the database is the store. The M0
   deferral is closed. The tenant stamp is an extra id and is removed before
   upstream validation.
-- The two-instance proof is `tests/sentica/test_m1_stack.py`. The default
-  suite does not collect it unless `SENTICA_M1_STACK=1`. It is not marked
-  skip.
+- The two-instance proof is `tests/sentica/test_m1_stack.py`. It is
+  collected with the rest of the suite. CI job `test-m1-stack` runs it and
+  fails if it collects zero tests. Image publish workflows stay `if: false`
+  until M9.
 
 Deviations from GOALS.md: the unit suite and `docker-compose.yml` still use
 a password database, with `SENTICA_MODE=test`. The production image and
 `docker-compose.sentica.yml` do not.
 
-Test counts: `uv run pytest` on 2026-10-11, against the local Postgres
-on host port 5433, with `SENTICA_MODE=test` and `SENTICA_M1_STACK` unset:
-**3164 passed, 53 skipped, 0 failed** (133.98s). The stack file is not in
-that count. The 53 skips are upstream and are listed in
-`.review/M1-summary.md`. The fork adds no skip.
-`SENTICA_MODE=test SENTICA_M1_STACK=1 uv run pytest tests/sentica/test_m1_stack.py -n0`:
-**6 passed, 0 failed** (71.38s). Unit checks for startup and tokens are
-`tests/sentica/test_m1_startup.py` and `tests/sentica/test_m1_tokens.py`.
-`ruff check` was clean on this branch.
+Test counts: `uv run pytest` on 2026-10-12, against the local Postgres
+on host port 5433, with `SENTICA_MODE=test`: **3207 passed, 53 skipped,
+1 failed** (188.28s). The one failure was a stale `docs/MAP.md` citation
+for `create_async_engine`. That line is now `src/db.py:74`, and
+`test_map_citations_resolve` passed afterward. The 53 skips are upstream.
+The stack file is in the 3207. A separate
+`uv run pytest tests/sentica/test_m1_stack.py -n0` was **14 passed**
+(102.66s). The fork adds no skip.

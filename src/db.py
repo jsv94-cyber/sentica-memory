@@ -1,3 +1,4 @@
+import asyncio
 import contextvars
 import logging
 from typing import Any
@@ -14,8 +15,11 @@ from sqlalchemy.pool import NullPool, QueuePool
 from src.config import settings
 from src.sentica.db_connect import (
     apply_production_engine_args,
+    install_call_timeout,
     install_certificate_reload,
 )
+from src.sentica.log_policy import install_production_log_filter
+from src.sentica.runtime import capped_pool_recycle
 from src.telemetry.prometheus.metrics import (
     db_connections_established_counter,
     db_connections_open_gauge,
@@ -55,7 +59,11 @@ else:
         }
     )
     if _sentica_instance is not None:
-        engine_kwargs["pool_recycle"] = min(int(engine_kwargs["pool_recycle"]), 3600)
+        engine_kwargs["pool_recycle"] = capped_pool_recycle(
+            int(engine_kwargs["pool_recycle"])
+        )
+        engine_kwargs["pool_timeout"] = min(int(engine_kwargs["pool_timeout"]), 8)
+        engine_kwargs["hide_parameters"] = True
 
 _connection_uri = settings.DB.CONNECTION_URI
 if _sentica_instance is not None:
@@ -66,12 +74,47 @@ if _sentica_instance is not None:
 engine = create_async_engine(
     _connection_uri,
     connect_args=connect_args,
-    echo=settings.DB.SQL_DEBUG,
+    echo=False if _sentica_instance is not None else settings.DB.SQL_DEBUG,
     **engine_kwargs,
 )
 
 if _sentica_instance is not None:
     install_certificate_reload(engine, _sentica_instance)
+    install_call_timeout(engine.sync_engine)
+    install_production_log_filter()
+
+
+class _BoundedSession(AsyncSession):
+    """Fail a database call that stays silent for 8 seconds.
+
+    A paused proxy still acknowledges TCP, so keepalives and
+    tcp_user_timeout do not fire while the client waits to read. The
+    bound is inside this process and becomes "memory unavailable".
+    """
+
+    async def execute(self, statement: Any, *args: Any, **kwargs: Any) -> Any:
+        return await asyncio.wait_for(
+            super().execute(statement, *args, **kwargs), timeout=8
+        )
+
+    async def scalar(self, statement: Any, *args: Any, **kwargs: Any) -> Any:
+        return await asyncio.wait_for(
+            super().scalar(statement, *args, **kwargs), timeout=8
+        )
+
+    async def scalars(self, statement: Any, *args: Any, **kwargs: Any) -> Any:
+        return await asyncio.wait_for(
+            super().scalars(statement, *args, **kwargs), timeout=8
+        )
+
+    async def commit(self) -> None:
+        await asyncio.wait_for(super().commit(), timeout=8)
+
+    async def flush(self, objects: Any = None) -> None:
+        await asyncio.wait_for(super().flush(objects), timeout=8)
+
+
+_session_class = _BoundedSession if _sentica_instance is not None else AsyncSession
 
 # A vanilla AsyncSession is lazy: it checks out a pooled connection on the first
 # DB-touching call (not at construction) and couples the checkout to the
@@ -84,7 +127,7 @@ SessionLocal = async_sessionmaker(
     autoflush=False,
     expire_on_commit=False,
     bind=engine,
-    class_=AsyncSession,
+    class_=_session_class,
 )
 
 # Read-only engine: shares `engine`'s pool, but checks connections out in DBAPI
@@ -102,7 +145,7 @@ ReadSessionLocal = async_sessionmaker(
     autoflush=False,
     expire_on_commit=False,
     bind=read_engine,
-    class_=AsyncSession,
+    class_=_session_class,
 )
 
 

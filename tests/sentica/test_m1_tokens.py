@@ -8,12 +8,13 @@ from pathlib import Path
 import jwt
 import pytest
 from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import ed25519
+from cryptography.hazmat.primitives.asymmetric import ed25519, rsa
+from cryptography.hazmat.primitives.serialization import load_pem_public_key
 
 from src.exceptions import AuthenticationException
 from src.sentica.queue import SenticaTenantRefused, pop_and_check_tenant
 from src.sentica.refusals import refusal_count, reset_refusals
-from src.sentica.runtime import SenticaInstance
+from src.sentica.runtime import TOKEN_AUDIENCE, SenticaInstance
 from src.sentica.tokens import verify_sentica_token
 
 ISSUER = "sentica-broker"
@@ -24,6 +25,8 @@ def _instance(
 ) -> SenticaInstance:
     public_path = tmp_path / "token.pub"
     public_path.write_bytes(public_pem)
+    loaded = load_pem_public_key(public_pem)
+    assert isinstance(loaded, ed25519.Ed25519PublicKey)
     cert = tmp_path / "client.crt"
     key = tmp_path / "client.key"
     ca = tmp_path / "ca.crt"
@@ -39,6 +42,7 @@ def _instance(
         key_path=key,
         ca_path=ca,
         token_public_key_path=public_path,
+        token_public_key=loaded,
         token_issuer=ISSUER,
         bind_host="127.0.0.1",
     )
@@ -69,6 +73,7 @@ def _token(
         "exp": now + lifetime,
         "tenant_id": tenant,
         "request_id": request_id,
+        "aud": TOKEN_AUDIENCE,
         "w": "general",
     }
     if extra:
@@ -147,3 +152,49 @@ def test_deriver_task_without_tenant_is_refused(
     with pytest.raises(SenticaTenantRefused):
         pop_and_check_tenant({"task_type": "dream"})
     assert refusal_count("missing_tenant") == 1
+
+
+def _none_token(payload: dict[str, object]) -> str:
+    import base64
+    import json
+
+    def _part(value: dict[str, object]) -> str:
+        raw = base64.urlsafe_b64encode(json.dumps(value).encode()).decode()
+        return raw.rstrip("=")
+
+    return _part({"alg": "none", "typ": "JWT"}) + "." + _part(payload) + "."
+
+
+def test_none_hs256_and_algorithm_mismatch_are_forged(tmp_path: Path) -> None:
+    reset_refusals()
+    private, public_pem = _keys()
+    del private
+    instance = _instance(tmp_path, public_pem)
+    now = int(time.time())
+    payload: dict[str, object] = {
+        "iss": ISSUER,
+        "iat": now,
+        "exp": now + 60,
+        "tenant_id": "tenant-a",
+        "request_id": "req-alg",
+        "aud": TOKEN_AUDIENCE,
+    }
+    hs256 = jwt.encode(payload, "secret", algorithm="HS256")
+    assert isinstance(hs256, str)
+    with pytest.raises(AuthenticationException, match="forged"):
+        verify_sentica_token(hs256, instance)
+    with pytest.raises(AuthenticationException, match="forged"):
+        verify_sentica_token(_none_token(payload), instance)
+    rsa_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    mismatched = jwt.encode(payload, rsa_key, algorithm="RS256")
+    assert isinstance(mismatched, str)
+    with pytest.raises(AuthenticationException, match="forged"):
+        verify_sentica_token(mismatched, instance)
+    missing_aud = dict(payload)
+    missing_aud.pop("aud")
+    ed = _keys()[0]
+    without_aud = jwt.encode(missing_aud, ed, algorithm="EdDSA")
+    assert isinstance(without_aud, str)
+    with pytest.raises(AuthenticationException, match="forged"):
+        verify_sentica_token(without_aud, instance)
+    assert refusal_count("forged") == 4

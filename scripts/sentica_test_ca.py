@@ -8,6 +8,7 @@ The private token keys stay in the output directory the caller chooses
 from __future__ import annotations
 
 import argparse
+import shutil
 from datetime import UTC, datetime, timedelta
 from ipaddress import IPv4Address
 from pathlib import Path
@@ -138,6 +139,8 @@ def main() -> None:
 
     _client(out, ca_key, ca_name, "tenant_a")
     _client(out, ca_key, ca_name, "tenant_b")
+    _client(out, ca_key, ca_name, "sentica_operator")
+    shutil.copyfile(out / "ca.crt", out / "client-ca.crt")
     _server(out, ca_key, ca_name, "pgbouncer-a")
     _server(out, ca_key, ca_name, "pgbouncer-b")
     _token_key(out, "tenant-a")

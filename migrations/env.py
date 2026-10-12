@@ -136,7 +136,16 @@ def ensure_session_pooler(connection_uri: str) -> str:
 
 def _prepare_schema(connection: Connection) -> None:
     schema = connection.dialect.identifier_preparer.quote_schema(target_metadata.schema)
-    connection.execute(text(f"CREATE SCHEMA IF NOT EXISTS {schema}"))
+    raw_schema = target_metadata.schema
+    # CREATE SCHEMA needs CREATE on the database even when the schema already
+    # exists. The tenant role does not have that privilege. The init script
+    # creates the schema, so a present schema is left alone.
+    exists = connection.execute(
+        text("SELECT 1 FROM information_schema.schemata WHERE schema_name = :schema"),
+        {"schema": raw_schema},
+    ).scalar()
+    if exists is None:
+        connection.execute(text(f"CREATE SCHEMA IF NOT EXISTS {schema}"))
     connection.execute(text(f"GRANT ALL ON SCHEMA {schema} TO current_user"))
     # A tenant role is not a superuser. The instance init script already
     # installs vector in the memory schema. A privilege error here means the
@@ -246,10 +255,13 @@ def run_migrations_online() -> None:
 
     connect_args.update(production_connect_args())
 
+    from src.sentica.runtime import production_enabled
+
     connectable = engine_from_config(
         configuration,
         prefix="sqlalchemy.",
         echo=False,
+        hide_parameters=production_enabled(),
         connect_args=connect_args,
     )
 

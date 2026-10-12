@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
-from typing import Any
+import os
+from typing import Any, cast
+
+from sqlalchemy import event
+from sqlalchemy.orm import Session
+from sqlalchemy.sql.dml import Insert
 
 from .refusals import record_refusal
 from .runtime import production_enabled, require_instance
+
+_stamp_installed = False
 
 
 class SenticaTenantRefused(RuntimeError):
@@ -33,6 +40,55 @@ def stamp_queue_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         payload["tenant_id"] = tenant_id
         record["payload"] = payload
     return records
+
+
+def install_queue_stamp(queue_item_cls: type[Any]) -> None:
+    """Stamp every QueueItem insert in production, including ORM inserts."""
+    global _stamp_installed
+    if _stamp_installed:
+        return
+    event.listen(queue_item_cls, "before_insert", _stamp_orm_item)
+    event.listen(Session, "do_orm_execute", _stamp_core_insert)
+    _stamp_installed = True
+
+
+def _stamp_orm_item(_mapper: Any, _connection: Any, target: Any) -> None:
+    if os.environ.get("SENTICA_MODE", "").strip() != "production":
+        return
+    payload = dict(target.payload or {})
+    payload["tenant_id"] = require_instance().tenant_id
+    target.payload = payload
+
+
+def _stamp_core_insert(orm_execute_state: Any) -> None:
+    if os.environ.get("SENTICA_MODE", "").strip() != "production":
+        return
+    statement = orm_execute_state.statement
+    if not isinstance(statement, Insert):
+        return
+    table = getattr(statement, "table", None)
+    if table is None or table.name != "queue":
+        return
+    tenant_id = require_instance().tenant_id
+    params: object = orm_execute_state.parameters
+    rows: list[dict[str, Any]] = []
+    if isinstance(params, dict):
+        rows = [cast(dict[str, Any], params)]
+    elif isinstance(params, list | tuple):
+        for item in cast(tuple[object, ...], params):
+            if isinstance(item, dict):
+                rows.append(cast(dict[str, Any], item))
+    else:
+        return
+    for row in rows:
+        if "payload" not in row:
+            continue
+        raw_payload: object = row.get("payload")
+        payload: dict[str, Any] = (
+            cast(dict[str, Any], raw_payload) if isinstance(raw_payload, dict) else {}
+        )
+        payload["tenant_id"] = tenant_id
+        row["payload"] = payload
 
 
 def pop_and_check_tenant(payload: dict[str, Any]) -> None:

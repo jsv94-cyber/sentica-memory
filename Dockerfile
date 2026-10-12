@@ -70,9 +70,17 @@ COPY --chown=app:app pyproject.toml /app/pyproject.toml
 # Copy config files - this will copy config.toml if it exists, and config.toml.example
 COPY --chown=app:app config.toml* /app/
 
+# The default image is a production image. A test-stack build can opt out.
+ARG SENTICA_BAKE_PRODUCTION_MARKER=true
+RUN if [ "$SENTICA_BAKE_PRODUCTION_MARKER" = "true" ]; then \
+        printf '%s\n' production > /app/.sentica-production-image; \
+    fi \
+    && chown app:app /app/.sentica-production-image 2>/dev/null || true \
+    && chmod 755 /app/docker/entrypoint.sh
+
 # Switch to non-root user
 USER app
 
 EXPOSE 8000
 
-CMD ["fastapi", "run", "--host", "0.0.0.0", "src/main.py"]
+ENTRYPOINT ["/app/docker/entrypoint.sh"]

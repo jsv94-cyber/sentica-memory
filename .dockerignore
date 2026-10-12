@@ -1,6 +1,7 @@
 fly.toml
 .env
 .env.template
+config.toml
 *.md
 docs/**
 .DS_Store

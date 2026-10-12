@@ -5,10 +5,9 @@ certificate-authenticated proxy. It does not hold a database password.
 
 ## Private interface
 
-Set `SENTICA_BIND_HOST` to the address of the private interface Sentica's
-broker uses. The value `private` in `docker/entrypoint.sh` resolves that to
-the container's outbound interface address before the process starts.
-`0.0.0.0`, `::`, and an empty value refuse to start.
+Set `SENTICA_BIND_HOST` to the explicit address of the private interface
+Sentica's broker uses. A hostname, `private`, `0.0.0.0`, `::`, and an empty
+value refuse to start.
 
 The API must never be published to the internet, and it must never be
 reachable from an agent container. The broker is the only client. In the
@@ -40,9 +39,11 @@ Required settings, with no defaults:
 password and uses `sslmode=verify-full`.
 
 Client certificates are valid for 48 hours and are meant to be replaced
-every 24 hours. New connections read the certificate files again. A pooled
-connection whose certificate file changed is dropped on checkout. Pooled
-connections are also recycled after at most one hour.
+every 24 hours. New connections read the certificate and key files again.
+Replace them by writing a temporary file in the same directory and renaming
+it onto the destination, certificate and key together, so a reader never
+sees a partial pair. A pooled connection is dropped on checkout when either
+file changes. Pooled connections are also recycled after at most one hour.
 
 Tokens are EdDSA or RS256, checked with the public key on the instance.
 The issuer, an expiry of at most 5 minutes, a request id, and `tenant_id`
@@ -77,12 +78,13 @@ CERT_DIR="$CERT_DIR" docker compose -f docker-compose.sentica.yml up -d --build
 The acceptance test does this itself:
 
 ```bash
-SENTICA_MODE=test SENTICA_M1_STACK=1 uv run pytest tests/sentica/test_m1_stack.py -n0
+SENTICA_MODE=test uv run pytest tests/sentica/test_m1_stack.py -n0
 ```
 
-Postgres on that compose network accepts the proxy with `trust` and no
-password. That trust setting is test-only. The instance environment does
-not contain a password. Do not publish the database port.
+Postgres on that compose network accepts TCP only from the two PgBouncer
+addresses, and only as the matching tenant role. That allowlist is
+test-only. The instance environment does not contain a password. Do not
+publish the database port.
 
 Nothing in this stack writes memory content to the host disk. Postgres data,
 Redis data, `/tmp`, and the certificate directory are tmpfs. Queue payloads

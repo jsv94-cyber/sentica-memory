@@ -26,7 +26,13 @@ logger = logging.getLogger(__name__)
 
 def start_metrics_server() -> None:
     """Start the Prometheus metrics HTTP server on port 9090."""
-    start_http_server(9090)
+    from src.sentica.runtime import load_instance
+
+    instance = load_instance()
+    if instance is not None:
+        start_http_server(9090, addr=instance.bind_host)
+    else:
+        start_http_server(9090)
     # Expose DB connection-pool stats for this deriver instance.
     register_db_pool_collector("deriver")
     register_db_query_instrumentation("deriver")

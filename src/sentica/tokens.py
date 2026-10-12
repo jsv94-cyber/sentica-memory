@@ -3,22 +3,24 @@
 from __future__ import annotations
 
 import datetime
-from pathlib import Path
 from typing import NoReturn
 
 import jwt
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicKey
-from cryptography.hazmat.primitives.serialization import load_pem_public_key
 
 from src.exceptions import AuthenticationException
 from src.security import JWTParams
 
 from .refusals import record_refusal
-from .runtime import SenticaInstance, production_enabled, require_instance
+from .runtime import (
+    TOKEN_AUDIENCE,
+    SenticaInstance,
+    production_enabled,
+    require_instance,
+)
 
 _MAX_LIFETIME = datetime.timedelta(minutes=5)
-_ALLOWED_ALGS = ("EdDSA", "RS256")
 
 
 def _refuse(reason: str, detail: str) -> NoReturn:
@@ -26,15 +28,11 @@ def _refuse(reason: str, detail: str) -> NoReturn:
     raise AuthenticationException(detail)
 
 
-def _public_key(path: Path) -> Ed25519PublicKey | RSAPublicKey:
-    try:
-        key = load_pem_public_key(path.read_bytes())
-    except (OSError, ValueError) as exc:
-        record_refusal("unreadable_token_key")
-        raise AuthenticationException("token verification key is unreadable") from exc
-    if not isinstance(key, Ed25519PublicKey | RSAPublicKey):
-        _refuse("forged", "forged token")
-    return key
+def _algorithm(key: Ed25519PublicKey | RSAPublicKey) -> str:
+    """Use the key type. The token header is not trusted."""
+    if isinstance(key, Ed25519PublicKey):
+        return "EdDSA"
+    return "RS256"
 
 
 def verify_sentica_token(
@@ -57,23 +55,15 @@ def verify_sentica_token(
     if not token or not token.strip():
         _refuse("missing_token", "missing token")
 
-    try:
-        header = jwt.get_unverified_header(token)
-    except jwt.PyJWTError as exc:
-        record_refusal("forged")
-        raise AuthenticationException("forged token") from exc
-
-    alg = header.get("alg")
-    if alg not in _ALLOWED_ALGS:
-        _refuse("forged", "forged token")
-
+    key = current.token_public_key
     try:
         decoded = jwt.decode(
             token,
-            _public_key(current.token_public_key_path),
-            algorithms=[alg],
+            key,
+            algorithms=[_algorithm(key)],
             issuer=current.token_issuer,
-            options={"require": ["exp", "iat", "iss"]},
+            audience=TOKEN_AUDIENCE,
+            options={"require": ["exp", "iat", "iss", "aud"]},
         )
     except jwt.ExpiredSignatureError as exc:
         record_refusal("expired")
@@ -81,7 +71,7 @@ def verify_sentica_token(
     except jwt.InvalidIssuerError as exc:
         record_refusal("wrong_issuer")
         raise AuthenticationException("wrong issuer") from exc
-    except jwt.PyJWTError as exc:
+    except Exception as exc:
         record_refusal("forged")
         raise AuthenticationException("forged token") from exc
 

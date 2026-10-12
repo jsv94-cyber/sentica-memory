@@ -1,126 +1,72 @@
 # M1 review summary
 
-One process, one tenant. The database is reached only through PgBouncer
-with a client certificate. The instance has no database password.
+PR #2, branch `m1-single-tenant`. The reviews below are of `987c6f2a`.
+Commit `46746649` closed the fail-open mode gap. This round closes the rest.
 
-`SENTICA_MODE` must be `production` or `test` (`src/sentica/runtime.py:68`).
-Unset, empty, and any other value refuse to start. The runtime image sets
-`production` (`Dockerfile`). The unit suite sets `test`
-(`.github/workflows/unittest.yml`).
+Jose's rulings, recorded in `PROGRESS.md`:
 
-## Where isolation is enforced
+- Queue content may sit in the Postgres `queue` table. Host-local stores
+  carry ids only. `GOALS.md` ground rule 5 says that.
+- The M9 network sentence stays. The M1 proof stack isolates the database
+  and Redis now. It does not wait for M9.
 
-Startup (`src/sentica/runtime.py:77`). Missing tenant, proxy address, client
-certificate, key, proxy CA, token public key, issuer, or bind host refuses
-to start. A database password in `DB_CONNECTION_URI`, `DATABASE_URL`,
-`POSTGRES_PASSWORD`, `DB_PASSWORD`, or `PGPASSWORD` refuses to start
-(`src/sentica/runtime.py:28`). Bind addresses `0.0.0.0`, `::`, and empty
-refuse (`src/sentica/runtime.py:107`). Importing `src.db` in production
-without a tenant exits before the server listens
-(`tests/sentica/test_m1_startup.py:110`).
+## Already fixed in 46746649
 
-Database (`src/db.py:62`). The URI is passwordless and points at the proxy.
-`settings.DB.SCHEMA` is `memory`. Pool recycle is capped at 3600 seconds
-(`src/db.py:58`). TLS is `sslmode=verify-full` with the client certificate,
-key, and proxy CA (`src/sentica/db_connect.py:23`). Checkout drops a pooled
-connection when the certificate file changes
-(`src/sentica/db_connect.py:46`). Alembic builds a second engine, so the
-same TLS arguments are applied in `migrations/env.py` before
-`engine_from_config`.
+| Finding | Fixed where | Test |
+| --- | --- | --- |
+| B1, unset, empty, misspelled, and wrong-case `SENTICA_MODE` | `src/sentica/runtime.py:95` `mode()` | `test_rejected_modes_refuse` |
+| Image default `SENTICA_MODE=production` | `Dockerfile:43` | `test_dockerfile_defaults_to_production` |
+| CI and Compose set `test` explicitly | `.github/workflows/unittest.yml`, `docker-compose.yml` | `test_rejected_modes_refuse` |
+| Queue text stays in Postgres (Jose, this round) | `GOALS.md` ground rule 5 | no code change |
+| M9 network sentence | `GOALS.md` M9 | left in place |
 
-API tokens (`src/main.py:231` and `src/security.py:209`). Every path except
-`/health` and `/metrics` (`src/main.py:227`) requires a broker token.
-Production verification runs before the upstream `USE_AUTH=false` admin
-bypass, so that bypass is not reachable. Tokens are EdDSA or RS256, checked
-with the public key only (`src/sentica/tokens.py:40`). Issuer, expiry of at
-most 5 minutes, request id, and matching `tenant_id` are required. An `ad`
-claim is refused (`src/sentica/tokens.py:89`). Refusal details are fixed
-phrases. The token is not logged.
+## This round
 
-Deriver (`src/deriver/enqueue.py:73` and the other three insert sites,
-`src/deriver/consumer.py:57`, `src/deriver/queue_manager.py:674`). Production
-payloads gain `tenant_id`. A missing or different tenant raises
-`SenticaTenantRefused`, which is not a retryable error, so the row is marked
-errored. A database disconnect still uses the existing retryable path, so
-the worker backs off and resumes.
+| Finding | Fixed where | Test |
+| --- | --- | --- |
+| B1, image `CMD` can skip the entrypoint | `Dockerfile:86` `ENTRYPOINT`, no `CMD` | `test_dockerfile_defaults_to_production` |
+| B1, production image accepts `SENTICA_MODE=test` | `Dockerfile:76` marker, `src/sentica/runtime.py:20`, `docker/entrypoint.sh` | `test_production_image_refuses_test_mode` |
+| B2, stack tests hidden or skipped | `tests/sentica/conftest.py` removed; `unittest.yml` job `test-m1-stack` fails on zero tests | the job itself |
+| B2, image publish before M9 | `docker-build.yml` and the other publish workflows `if: false` | workflow files |
+| B3, shared network, trust-for-all, open Redis | `docker-compose.sentica.yml` networks `db`, `net-a`, `net-b`; `docker/sentica/pg_hba.conf`; `docker/sentica/redis-entry.sh` | `test_instances_cannot_reach_each_other` |
+| Review 1 M3, peer cards in Redis | Redis requires a per-instance password on tmpfs and is not reachable from the other instance. The cache stays on. | `test_instances_cannot_reach_each_other` |
+| Major, tenant role owns the database | `docker/sentica/init-tenants.sql` | `test_tokens_and_isolation` (SQLSTATE `42501`) |
+| Major, tenant is PgBouncer admin | `docker/sentica/pgbouncer-a.ini` `sentica_operator` | `test_tenant_is_not_pgbouncer_admin` |
+| Major, reconciler and webhook inserts unstamped | `src/sentica/queue.py` `install_queue_stamp`, called from `src/models.py` | `test_reconciler_and_webhook_complete`, `test_orm_and_core_inserts_stamp_tenant` |
+| Major, representation check after message load, only first row errored | `src/deriver/queue_manager.py` `reject_foreign_queue_rows` | `test_representation_rows_for_other_tenant_are_all_errored` |
+| Major, certificate swap does not prove the new cert | `src/sentica/db_connect.py` fingerprint of cert and key | `test_certificate_swap_has_no_failed_requests` |
+| Major, pool recycle untested | `src/db.py` `capped_pool_recycle`, compose `DB_POOL_RECYCLE=2` | `test_pool_recycle_is_short`, `test_short_pool_recycle_opens_a_new_connection` |
+| Major, cross-tenant auth accepts any error | `docker/sentica/pg_hba.conf` | `test_tokens_and_isolation` |
+| Major, token walk uses the wrong key and skips hidden routes | `tests/sentica/test_m1_stack.py` | `test_tokens_and_isolation` |
+| Major, revocation is a raw transaction | API batch write during `docker pause` | `test_revocation_rolls_back_and_reports_unavailable` |
+| Major, deriver resume untested | queue row processed once after the proxy returns | `test_deriver_resumes_a_pending_row_once` |
+| Major, disk check ignores logs | compose logging driver `none` | `test_stopped_stack_leaves_no_memory_on_disk`, `test_database_error_canary_is_absent_from_logs` |
+| Major, hang when the proxy is paused | `src/main.py` `_BoundRequest` (8s), `src/sentica/db_connect.py` socket shutdown, TCP keepalives, role `statement_timeout` | `test_revocation_rolls_back_and_reports_unavailable` |
+| Major, SQL parameters and exception text in logs | `src/db.py` `hide_parameters=True`, `src/sentica/log_policy.py` | `test_log_filter_hides_parameters_and_work_unit_keys`, `test_database_error_canary_is_absent_from_logs` |
+| Major, traces, SQL debug, local metrics, workspace labels | `src/sentica/runtime.py:232` `_refuse_unsafe_runtime` | `test_unsafe_production_settings_refuse` |
+| Major, deriver metrics on `0.0.0.0` | `src/deriver/__main__.py` binds `SENTICA_BIND_HOST` | startup refusal covers metrics; bind is the deriver entry |
+| Minor, algorithm from the header, no `aud` | `src/sentica/tokens.py` | `test_none_hs256_and_algorithm_mismatch_are_forged` |
+| Minor, key parsed per request | `src/sentica/runtime.py:137` caches the instance and the key | `test_malformed_token_key_refuses`, `test_production_without_password_files_loads` |
+| Minor, startup tests skip some settings | `REQUIRED_SETTINGS` | `test_each_required_setting_refuses` |
+| Minor, bind host `private` | `src/sentica/runtime.py:209` | `test_bind_host_must_be_an_address` |
+| Minor, password check is env only | `src/sentica/runtime.py:266`, `.dockerignore` excludes `config.toml` | `test_config_toml_password_refuses`, `test_pgpass_file_refuses`, `test_home_pgpass_refuses` |
+| Minor, cert and key rotated apart | `certificate_fingerprint` hashes both; rename-into-place in `docs/INSTANCE.md` | `test_rename_into_place_changes_the_fingerprint` |
 
-Proxy drop (`src/main.py:273`). In production, `OperationalError`,
-`InterfaceError`, and `DisconnectionError` become HTTP 503
-`{"detail":"memory unavailable"}`. The log line is the exception class name.
+## Test counts
 
-Schema (`docker/sentica/init-tenants.sql`). Each tenant has its own database
-and role. The role can use schema `memory` only. `public.outside_memory` is
-revoked. Extensions `vector` and `pg_trgm` are installed in `memory` by the
-init script because the role is not a superuser.
+`uv run pytest` on 2026-10-12, `SENTICA_MODE=test`, local Postgres on
+port 5433: **3207 passed, 53 skipped, 1 failed** (188.28s). The failure
+was a stale `docs/MAP.md` line for `create_async_engine`. That citation
+now points at `src/db.py:74`, and `test_map_citations_resolve` passed on
+its own. The 53 skips are the same upstream files as M0. The stack file
+is collected, not skipped. It contributed 14 passes inside that run.
 
-## Tests that prove it
+`uv run pytest tests/sentica/test_m1_stack.py -n0`: **14 passed** (102.66s).
 
-| Acceptance | Test |
-| --- | --- |
-| Missing tenant, certificate, key, password, or public bind refuses startup | `tests/sentica/test_m1_startup.py:61` through `:110`, and `tests/sentica/test_m1_stack.py:234` |
-| Missing, expired, forged, wrong-issuer, over-lifetime, and admin tokens refused | `tests/sentica/test_m1_tokens.py:97` and `tests/sentica/test_m1_stack.py:255` |
-| Token for B refused by A's API on every non-probe endpoint | `tests/sentica/test_m1_stack.py:255` walks the OpenAPI paths. B's key fails closed as forged. A's key with `tenant_id` of B fails as wrong tenant. `/deriver/metrics` is included. |
-| Admin list route unreachable | same test, `POST /v3/workspaces/list` returns 401 `Resource requires admin privileges` |
-| Deriver task tagged B refused by A's worker, and the canary string is absent from the worker log | `tests/sentica/test_m1_tokens.py:119` and `tests/sentica/test_m1_stack.py:498` |
-| A's certificate cannot open B's database through B's proxy | `tests/sentica/test_m1_stack.py:255` |
-| A's role cannot read `public.outside_memory` | `tests/sentica/test_m1_stack.py:255` |
-| Certificate swap during requests causes zero failures | `tests/sentica/test_m1_stack.py:402` |
-| Killing the proxy mid-transaction leaves no inserted rows, and a later API write returns 503 `memory unavailable` | `tests/sentica/test_m1_stack.py:431` |
-| After stop, Postgres and Redis data are tmpfs and no project volume remains | `tests/sentica/test_m1_stack.py:547` and the fixture teardown |
+## Not changed
 
-Local run on 2026-10-11, `SENTICA_MODE=test`, `SENTICA_M1_STACK` unset,
-against Postgres on 127.0.0.1:5433: 3164 passed, 53 skipped, 0 failed
-(133.98s). The stack file was not collected. Run separately with
-`SENTICA_M1_STACK=1`: 6 passed, 0 failed (71.38s). `ruff check` was clean.
-
-## Queue payloads
-
-Queue rows are inserted only into Postgres `queue.payload`
-(`src/models.py:594`) from `src/deriver/enqueue.py:74`, `:559`, `:685`, and
-`:814`. Representation text is `src/utils/queue_payload.py:28`. Redis
-(`src/cache/client.py`) is not on that path. No host file receives a queue
-payload. This is the database, which ground rule 5 names as the store. The
-M0 deferral is closed.
-
-## Skipped tests
-
-The full suite's 53 skips are all upstream. None are under `tests/sentica/`.
-The fork adds no `pytest.mark.skip` or `skipif`. `tests/sentica/test_m1_stack.py`
-is left out of collection unless `SENTICA_M1_STACK=1` (`tests/sentica/conftest.py`).
-That is not a skip.
-
-Files, from `pytest -rs` on 2026-10-11:
-
-- `tests/live_llm/test_live_anthropic.py` (2)
-- `tests/live_llm/test_live_embeddings.py` (22)
-- `tests/live_llm/test_live_gemini.py` (2)
-- `tests/live_llm/test_live_openai.py` (9)
-- `tests/live_llm/test_live_structured_output_unions.py` (6)
-- `tests/live_llm/test_live_timeouts.py` (4)
-- `tests/live_llm/test_live_tools_structured_output.py` (6)
-- `tests/routes/test_pagination_shim.py` (2)
-
-The live-provider files are skipped because `--live-llm` is not passed, or
-because a provider has an empty model set. The pagination file skips two
-cases whose endpoint has no reverse parameter.
-
-## Decisions a reviewer should see
-
-- `SENTICA_MODE` is exactly `production` or `test`. There is no unset default.
-- Production does not set `AUTH_USE_AUTH`. Doing so required `JWT_SECRET`,
-  and the instance must not hold a symmetric signing key.
-- Refusal counts are in-process (`src/sentica/refusals.py`), not Prometheus.
-  M9 exports them. A new series here would have to join the zero-init registry.
-- `docker-compose.yml` still has the development password so M0's
-  `docker compose up` keeps working. The production-shaped stack is
-  `docker-compose.sentica.yml`.
-- On that compose network, Postgres trusts the proxy and has no password.
-  That trust setting is test-only (`FORK_CHANGES.md`). The instance
-  environment does not contain one. M9's network rules must make the
-  database reachable only through the certificate proxy.
-- `/health` and `/metrics` have no token. They return no memory content.
-- Representation payloads still contain message text, and that text is only
-  in Postgres. The tenant stamp is an id and is removed before upstream
-  payload models validate.
-- The local CA and certificate files are generated into `/dev/shm` by the
-  test. They are not in git.
+- Peer-card and summary rows still sit in the Redis cache. The other
+  instance cannot open that Redis, and the password lives on tmpfs.
+- Refusal counts stay in process until M9.
+- `docker-compose.yml` still uses the development password with
+  `SENTICA_MODE=test`. The production image refuses that mode.
