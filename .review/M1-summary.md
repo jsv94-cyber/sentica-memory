@@ -15,7 +15,7 @@ Jose's rulings, recorded in `PROGRESS.md`:
 | --- | --- | --- |
 | CI stack job sets `SENTICA_MODE=test` | `.github/workflows/unittest.yml:115` | the job itself |
 | Proof image uid is the runner uid, so keys need no root chown | `Dockerfile:47` `SENTICA_UID` | `test_containers_cannot_read_another_tenant_key` |
-| Host log grep runs under `sudo -E` and must return 1 | `tests/sentica/test_m1_stack.py:774` | `test_stopped_stack_leaves_no_memory_on_disk` |
+| Host log grep runs under `sudo -E` and must return 1 | `tests/sentica/test_m1_stack.py:777` | `test_stopped_stack_leaves_no_memory_on_disk` |
 | Full-suite job skips the proof file | `.github/workflows/unittest.yml:60` | the job itself |
 | `hostssl` scram-sha-256, password only in that proxy's userlist | `docker/sentica/pg_hba.conf:5`, `docker/sentica/pgbouncer-a.ini:2` | `test_pg_hba_rejects_trust_and_cross_tenant` |
 | `connect_timeout` on production connections | `src/sentica/db_connect.py:30` | `test_production_connect_args_include_connect_timeout` |
@@ -24,7 +24,7 @@ Jose's rulings, recorded in `PROGRESS.md`:
 | API database calls bound at 8s; deriver and maintenance default to 120s | `src/db.py:88`, `src/db.py:94`, `src/db.py:246` `_BoundedSession` | `test_revocation_rolls_back_and_reports_unavailable`, `test_maintenance_timeout_defaults_to_120`, `test_slow_llm_chat_streams_fully` |
 | Certificates mounted per file | `docker-compose.sentica.yml` api and deriver volumes | `test_containers_cannot_read_another_tenant_key` |
 | Each PgBouncer lists only its own database | `docker/sentica/pgbouncer-a.ini:2`, `docker/sentica/pgbouncer-b.ini:2` | `test_pg_hba_rejects_trust_and_cross_tenant` |
-| Cross-network probes by raw IP, and Redis `save` is empty | `tests/sentica/test_m1_stack.py:831`, `:847`, `:886` | `test_instances_cannot_reach_each_other` |
+| Cross-network probes by raw IP, and Redis `save` is empty | `tests/sentica/test_m1_stack.py:834`, `:850`, `:889` | `test_instances_cannot_reach_each_other` |
 | Representation rejection is in the work-unit source | `src/deriver/queue_manager.py:665` | `test_representation_rows_for_other_tenant_are_all_errored` |
 | No `SENTICA_PRODUCTION_IMAGE_MARKER` override; tests patch the constant | `src/sentica/runtime.py:20` | `test_production_image_refuses_test_mode` |
 | Certificate reload drops the old connection | `src/sentica/db_connect.py:85` | `test_install_certificate_reload_drops_the_old_connection` |
