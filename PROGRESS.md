@@ -141,25 +141,35 @@ Built:
 - Postgres row-level security is enabled and forced on every table that has
   `workspace_name`. The policy keeps a row only when `sentica.workspace` is
   set and equals that column. An unset or empty setting returns no rows.
-- The app role `sentica_app` does not own those tables and does not bypass
-  row-level security. When the migrating role is a member of `sentica_ddl`,
-  ownership moves to that role after it is granted `CREATE` on the schema.
-- Each transaction sets `sentica.workspace` to one workspace from the token.
-  Search, context, chat, representation, and cards query one workspace at a
-  time, merge in Python, and tag each item with its workspace id.
-- Deriver, summary, and dream tasks carry one workspace and use the same
-  setting. A peer name in two workspaces has two representations.
-- A workspace that is not in the token set is refused. It is not skipped.
+- Each tenant has a runtime role and a migration role. The migration role
+  owns the schema. The runtime role can read and write rows and cannot
+  create objects, change policy, or bypass row-level security. The API and
+  the deriver do not migrate. They refuse to start when the schema revision
+  is behind the code. A one-shot migrate service owns the migration
+  certificate.
+- Each transaction sets `sentica.workspace` to one workspace. Reads run in
+  `BEGIN READ ONLY`. The setting is transaction-local, so session pooling
+  and transaction pooling are both safe. Search, context, chat,
+  representation, and cards query one workspace at a time and re-check the
+  token for each one.
+- Queue rows require a workspace. Pending work is counted by a
+  security-definer function that returns only the workspace name and two
+  counts. The deriver and the reconciler do that work one workspace per
+  transaction.
+- A workspace that is not in the token set is refused. An ambiguous token
+  is refused. Production allows only the pgvector store.
 - Peer cache keys include the workspace name.
-- Production refuses LanceDB, Qdrant, and Chroma.
 
 Tables without `workspace_name` are `workspaces`, `active_queue_sessions`,
 and `alembic_version`. See `.review/M2-summary.md`.
 
-Test counts: `uv run pytest --ignore=tests/sentica/test_m1_stack.py -q --tb=line`
-on 2026-10-14, against the local Postgres on host port 5433, with
-`SENTICA_MODE=test`: **3215 passed, 53 skipped, 0 failed** (188.01s).
-The 53 skips are upstream. The proof file is not in that run. A separate
-`uv run pytest tests/sentica/test_m1_stack.py -n0 -q --tb=line` was
-**20 passed, 0 skipped, 0 failed** (127.69s).
+Test counts on 2026-10-14, against the local Postgres on host port 5433,
+with `SENTICA_MODE=test`:
+
+- `uv run pytest --ignore=tests/sentica/test_m1_stack.py -q --tb=line`:
+  **3232 passed, 54 skipped, 0 failed** (120.37s). 53 skips are upstream.
+  One skip is `test_runtime_role_lockdown`, which runs in the `test-m2-rls`
+  job.
+- `uv run pytest tests/sentica/test_m1_stack.py -n0 -q --tb=line`:
+  **23 passed, 0 skipped, 0 failed** (204.74s).
 

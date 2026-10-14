@@ -15,9 +15,9 @@ Two session factories share that engine:
 
 - `src/db.py:347` `SessionLocal` is the write session. It is lazy: the pool
   connection is checked out on the first statement, not at construction.
-- `src/db.py:359` sets a read engine with isolation level `AUTOCOMMIT`.
-  `src/db.py:367` `ReadSessionLocal` is for SELECT-only work. Writes through it
-  commit immediately. Callers must not use it to mutate.
+- `src/db.py:358` sets a read engine to `BEGIN READ ONLY`.
+  `src/db.py:369` `ReadSessionLocal` is for SELECT-only work. Callers must
+  not use it to mutate.
 
 `src/db.py:595` reads `settings.DB.SCHEMA` (default `public`) and
 `src/db.py:600` binds it to the declarative `Base`. Every ORM table lives in
@@ -27,10 +27,10 @@ Request and worker code opens sessions in `src/dependencies.py`:
 
 - `src/dependencies.py:10` `get_db` is the FastAPI write dependency.
 - `src/dependencies.py:35` `get_read_db` is the read dependency.
-- `src/dependencies.py:57` `tracked_db` is the context manager for background
+- `src/dependencies.py:55` `tracked_db` is the context manager for background
   work. `read_only=True` binds `ReadSessionLocal`.
 
-Migrations: `docker/entrypoint.sh:48` runs `scripts/provision_db.py:14`, which
+Migrations: `docker/migrate-entrypoint.sh:41` runs `scripts/provision_db.py:14`, which
 calls `src/migrate.py:1` (`python -m src.migrate`). Alembic's script location
 is `alembic.ini:6` (`migrations`). `migrations/env.py:14` imports `Base` so
 autogenerate sees the models. `database/init.sql:1` creates the `vector`
@@ -40,7 +40,7 @@ extension before migrations run.
 
 Auth is off unless `AUTH_USE_AUTH` is set. `src/config.py:753` `AuthSettings`
 defaults `USE_AUTH` to false at `src/config.py:756`. When auth is off and `SENTICA_MODE=test`,
-`src/security.py:220` treats every caller as an admin JWT and does not read a
+`src/security.py:216` treats every caller as an admin JWT and does not read a
 token. `SENTICA_MODE=production` is checked first and does not take that path.
 Unset, empty, and any other mode refuse to start.
 
@@ -197,7 +197,7 @@ is the store.
 
 The worker process is `python -m src.deriver` (`src/deriver/__main__.py:22`
 calls `src/deriver/queue_manager.py:1342` `main`). `src/deriver/queue_manager.py:140`
-`QueueManager.polling_loop` (`src/deriver/queue_manager.py:519`) claims work
+`QueueManager.polling_loop` (`src/deriver/queue_manager.py:546`) claims work
 units (`src/deriver/queue_manager.py:322`) and processes them in order.
 `src/deriver/consumer.py:47` `process_item` dispatches on `task_type`.
 Representation batches go to `src/deriver/deriver.py:44`

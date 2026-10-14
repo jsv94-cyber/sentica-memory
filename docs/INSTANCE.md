@@ -53,8 +53,15 @@ equal to this instance are required. An `ad` admin claim is refused.
 Expired, forged, wrong-issuer, and wrong-tenant tokens are refused and
 counted. The log line is a fixed phrase and does not include the token.
 
-Honcho tables live in the schema `memory`. The database role used by the
-instance is granted that schema only.
+Honcho tables live in the schema `memory`. The runtime role has `USAGE` on
+that schema and row grants. It is not the owner, it cannot create objects,
+and it does not bypass row-level security. A separate migration role owns
+the schema. Its certificate is mounted only into the one-shot migrate
+service.
+
+The proxy may use session pooling or transaction pooling. Every statement
+runs inside a transaction, and the workspace setting is local to that
+transaction, so neither pool mode keeps it after commit.
 
 If the proxy drops a connection, an in-flight transaction rolls back. The
 API answers `503` with `{"detail":"memory unavailable"}`. The deriver treats
