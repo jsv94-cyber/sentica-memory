@@ -1,7 +1,6 @@
 import asyncio
 import contextvars
 import logging
-import os
 import socket
 from typing import Any, cast
 
@@ -93,14 +92,9 @@ db_call_timeout: contextvars.ContextVar[float | None] = contextvars.ContextVar(
 
 def maintenance_db_call_timeout() -> float:
     """Bound for deriver and maintenance sessions. Defaults to 120 seconds."""
-    raw = os.environ.get("SENTICA_DB_CALL_TIMEOUT_SECONDS", "120").strip()
-    try:
-        value = float(raw)
-    except ValueError:
-        return 120.0
-    if value <= 0:
-        return 120.0
-    return value
+    from src.sentica.runtime import db_call_timeout_seconds
+
+    return db_call_timeout_seconds()
 
 
 async def run_maintenance_bounded(awaitable: Any, *, close: Any | None = None) -> Any:

@@ -6,21 +6,21 @@ Public API routes are mounted under `/v3` at `src/main.py:218`.
 
 ## Database engine and sessions
 
-`src/db.py:75` builds one async SQLAlchemy engine from
+`src/db.py:74` builds one async SQLAlchemy engine from
 `settings.DB.CONNECTION_URI` (default in `src/config.py`, class `DBSettings`).
 The driver is psycopg. Pool size, overflow, recycle, and pre-ping come from
 `DBSettings`. `POOL_CLASS=null` selects `NullPool`.
 
 Two session factories share that engine:
 
-- `src/db.py:352` `SessionLocal` is the write session. It is lazy: the pool
+- `src/db.py:346` `SessionLocal` is the write session. It is lazy: the pool
   connection is checked out on the first statement, not at construction.
-- `src/db.py:364` sets a read engine with isolation level `AUTOCOMMIT`.
-  `src/db.py:370` `ReadSessionLocal` is for SELECT-only work. Writes through it
+- `src/db.py:358` sets a read engine with isolation level `AUTOCOMMIT`.
+  `src/db.py:364` `ReadSessionLocal` is for SELECT-only work. Writes through it
   commit immediately. Callers must not use it to mutate.
 
-`src/db.py:598` reads `settings.DB.SCHEMA` (default `public`) and
-`src/db.py:603` binds it to the declarative `Base`. Every ORM table lives in
+`src/db.py:592` reads `settings.DB.SCHEMA` (default `public`) and
+`src/db.py:597` binds it to the declarative `Base`. Every ORM table lives in
 that schema.
 
 Request and worker code opens sessions in `src/dependencies.py`:

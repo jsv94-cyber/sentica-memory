@@ -132,4 +132,4 @@ Test counts: `uv run pytest --ignore=tests/sentica/test_m1_stack.py` on
 The 53 skips are upstream. The proof file is not in that run. A separate
 `uv run pytest tests/sentica/test_m1_stack.py -n0` was **18 passed, 0
 skipped, 0 failed** (104.34s). The fork adds no skip. Map citations for
-the engine are `src/db.py:75`, `src/db.py:352`, and `src/db.py:370`.
+the engine are `src/db.py:74`, `src/db.py:346`, and `src/db.py:364`.

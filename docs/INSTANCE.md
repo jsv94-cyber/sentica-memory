@@ -42,7 +42,9 @@ Client certificates are valid for 48 hours and are meant to be replaced
 every 24 hours. New connections read the certificate and key files again.
 Replace them by writing a temporary file in the same directory and renaming
 it onto the destination, certificate and key together, so a reader never
-sees a partial pair. A pooled connection is dropped on checkout when either
+sees a partial pair. The certificate directory must be bind-mounted as a
+directory, not as individual files, so that rename is visible inside the
+container. A pooled connection is dropped on checkout when either
 file changes. Pooled connections are also recycled after at most one hour.
 
 Tokens are EdDSA or RS256, checked with the public key on the instance.
