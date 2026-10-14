@@ -21,6 +21,10 @@ PINNED_MAJORS = {
 _USES = re.compile(
     r"uses:\s*(actions/checkout|actions/setup-python|astral-sh/setup-uv)@v(\d+)"
 )
+# The unified runner asks a previous job for its label. Everything else is pinned.
+REVIEWED_DYNAMIC_RUNNERS = {
+    "unified-tests.yml": "${{ fromJSON(format('[{0}]', needs.start-runner.outputs.runner-labels)) }}",
+}
 
 
 def test_workflows_pin_ubuntu_2404_and_node24_actions() -> None:
@@ -30,6 +34,12 @@ def test_workflows_pin_ubuntu_2404_and_node24_actions() -> None:
     for path in files:
         text = path.read_text()
         assert "ubuntu-latest" not in text, path.name
+        for label in re.findall(r"(?m)^[ ]*runs-on:\s*(.+)$", text):
+            cleaned = label.strip()
+            if cleaned == "ubuntu-24.04":
+                continue
+            allowed = REVIEWED_DYNAMIC_RUNNERS.get(path.name)
+            assert cleaned == allowed, path.name
         for match in _USES.finditer(text):
             action = match.group(1)
             major = int(match.group(2))
@@ -56,6 +66,16 @@ def test_stalled_rollback_connection_and_run_sync_time_out() -> None:
         with pytest.raises(TimeoutError):
             if name == "rollback":
                 await session.rollback()
+            elif name == "close":
+                await session.close()
+            elif name == "delete":
+                await session.delete(object())
+            elif name == "refresh":
+                await session.refresh(object())
+            elif name == "get":
+                await session.get(object, 1)
+            elif name == "merge":
+                await session.merge(object())
             elif name == "connection":
                 await session.connection()
             else:
@@ -70,7 +90,16 @@ def test_stalled_rollback_connection_and_run_sync_time_out() -> None:
         token = db_call_timeout.set(0.25)
         originals = {
             name: getattr(AsyncSession, name)
-            for name in ("rollback", "connection", "run_sync")
+            for name in (
+                "rollback",
+                "close",
+                "delete",
+                "refresh",
+                "get",
+                "merge",
+                "connection",
+                "run_sync",
+            )
         }
         try:
             for name, original in originals.items():

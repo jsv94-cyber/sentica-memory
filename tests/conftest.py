@@ -89,6 +89,8 @@ _RUNTIME_MOCK_TEST_BLOCKLIST_PREFIXES = (
     "tests/crud/test_session_scope_clauses.py",
     # Pure prompt-rendering tests — string assembly only, no DB needed.
     "tests/deriver/test_prompts.py",
+    # Connects as the migrated runtime role. It must not create_all.
+    "tests/sentica/test_m2_rls.py",
     "tests/utils/test_custom_instructions_prompts.py",
     # Pure JWT scope tests — operate on src.security directly, no DB needed.
     "tests/test_security.py",

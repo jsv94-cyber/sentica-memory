@@ -180,7 +180,10 @@ class TestBothEndpoints:
             json={"query": endpoint.query, "stream": True},
         )
 
-        assert _sse_events(response.text)[-1] == {"done": True}
+        final = _sse_events(response.text)[-1]
+        assert final["done"] is True
+        assert final["workspace_id"] == workspace.name
+        assert "evidence" not in final
 
 
 class TestOptingIn:

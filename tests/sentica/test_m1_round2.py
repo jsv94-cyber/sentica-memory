@@ -154,11 +154,14 @@ async def test_orm_and_core_inserts_stamp_tenant(
 
     _production(monkeypatch, tmp_path)
     assert load_instance() is not None
+    db_session.add(models.Workspace(name="ws-round2"))
+    await db_session.flush()
     item = models.QueueItem(
         work_unit_key="reconciler:cleanup_queue-round2",
         task_type="reconciler",
         payload={"reconciler_type": "cleanup_queue"},
         processed=False,
+        workspace_name="ws-round2",
     )
     db_session.add(item)
     await db_session.flush()
@@ -172,6 +175,7 @@ async def test_orm_and_core_inserts_stamp_tenant(
                 "task_type": "webhook",
                 "payload": {"event_type": "test.event", "data": {}},
                 "processed": False,
+                "workspace_name": "ws-round2",
             }
         ],
     )
@@ -384,8 +388,10 @@ def test_slow_llm_chat_streams_fully(
     )
     write_class = SessionLocal.class_
     read_class = ReadSessionLocal.class_
-    SessionLocal.configure(class_=BoundedSession)
-    ReadSessionLocal.configure(class_=BoundedSession)
+    # Assign the class directly. configure(class_=...) stores class_ in the
+    # maker kwargs, and async_sessionmaker then passes it to Session().
+    SessionLocal.class_ = BoundedSession
+    ReadSessionLocal.class_ = BoundedSession
 
     async def slow_stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
         await asyncio.sleep(15)
@@ -404,8 +410,8 @@ def test_slow_llm_chat_streams_fully(
             assert response.status_code == 200, response.read()
             body = response.read().decode()
     finally:
-        SessionLocal.configure(class_=write_class)
-        ReadSessionLocal.configure(class_=read_class)
+        SessionLocal.class_ = write_class
+        ReadSessionLocal.class_ = read_class
     assert time.monotonic() - started >= 14
     assert "slow-llm-token" in body
     assert " tail" in body

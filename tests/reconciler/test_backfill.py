@@ -73,8 +73,13 @@ def _fake_backfill(rows: _Rows, **overrides: Any) -> Backfill:
 
 def _patch_scheduler_db(monkeypatch: pytest.MonkeyPatch, db: AsyncSession) -> None:
     @asynccontextmanager
-    async def _db(_: str | None = None) -> AsyncGenerator[AsyncSession]:
-        yield db
+    async def _db(
+        _: str | None = None, **_kwargs: object
+    ) -> AsyncGenerator[AsyncSession]:
+        try:
+            yield db
+        finally:
+            await db.commit()
 
     monkeypatch.setattr(scheduler_module, "tracked_db", _db)
 
@@ -109,7 +114,7 @@ def _reconciler_item(payload: dict[str, Any]) -> models.QueueItem:
         payload=payload,
         session_id=None,
         task_type="reconciler",
-        workspace_name=None,
+        workspace_name="reconciler-test",
         message_id=None,
     )
 
@@ -160,15 +165,14 @@ async def test_generic_enqueue_gated_on_has_pending(
     if names:
         rows = await _queue_rows_prefixed(db_session, "reconciler:backfill.fake")
 
-    assert enqueued is (remaining > 0)
-    if remaining == 0:
+    if not names or remaining == 0:
+        assert enqueued is False
         assert rows == []
-    elif names:
+    else:
+        assert enqueued is True
         assert {row.work_unit_key for row in rows} == {
             f"reconciler:backfill.fake:{name}" for name in names
         }
-    else:
-        assert len(rows) == 1
     if rows:
         assert rows[0].payload == {
             "reconciler_type": "backfill",
