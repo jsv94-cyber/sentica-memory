@@ -1,0 +1,366 @@
+# Two local instances, A and B. Each has its own database role, its own
+# PgBouncer, its own Redis, and its own client certificate.
+#
+# Networks: db holds Postgres and both PgBouncers. net-a holds instance A
+# and pgbouncer-a. net-b mirrors that for B. Postgres pg_hba accepts TCP
+# only from the PgBouncer addresses.
+#
+#   CERT_DIR=/dev/shm/sentica-m1-certs docker compose -f docker-compose.sentica.yml up -d --build
+#
+# Certificates are bind-mounted from CERT_DIR. Put that directory on a tmpfs.
+# Redis passwords are generated at start into a tmpfs volume. The API and
+# deriver environments have no database password. Postgres data and Redis
+# data are tmpfs and disappear when the containers stop. Logs use the none
+# driver so Docker does not write them to the host disk.
+# Published ports bind 127.0.0.1 for this local proof only.
+
+name: sentica-m1
+
+x-api-build: &api-build
+  context: .
+  dockerfile: Dockerfile
+  args:
+    INSTALL_LANCEDB: "false"
+    SENTICA_UID: ${SENTICA_UID:-100}
+    SENTICA_GID: ${SENTICA_GID:-100}
+
+x-no-disk-logs: &no-disk-logs
+  driver: none
+
+x-common-env: &common-env
+  SENTICA_MODE: production
+  SENTICA_DB_PROXY_PORT: "6432"
+  SENTICA_PROXY_CA_PATH: /certs/ca.crt
+  CACHE_ENABLED: "true"
+  SENTRY_ENABLED: "false"
+  AUTH_USE_AUTH: "false"
+  EMBED_MESSAGES: "true"
+  DB_POOL_RECYCLE: "2"
+  COLLECT_METRICS_LOCAL: "false"
+  LLM_ANTHROPIC_API_KEY: sentica-local-dummy
+  LLM_OPENAI_API_KEY: sentica-local-dummy
+  LLM_GEMINI_API_KEY: sentica-local-dummy
+
+services:
+  database:
+    image: pgvector/pgvector:pg15
+    logging: *no-disk-logs
+    entrypoint: ["/bin/bash", "/postgres-entry.sh"]
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_USER: postgres
+      # The image refuses to boot without this. The mounted pg_hba.conf is
+      # what Postgres actually uses. TCP is hostssl with scram-sha-256.
+      POSTGRES_HOST_AUTH_METHOD: trust
+    volumes:
+      - ./database/init.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
+      - ./docker/sentica/init-tenants.sql:/docker-entrypoint-initdb.d/10-tenants.sql:ro
+      - ./docker/sentica/20-passwords.sh:/docker-entrypoint-initdb.d/20-passwords.sh:ro
+      - ./docker/sentica/pg_hba.conf:/etc/sentica/pg_hba.conf:ro
+      - ./docker/sentica/postgres-entry.sh:/postgres-entry.sh:ro
+      - ${SECRET_DIR}/tenant-a:/secrets/tenant-a:ro
+      - ${SECRET_DIR}/tenant-b:/secrets/tenant-b:ro
+    tmpfs:
+      - /var/lib/postgresql/data:size=1g
+    networks:
+      db:
+        ipv4_address: 172.28.12.10
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  pgbouncer-a:
+    image: edoburu/pgbouncer:v1.24.1-p1
+    logging: *no-disk-logs
+    user: "0:0"
+    entrypoint: ["/bin/sh", "/pgbouncer-entry.sh"]
+    depends_on:
+      database:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${SENTICA_PROXY_A_PORT:-6433}:6432"
+    volumes:
+      - ./docker/sentica/pgbouncer-entry.sh:/pgbouncer-entry.sh:ro
+      - ./docker/sentica/pgbouncer-a.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - ${SECRET_DIR}/userlist-a.txt:/in/userlist:ro
+      - ${CERT_DIR}/pgbouncer-a.crt:/in/server.crt:ro
+      - ${CERT_DIR}/pgbouncer-a.key:/in/server.key:ro
+      - ${CERT_DIR}/client-ca.crt:/certs/client-ca.crt:ro
+    networks:
+      db:
+        ipv4_address: 172.28.12.13
+      net-a:
+        ipv4_address: 172.28.10.13
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 6432"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  pgbouncer-b:
+    image: edoburu/pgbouncer:v1.24.1-p1
+    logging: *no-disk-logs
+    user: "0:0"
+    entrypoint: ["/bin/sh", "/pgbouncer-entry.sh"]
+    depends_on:
+      database:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${SENTICA_PROXY_B_PORT:-6434}:6432"
+    volumes:
+      - ./docker/sentica/pgbouncer-entry.sh:/pgbouncer-entry.sh:ro
+      - ./docker/sentica/pgbouncer-b.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - ${SECRET_DIR}/userlist-b.txt:/in/userlist:ro
+      - ${CERT_DIR}/pgbouncer-b.crt:/in/server.crt:ro
+      - ${CERT_DIR}/pgbouncer-b.key:/in/server.key:ro
+      - ${CERT_DIR}/client-ca.crt:/certs/client-ca.crt:ro
+    networks:
+      db:
+        ipv4_address: 172.28.12.14
+      net-b:
+        ipv4_address: 172.28.11.13
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 6432"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis-a:
+    image: redis:8.2
+    logging: *no-disk-logs
+    user: "0:0"
+    entrypoint: ["/bin/sh", "/redis-entry.sh"]
+    volumes:
+      - ./docker/sentica/redis-entry.sh:/redis-entry.sh:ro
+      - redis-secret-a:/secret
+    tmpfs:
+      - /data
+    networks:
+      net-a:
+        ipv4_address: 172.28.10.12
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "REDISCLI_AUTH=$(cat /secret/password) redis-cli ping | grep -q PONG",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis-b:
+    image: redis:8.2
+    logging: *no-disk-logs
+    user: "0:0"
+    entrypoint: ["/bin/sh", "/redis-entry.sh"]
+    volumes:
+      - ./docker/sentica/redis-entry.sh:/redis-entry.sh:ro
+      - redis-secret-b:/secret
+    tmpfs:
+      - /data
+    networks:
+      net-b:
+        ipv4_address: 172.28.11.12
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "REDISCLI_AUTH=$(cat /secret/password) redis-cli ping | grep -q PONG",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api-a:
+    build: *api-build
+    logging: *no-disk-logs
+    depends_on:
+      pgbouncer-a:
+        condition: service_healthy
+      redis-a:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${SENTICA_API_A_PORT:-8101}:8000"
+    tmpfs:
+      - /tmp
+    environment:
+      <<: *common-env
+      SENTICA_TENANT_ID: tenant-a
+      SENTICA_DB_PROXY_HOST: pgbouncer-a
+      SENTICA_DB_USER: tenant_a
+      SENTICA_DB_NAME: tenant_a
+      SENTICA_TOKEN_ISSUER: sentica-test-issuer-a
+      SENTICA_CLIENT_CERT_PATH: /certs/tenant_a.crt
+      SENTICA_CLIENT_KEY_PATH: /certs/tenant_a.key
+      SENTICA_TOKEN_PUBLIC_KEY_PATH: /certs/tenant-a.token.pub
+      SENTICA_BIND_HOST: 172.28.10.10
+      SENTICA_REDIS_HOST: redis-a
+    volumes:
+      - redis-secret-a:/secret:ro
+      - ${CERT_DIR}/ca.crt:/certs/ca.crt:ro
+      - ${CERT_DIR}/tenant_a.crt:/certs/tenant_a.crt:ro
+      - ${CERT_DIR}/tenant_a.key:/certs/tenant_a.key:ro
+      - ${CERT_DIR}/tenant-a.token.pub:/certs/tenant-a.token.pub:ro
+    networks:
+      net-a:
+        ipv4_address: 172.28.10.10
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "/app/.venv/bin/python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://172.28.10.10:8000/health', timeout=2).read()",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 40s
+
+  api-b:
+    build: *api-build
+    logging: *no-disk-logs
+    depends_on:
+      pgbouncer-b:
+        condition: service_healthy
+      redis-b:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${SENTICA_API_B_PORT:-8102}:8000"
+    tmpfs:
+      - /tmp
+    environment:
+      <<: *common-env
+      SENTICA_TENANT_ID: tenant-b
+      SENTICA_DB_PROXY_HOST: pgbouncer-b
+      SENTICA_DB_USER: tenant_b
+      SENTICA_DB_NAME: tenant_b
+      SENTICA_TOKEN_ISSUER: sentica-test-issuer-b
+      SENTICA_CLIENT_CERT_PATH: /certs/tenant_b.crt
+      SENTICA_CLIENT_KEY_PATH: /certs/tenant_b.key
+      SENTICA_TOKEN_PUBLIC_KEY_PATH: /certs/tenant-b.token.pub
+      SENTICA_BIND_HOST: 172.28.11.10
+      SENTICA_REDIS_HOST: redis-b
+    volumes:
+      - redis-secret-b:/secret:ro
+      - ${CERT_DIR}/ca.crt:/certs/ca.crt:ro
+      - ${CERT_DIR}/tenant_b.crt:/certs/tenant_b.crt:ro
+      - ${CERT_DIR}/tenant_b.key:/certs/tenant_b.key:ro
+      - ${CERT_DIR}/tenant-b.token.pub:/certs/tenant-b.token.pub:ro
+    networks:
+      net-b:
+        ipv4_address: 172.28.11.10
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "/app/.venv/bin/python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://172.28.11.10:8000/health', timeout=2).read()",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 40s
+
+  deriver-a:
+    build: *api-build
+    logging: *no-disk-logs
+    entrypoint: ["/app/docker/entrypoint.sh"]
+    command: ["/app/.venv/bin/python", "-m", "src.deriver"]
+    depends_on:
+      api-a:
+        condition: service_healthy
+    tmpfs:
+      - /tmp
+    environment:
+      <<: *common-env
+      SENTICA_TENANT_ID: tenant-a
+      SENTICA_DB_PROXY_HOST: pgbouncer-a
+      SENTICA_DB_USER: tenant_a
+      SENTICA_DB_NAME: tenant_a
+      SENTICA_TOKEN_ISSUER: sentica-test-issuer-a
+      SENTICA_CLIENT_CERT_PATH: /certs/tenant_a.crt
+      SENTICA_CLIENT_KEY_PATH: /certs/tenant_a.key
+      SENTICA_TOKEN_PUBLIC_KEY_PATH: /certs/tenant-a.token.pub
+      SENTICA_BIND_HOST: 127.0.0.1
+      SENTICA_REDIS_HOST: redis-a
+      DERIVER_POLLING_SLEEP_INTERVAL_SECONDS: "0.5"
+      DERIVER_POLLING_SLEEP_MAX_INTERVAL_SECONDS: "1"
+      DERIVER_POLLING_STARTUP_JITTER_SECONDS: "0"
+      DERIVER_POLLING_BACKOFF_ENABLED: "false"
+      DERIVER_FLUSH_ENABLED: "true"
+    restart: unless-stopped
+    volumes:
+      - redis-secret-a:/secret:ro
+      - ${CERT_DIR}/ca.crt:/certs/ca.crt:ro
+      - ${CERT_DIR}/tenant_a.crt:/certs/tenant_a.crt:ro
+      - ${CERT_DIR}/tenant_a.key:/certs/tenant_a.key:ro
+      - ${CERT_DIR}/tenant-a.token.pub:/certs/tenant-a.token.pub:ro
+    networks:
+      - net-a
+
+  deriver-b:
+    build: *api-build
+    logging: *no-disk-logs
+    entrypoint: ["/app/docker/entrypoint.sh"]
+    command: ["/app/.venv/bin/python", "-m", "src.deriver"]
+    depends_on:
+      api-b:
+        condition: service_healthy
+    tmpfs:
+      - /tmp
+    environment:
+      <<: *common-env
+      SENTICA_TENANT_ID: tenant-b
+      SENTICA_DB_PROXY_HOST: pgbouncer-b
+      SENTICA_DB_USER: tenant_b
+      SENTICA_DB_NAME: tenant_b
+      SENTICA_TOKEN_ISSUER: sentica-test-issuer-b
+      SENTICA_CLIENT_CERT_PATH: /certs/tenant_b.crt
+      SENTICA_CLIENT_KEY_PATH: /certs/tenant_b.key
+      SENTICA_TOKEN_PUBLIC_KEY_PATH: /certs/tenant-b.token.pub
+      SENTICA_BIND_HOST: 127.0.0.1
+      SENTICA_REDIS_HOST: redis-b
+      DERIVER_POLLING_SLEEP_INTERVAL_SECONDS: "0.5"
+      DERIVER_POLLING_SLEEP_MAX_INTERVAL_SECONDS: "1"
+      DERIVER_POLLING_STARTUP_JITTER_SECONDS: "0"
+      DERIVER_POLLING_BACKOFF_ENABLED: "false"
+      DERIVER_FLUSH_ENABLED: "true"
+    restart: unless-stopped
+    volumes:
+      - redis-secret-b:/secret:ro
+      - ${CERT_DIR}/ca.crt:/certs/ca.crt:ro
+      - ${CERT_DIR}/tenant_b.crt:/certs/tenant_b.crt:ro
+      - ${CERT_DIR}/tenant_b.key:/certs/tenant_b.key:ro
+      - ${CERT_DIR}/tenant-b.token.pub:/certs/tenant-b.token.pub:ro
+    networks:
+      - net-b
+
+networks:
+  db:
+    ipam:
+      config:
+        - subnet: 172.28.12.0/24
+  net-a:
+    ipam:
+      config:
+        - subnet: 172.28.10.0/24
+  net-b:
+    ipam:
+      config:
+        - subnet: 172.28.11.0/24
+
+volumes:
+  redis-secret-a:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+  redis-secret-b:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs

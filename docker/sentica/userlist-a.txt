@@ -1,0 +1,2 @@
+"tenant_a" ""
+"sentica_operator" ""

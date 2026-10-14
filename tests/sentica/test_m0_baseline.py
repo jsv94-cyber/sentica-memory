@@ -12,13 +12,13 @@ ROOT = Path(__file__).resolve().parents[2]
 
 # file, line, snippet that line must contain. The map must cite file:line.
 REQUIRED_CITATIONS: tuple[tuple[str, int, str], ...] = (
-    ("src/db.py", 52, "create_async_engine"),
-    ("src/db.py", 65, "SessionLocal"),
-    ("src/db.py", 83, "ReadSessionLocal"),
+    ("src/db.py", 75, "create_async_engine"),
+    ("src/db.py", 306, "SessionLocal"),
+    ("src/db.py", 324, "ReadSessionLocal"),
     ("src/dependencies.py", 57, "tracked_db"),
     ("src/security.py", 31, "class JWTParams"),
     ("src/security.py", 105, "def verify_jwt"),
-    ("src/security.py", 206, "USE_AUTH"),
+    ("src/security.py", 215, "USE_AUTH"),
     ("src/models.py", 104, "class Workspace"),
     ("src/models.py", 137, "class Peer"),
     ("src/models.py", 174, "class Session"),
@@ -93,10 +93,13 @@ def test_pin_is_recorded() -> None:
 def test_new_docs_have_no_em_dash() -> None:
     for relative in (
         "docs/MAP.md",
+        "docs/INSTANCE.md",
         "NOTICE",
         "FORK_CHANGES.md",
         "PROGRESS.md",
         "docker-compose.yml",
+        "docker-compose.sentica.yml",
+        ".review/M1-summary.md",
     ):
         assert "\u2014" not in _text(relative), relative
 
@@ -156,6 +159,8 @@ def test_compose_starts_required_services() -> None:
         service = cast(dict[str, Any], services[name])
         tmpfs = cast(list[str], service["tmpfs"])
         assert "/tmp" in tmpfs
+        environment = cast(list[str], service["environment"])
+        assert "SENTICA_MODE=test" in environment
     assert "redis-data" not in _text("docker-compose.yml")
     ignored = set(_text(".gitignore").splitlines())
     assert "/docker-compose.yml" not in ignored
@@ -174,6 +179,7 @@ def test_ci_runs_the_suite_on_every_pull_request() -> None:
     assert "if" not in test_python
     rendered = _text(".github/workflows/unittest.yml")
     assert "uv run pytest" in rendered
+    assert "SENTICA_MODE: test" in rendered
 
 
 def test_external_deploy_workflows_do_not_run_automatically() -> None:

@@ -68,6 +68,9 @@ async def enqueue(payload: list[dict[str, Any]]) -> None:
             )
 
             if queue_records:
+                from src.sentica.queue import stamp_queue_records
+
+                stamp_queue_records(queue_records)
                 stmt = insert(QueueItem).returning(QueueItem)
                 await db_session.execute(stmt, queue_records)
                 await db_session.commit()
@@ -550,6 +553,9 @@ async def enqueue_dream(
                 )
                 return
 
+            from src.sentica.queue import stamp_queue_records
+
+            stamp_queue_records([dream_record])
             stmt = insert(QueueItem).returning(QueueItem)
             await db_session.execute(stmt, [dream_record])
             await db_session.commit()
@@ -673,6 +679,9 @@ async def _enqueue_scope_task(
                 )
                 return
 
+            from src.sentica.queue import stamp_queue_records
+
+            stamp_queue_records([record])
             stmt = insert(QueueItem).returning(QueueItem)
             await db_session.execute(stmt, [record])
 
@@ -799,6 +808,9 @@ async def enqueue_deletion(
             resource_id,
         )
 
+        from src.sentica.queue import stamp_queue_records
+
+        stamp_queue_records([deletion_record])
         stmt = insert(QueueItem).returning(QueueItem)
         await session.execute(stmt, [deletion_record])
 

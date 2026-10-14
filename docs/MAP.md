@@ -2,25 +2,25 @@
 
 This map describes the tree pinned to upstream Honcho v3.3.0. Citations are
 `path:line` and name the line where the symbol is defined or the call is made.
-Public API routes are mounted under `/v3` at `src/main.py:213`.
+Public API routes are mounted under `/v3` at `src/main.py:218`.
 
 ## Database engine and sessions
 
-`src/db.py:52` builds one async SQLAlchemy engine from
+`src/db.py:75` builds one async SQLAlchemy engine from
 `settings.DB.CONNECTION_URI` (default in `src/config.py`, class `DBSettings`).
 The driver is psycopg. Pool size, overflow, recycle, and pre-ping come from
 `DBSettings`. `POOL_CLASS=null` selects `NullPool`.
 
 Two session factories share that engine:
 
-- `src/db.py:65` `SessionLocal` is the write session. It is lazy: the pool
+- `src/db.py:306` `SessionLocal` is the write session. It is lazy: the pool
   connection is checked out on the first statement, not at construction.
-- `src/db.py:77` sets a read engine with isolation level `AUTOCOMMIT`.
-  `src/db.py:83` `ReadSessionLocal` is for SELECT-only work. Writes through it
+- `src/db.py:318` sets a read engine with isolation level `AUTOCOMMIT`.
+  `src/db.py:324` `ReadSessionLocal` is for SELECT-only work. Writes through it
   commit immediately. Callers must not use it to mutate.
 
-`src/db.py:311` reads `settings.DB.SCHEMA` (default `public`) and
-`src/db.py:316` binds it to the declarative `Base`. Every ORM table lives in
+`src/db.py:552` reads `settings.DB.SCHEMA` (default `public`) and
+`src/db.py:557` binds it to the declarative `Base`. Every ORM table lives in
 that schema.
 
 Request and worker code opens sessions in `src/dependencies.py`:
@@ -30,7 +30,7 @@ Request and worker code opens sessions in `src/dependencies.py`:
 - `src/dependencies.py:57` `tracked_db` is the context manager for background
   work. `read_only=True` binds `ReadSessionLocal`.
 
-Migrations: `docker/entrypoint.sh:4` runs `scripts/provision_db.py:14`, which
+Migrations: `docker/entrypoint.sh:48` runs `scripts/provision_db.py:14`, which
 calls `src/migrate.py:1` (`python -m src.migrate`). Alembic's script location
 is `alembic.ini:6` (`migrations`). `migrations/env.py:14` imports `Base` so
 autogenerate sees the models. `database/init.sql:1` creates the `vector`
@@ -39,9 +39,10 @@ extension before migrations run.
 ## Auth and tokens
 
 Auth is off unless `AUTH_USE_AUTH` is set. `src/config.py:753` `AuthSettings`
-defaults `USE_AUTH` to false at `src/config.py:756`. When auth is off,
-`src/security.py:206` treats every caller as an admin JWT and does not read a
-token.
+defaults `USE_AUTH` to false at `src/config.py:756`. When auth is off and `SENTICA_MODE=test`,
+`src/security.py:215` treats every caller as an admin JWT and does not read a
+token. `SENTICA_MODE=production` is checked first and does not take that path.
+Unset, empty, and any other mode refuse to start.
 
 When auth is on, tokens are HS256 JWTs signed with `AUTH_JWT_SECRET`.
 `src/security.py:31` `JWTParams` is the claim set:
@@ -188,11 +189,11 @@ Payload shapes are `src/utils/queue_payload.py`. Task types: `representation`,
 
 The representation payload includes the message text
 (`src/utils/queue_payload.py:28` `content: str`). Summary, dream, scope, and
-deletion payloads do not. This is upstream behavior on the pin. The queue
-still lives in Postgres, which is the database, not a file on the API
-container. A later milestone has to stop putting message text in queue rows.
-M0 does not change that shape, because the pinned deriver reads `content`
-from the payload.
+deletion payloads do not. Every payload is written only to the Postgres
+`queue.payload` column (`src/models.py:594`) by the inserts in
+`src/deriver/enqueue.py`. Redis is the cache (`src/cache/client.py`), not a
+copy of the queue. The message text in that column is in the database, which
+is the store.
 
 The worker process is `python -m src.deriver` (`src/deriver/__main__.py:22`
 calls `src/deriver/queue_manager.py:1251` `main`). `src/deriver/queue_manager.py:140`
@@ -270,7 +271,7 @@ dream prompt builders. They are not separate files.
 ## Process split
 
 `src/main.py` is the API. It serves HTTP, enqueues work, and runs the
-dialectic tool loop inside the request. `src/main.py:227` `/health` returns
+dialectic tool loop inside the request. `src/main.py:260` `/health` returns
 `{"status": "ok"}`. Metrics are `/metrics`.
 
 `src/deriver/__main__.py` is the worker. It consumes the queue, summarizes,

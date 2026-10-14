@@ -14,6 +14,9 @@ services:
       dockerfile: Dockerfile
       args:
         INSTALL_LANCEDB: ${INSTALL_LANCEDB:-false}
+        SENTICA_BAKE_PRODUCTION_MARKER: "false"
+    logging:
+      driver: none
     entrypoint: ["sh", "docker/entrypoint.sh"]
     depends_on:
       database:
@@ -41,6 +44,7 @@ services:
       - CACHE_URL=redis://redis:6379/0?suppress=true
       - CACHE_ENABLED=true
       - AUTH_USE_AUTH=false
+      - SENTICA_MODE=test
     env_file:
       - path: .env
         required: false
@@ -52,7 +56,11 @@ services:
       dockerfile: Dockerfile
       args:
         INSTALL_LANCEDB: ${INSTALL_LANCEDB:-false}
-    entrypoint: ["/app/.venv/bin/python", "-m", "src.deriver"]
+        SENTICA_BAKE_PRODUCTION_MARKER: "false"
+    logging:
+      driver: none
+    entrypoint: ["/app/docker/entrypoint.sh"]
+    command: ["/app/.venv/bin/python", "-m", "src.deriver"]
     depends_on:
       api:
         condition: service_healthy
@@ -67,6 +75,7 @@ services:
       - CACHE_URL=redis://redis:6379/0?suppress=true
       - CACHE_ENABLED=true
       - AUTH_USE_AUTH=false
+      - SENTICA_MODE=test
     env_file:
       - path: .env
         required: false
@@ -74,6 +83,8 @@ services:
 
   database:
     image: pgvector/pgvector:pg15
+    logging:
+      driver: none
     restart: unless-stopped
     ports:
       - "127.0.0.1:${SENTICA_POSTGRES_PORT:-5432}:5432"
@@ -95,6 +106,8 @@ services:
 
   redis:
     image: redis:8.2
+    logging:
+      driver: none
     restart: unless-stopped
     command: ["redis-server", "--save", "", "--appendonly", "no"]
     ports:

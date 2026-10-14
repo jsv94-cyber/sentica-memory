@@ -1,0 +1,108 @@
+"""TLS client-certificate connections to the database proxy."""
+
+from __future__ import annotations
+
+import hashlib
+import logging
+from typing import Any
+
+from sqlalchemy import event
+from sqlalchemy.exc import DisconnectionError
+from sqlalchemy.ext.asyncio import AsyncEngine
+
+from src.config import settings
+
+from .runtime import SenticaInstance, load_instance
+
+logger = logging.getLogger(__name__)
+
+
+def production_connect_args() -> dict[str, str]:
+    """TLS and TCP arguments for a production connection, or nothing in test mode."""
+    instance = load_instance()
+    if instance is None:
+        return {}
+    return {
+        "sslmode": "verify-full",
+        "sslrootcert": str(instance.ca_path),
+        "sslcert": str(instance.cert_path),
+        "sslkey": str(instance.key_path),
+        "connect_timeout": str(settings.DB.CONNECT_TIMEOUT_SECONDS),
+        # Bound a blackholed proxy. tcp_user_timeout is milliseconds.
+        "keepalives": "1",
+        "keepalives_idle": "30",
+        "keepalives_interval": "10",
+        "keepalives_count": "3",
+        "tcp_user_timeout": "5000",
+    }
+
+
+def certificate_fingerprint(cert_path: Any, key_path: Any) -> str:
+    """Hash the client certificate and key together.
+
+    Replace both files by writing a temporary name in the same directory and
+    renaming it onto the destination. Readers then never see a partial pair.
+    A change to either file changes this fingerprint.
+    """
+    digest = hashlib.sha256()
+    for path in (cert_path, key_path):
+        try:
+            data = path.read_bytes()
+        except OSError as exc:
+            raise DisconnectionError("client certificate is unreadable") from exc
+        if not data:
+            raise DisconnectionError("client certificate is empty")
+        digest.update(path.name.encode())
+        digest.update(data)
+    return digest.hexdigest()
+
+
+def apply_production_engine_args(
+    connect_args: dict[str, Any], _engine_kwargs: dict[str, Any]
+) -> SenticaInstance | None:
+    """Point a new engine at the proxy when production mode is on.
+
+    Called while the engine is being built. Unset mode leaves the upstream
+    engine alone so the test suite can keep its local database.
+
+    Args:
+        connect_args: psycopg connect arguments, mutated in place.
+        engine_kwargs: SQLAlchemy engine keyword arguments, mutated in place.
+
+    Returns:
+        The instance when production mode is configured.
+    """
+    instance = load_instance()
+    if instance is None:
+        return None
+
+    connect_args.update(production_connect_args())
+
+    logger.info("Database connections use the proxy with verify-full")
+    return instance
+
+
+def install_certificate_reload(engine: AsyncEngine, instance: SenticaInstance) -> None:
+    """Drop pooled connections when the client certificate file changes.
+
+    New connections read the certificate path again. Connections that were
+    opened with the previous file are invalid on checkout. ``pool_recycle``
+    still retires anything older than one hour.
+    """
+    sync_engine = engine.sync_engine
+
+    def _fingerprint() -> str:
+        return certificate_fingerprint(instance.cert_path, instance.key_path)
+
+    def _mark(_dbapi_connection: Any, connection_record: Any) -> None:
+        connection_record.info["sentica_cert"] = _fingerprint()
+
+    def _retire_stale(
+        _dbapi_connection: Any, connection_record: Any, _proxy: Any
+    ) -> None:
+        current = _fingerprint()
+        if connection_record.info.get("sentica_cert") != current:
+            raise DisconnectionError("client certificate changed")
+
+    event.listen(sync_engine, "connect", _mark)
+    event.listen(sync_engine.pool, "checkout", _retire_stale)

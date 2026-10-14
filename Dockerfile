@@ -40,38 +40,48 @@ WORKDIR /app
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
+ENV SENTICA_MODE=production
 
-# Create the runtime user before copying dependencies with their final owner.
-# A recursive chown in a later layer would copy the whole virtualenv and nearly
-# double the image size.
-RUN addgroup --system app \
-    && adduser --system --group app \
-    && chown app:app /app \
-    # Pre-create the LanceDB dir so a named volume mounted here inherits app
-    # ownership instead of defaulting to root.
-    && mkdir /app/lancedb_data \
-    && chown app:app /app/lancedb_data
+# The proof build passes the runner uid so certificate files can stay mode 600
+# without a root chown on the host. The published image keeps uid 100.
+ARG SENTICA_UID=100
+ARG SENTICA_GID=100
+RUN if [ "$SENTICA_UID" != "0" ]; then \
+        addgroup --gid "$SENTICA_GID" app \
+        && adduser --uid "$SENTICA_UID" --gid "$SENTICA_GID" \
+            --disabled-password --gecos "" --no-create-home app; \
+    fi \
+    && mkdir -p /app/lancedb_data \
+    && chown "${SENTICA_UID}:${SENTICA_GID}" /app /app/lancedb_data
 
-COPY --from=builder --chown=app:app /app/.venv /app/.venv
+COPY --from=builder --chown=${SENTICA_UID}:${SENTICA_GID} /app/.venv /app/.venv
 
 # Place executables in the environment at the front of the path
 ENV PATH="/app/.venv/bin:$PATH"
 ENV HOME=/app
 
-COPY --chown=app:app src/ /app/src/
-COPY --chown=app:app migrations/ /app/migrations/
-COPY --chown=app:app scripts/ /app/scripts/
-COPY --chown=app:app docker/ /app/docker/
-COPY --chown=app:app alembic.ini /app/alembic.ini
+COPY --chown=${SENTICA_UID}:${SENTICA_GID} src/ /app/src/
+COPY --chown=${SENTICA_UID}:${SENTICA_GID} migrations/ /app/migrations/
+COPY --chown=${SENTICA_UID}:${SENTICA_GID} scripts/ /app/scripts/
+COPY --chown=${SENTICA_UID}:${SENTICA_GID} docker/ /app/docker/
+COPY --chown=${SENTICA_UID}:${SENTICA_GID} alembic.ini /app/alembic.ini
 # src/_version.py reads the service version from here at runtime, so this
 # is a runtime input as well as a build input.
-COPY --chown=app:app pyproject.toml /app/pyproject.toml
+COPY --chown=${SENTICA_UID}:${SENTICA_GID} pyproject.toml /app/pyproject.toml
 # Copy config files - this will copy config.toml if it exists, and config.toml.example
-COPY --chown=app:app config.toml* /app/
+COPY --chown=${SENTICA_UID}:${SENTICA_GID} config.toml* /app/
 
-# Switch to non-root user
-USER app
+# The default image is a production image. A test-stack build can opt out.
+ARG SENTICA_BAKE_PRODUCTION_MARKER=true
+RUN if [ "$SENTICA_BAKE_PRODUCTION_MARKER" = "true" ]; then \
+        printf '%s\n' production > /app/.sentica-production-image; \
+    fi \
+    && chown "${SENTICA_UID}:${SENTICA_GID}" /app/.sentica-production-image 2>/dev/null || true \
+    && chmod 755 /app/docker/entrypoint.sh \
+    && chmod 755 /app/docker/sentica/postgres-entry.sh /app/docker/sentica/20-passwords.sh
+
+USER ${SENTICA_UID}:${SENTICA_GID}
 
 EXPOSE 8000
 
-CMD ["fastapi", "run", "--host", "0.0.0.0", "src/main.py"]
+ENTRYPOINT ["/app/docker/entrypoint.sh"]

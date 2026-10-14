@@ -13,6 +13,9 @@ env:
 
 jobs:
   build:
+    # Nothing is published until M9. The workflow stays in the tree so the
+    # upstream file is still recognizable.
+    if: false
     runs-on: ubuntu-latest
     permissions:
       id-token: write
