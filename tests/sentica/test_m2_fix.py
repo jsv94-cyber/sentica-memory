@@ -265,3 +265,85 @@ def test_pagination_cache_key_includes_the_workspace() -> None:
             reset_workspace(right)
     finally:
         reset_workspace(left)
+
+
+async def test_deriver_metrics_are_limited_to_the_token_workspaces(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src import schemas
+    from src.backlog import DeriverMetricsPoller, DeriverMetricsSnapshot
+    from src.config import settings
+    from src.routers import deriver_metrics
+    from src.security import JWTParams
+
+    monkeypatch.setattr(settings.AUTH, "USE_AUTH", True)
+    seen: list[list[str]] = []
+
+    async def _scoped(names: list[str]) -> schemas.DeriverMetrics:
+        seen.append(list(names))
+        return schemas.DeriverMetrics(
+            eligible_work_units=0,
+            claimed_work_units=0,
+            pending_items=1,
+            oldest_pending_age_seconds=0.0,
+            embeddings_pending=0,
+            embeddings_pending_due=0,
+        )
+
+    monkeypatch.setattr("src.crud.metrics_for_workspaces", _scoped)
+    poller = DeriverMetricsPoller()
+    poller._snapshot = DeriverMetricsSnapshot(  # pyright: ignore[reportPrivateUsage]
+        signal_seconds=9.0,
+        stats=schemas.DeriverMetrics(
+            eligible_work_units=0,
+            claimed_work_units=0,
+            pending_items=99,
+            oldest_pending_age_seconds=0.0,
+            embeddings_pending=0,
+            embeddings_pending_due=0,
+        ),
+        measured_at=1.0,
+    )
+    deriver_metrics.set_deriver_metrics_poller(poller)
+    try:
+        body = await deriver_metrics.get_deriver_metrics_response(
+            JWTParams(t="t", w="left", workspaces=["left"])
+        )
+    finally:
+        deriver_metrics.set_deriver_metrics_poller(None)
+    assert seen == [["left"]]
+    assert body["pending_items"] == 1
+
+
+async def test_execute_dream_and_delayed_dream_bind_the_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    from src.dreamer.dream_scheduler import DreamScheduler
+    from src.schemas import DreamType
+    from src.sentica.workspace_scope import current_workspace
+
+    seen: list[str | None] = []
+
+    async def _bound(
+        self: DreamScheduler,
+        workspace_name: str,
+        dream_type: DreamType,
+        **_kwargs: object,
+    ) -> None:
+        del self, workspace_name, dream_type
+        seen.append(current_workspace())
+
+    async def _sleep(_seconds: float) -> None:
+        seen.append(current_workspace())
+
+    monkeypatch.setattr(DreamScheduler, "_execute_dream_bound", _bound)
+    monkeypatch.setattr(asyncio, "sleep", _sleep)
+    scheduler = DreamScheduler()
+    await scheduler.execute_dream("left-ws", DreamType.OMNI, observer="a", observed="b")
+    await scheduler._delayed_dream(  # pyright: ignore[reportPrivateUsage]
+        "key", "right-ws", 1, DreamType.OMNI, observer="a", observed="b"
+    )
+    assert seen[0] == "left-ws"
+    assert "right-ws" in seen

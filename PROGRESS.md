@@ -167,7 +167,7 @@ Test counts on 2026-10-14, against the local Postgres on host port 5433,
 with `SENTICA_MODE=test`:
 
 - `uv run pytest --ignore=tests/sentica/test_m1_stack.py -q --tb=line`:
-  **3232 passed, 54 skipped, 0 failed** (120.37s). 53 skips are upstream.
+  **3234 passed, 54 skipped, 0 failed** (99.34s). 53 skips are upstream.
   One skip is `test_runtime_role_lockdown`, which runs in the `test-m2-rls`
   job.
 - `uv run pytest tests/sentica/test_m1_stack.py -n0 -q --tb=line`:
