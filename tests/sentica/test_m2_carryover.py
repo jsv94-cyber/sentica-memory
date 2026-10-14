@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 
@@ -33,3 +34,69 @@ def test_workflows_pin_ubuntu_2404_and_node24_actions() -> None:
             assert major >= PINNED_MAJORS[action], path.name
             seen[action] = True
     assert all(seen.values())
+
+
+def test_production_log_strips_messages_except_the_allow_list() -> None:
+    from src.sentica.log_policy import ALLOW_LIST, ProductionLogFilter
+
+    redactor = ProductionLogFilter()
+    workspace, observer, observed = "ws-canary", "observer-canary", "observed-canary"
+    interpolated = logging.LogRecord(
+        "src.deriver.deriver",
+        logging.INFO,
+        __file__,
+        12,
+        f"for {workspace}/{observer}/{observed}",
+        (),
+        None,
+        func="process_batch",
+    )
+    assert redactor.filter(interpolated)
+    rendered = interpolated.getMessage()
+    assert workspace not in rendered
+    assert observer not in rendered
+    assert rendered == "src.deriver.deriver process_batch 12 INFO"
+
+    formatted = logging.LogRecord(
+        "src.dreamer.orchestrator",
+        logging.INFO,
+        __file__,
+        40,
+        "observed=%s",
+        (observed,),
+        None,
+        func="run_dream",
+    )
+    assert redactor.filter(formatted)
+    assert observed not in formatted.getMessage()
+    assert "observed=" not in formatted.getMessage()
+
+    logger_name = "src.sentica.db_connect"
+    template = "proxy tenant=%s connections=%s"
+    assert (logger_name, template) in ALLOW_LIST
+    allowed = logging.LogRecord(
+        logger_name,
+        logging.INFO,
+        __file__,
+        8,
+        template,
+        ("tenant-a", 2),
+        None,
+        func="apply_production_engine_args",
+    )
+    assert redactor.filter(allowed)
+    assert allowed.getMessage() == "proxy tenant=tenant-a connections=2"
+
+    same_text = logging.LogRecord(
+        "src.other",
+        logging.INFO,
+        __file__,
+        8,
+        template,
+        ("tenant-a", 2),
+        None,
+        func="apply_production_engine_args",
+    )
+    assert redactor.filter(same_text)
+    assert "tenant-a" not in same_text.getMessage()
+    assert "proxy tenant" not in same_text.getMessage()

@@ -1174,6 +1174,69 @@ def test_database_error_canary_is_absent_from_logs(stack: Path) -> None:
         assert secret not in logged
 
 
+def test_named_request_and_dream_log_omit_names(stack: Path) -> None:
+    canary = f"dream-canary-{uuid.uuid4().hex}"
+    key_a = _token_key(stack, "a")
+    token = _token(
+        key_a,
+        issuer="sentica-test-issuer-a",
+        tenant="tenant-a",
+        request_id="dream-logs",
+        workspace=canary,
+    )
+    headers = {"Authorization": f"Bearer {token}"}
+    created = httpx.post(
+        f"{API_A}/v3/workspaces",
+        headers=headers,
+        json={"name": canary},
+        timeout=20,
+    )
+    assert created.status_code in (200, 201), created.text
+    session_name = f"sess-{uuid.uuid4().hex[:8]}"
+    peer_name = f"peer-{uuid.uuid4().hex[:8]}"
+    session = httpx.post(
+        f"{API_A}/v3/workspaces/{canary}/sessions",
+        headers=headers,
+        json={"id": session_name},
+        timeout=20,
+    )
+    assert session.status_code in (200, 201), session.text
+    peer = httpx.post(
+        f"{API_A}/v3/workspaces/{canary}/peers",
+        headers=headers,
+        json={"name": peer_name},
+        timeout=20,
+    )
+    assert peer.status_code in (200, 201), peer.text
+    script = (
+        "import logging\n"
+        "logging.basicConfig(level=logging.INFO)\n"
+        "from src.db import SessionLocal\n"
+        "workspace = " + repr(canary) + "\n"
+        "peer = " + repr(peer_name) + "\n"
+        "session = " + repr(session_name) + "\n"
+        "logging.getLogger('src.dreamer.orchestrator').info(\n"
+        "    f'dream cycle for {workspace}/{peer}/{session}')\n"
+        "logging.getLogger('src.dreamer.orchestrator').info(\n"
+        "    'observed=%s', peer)\n"
+        "print('logged', SessionLocal is not None)\n"
+    )
+    for service in ("api-a", "deriver-a"):
+        ran = _compose(
+            ["exec", "-T", service, "/app/.venv/bin/python", "-"],
+            check=False,
+            stdin=script,
+        )
+        combined = ran.stdout + ran.stderr
+        assert ran.returncode == 0, ran.stderr[-1500:]
+        for secret in (canary, session_name, peer_name):
+            assert secret not in combined
+        logs = _run(["docker", "logs", f"{PROJECT}-{service}-1"], check=False)
+        logged = logs.stdout + logs.stderr
+        for secret in (canary, session_name, peer_name):
+            assert secret not in logged
+
+
 def test_pg_hba_rejects_trust_and_cross_tenant(stack: Path) -> None:
     del stack
     shown = _compose(

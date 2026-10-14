@@ -1,39 +1,30 @@
-"""Production logs keep class names, counts, and timings.
+"""Production logs keep a location, or an allow-listed count.
 
-Exception text, SQL parameters, queue payloads, and work-unit keys can
-carry message text or peer and workspace names. In production those
-records are replaced before they are formatted.
+Every record is written as the logger name, function, line, and level.
+The formatted message is omitted. An allow list of exact logger and
+format-string pairs from src.sentica may keep a line that carries ids
+and counts only. Access logs are dropped. Exception records keep the
+exception class and nothing else.
 """
 
 from __future__ import annotations
 
 import logging
 import os
-import re
 
-_WORK_UNIT = re.compile(
-    r"\b(?:representation|summary|dream|webhook|deletion|reconciler|"
-    + r"scope_backfill|scope_removal):[^\s]+"
+# Exact (logger name, format string) pairs. The format string is the
+# record's msg before interpolation, so an f-string cannot match.
+ALLOW_LIST: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("src.sentica.db_connect", "proxy tenant=%s connections=%s"),
+    }
 )
-_DETAIL = re.compile(r"(?is)\bDETAIL\b\s*:.*")
-_RESOURCE = re.compile(
-    r"(?i)(?:/v3/\S+"
-    + r"|\b(?:workspace|peer|session)(?:[_\s-]*(?:id|name))?\b\s*[:=]?\s*\S+)"
-)
+_LOCATION = "%s %s %s %s"
 _installed = False
 
 
-def _redact_text(rendered: str) -> str:
-    """Remove names, paths, and server DETAIL text from one log line."""
-    cleaned = _DETAIL.sub("DETAIL redacted", rendered)
-    cleaned = _RESOURCE.sub("redacted", cleaned)
-    if "[parameters:" in cleaned or "Payload:" in cleaned or _WORK_UNIT.search(cleaned):
-        return "log redacted"
-    return cleaned
-
-
 class ProductionLogFilter(logging.Filter):
-    """Drop content that must not reach a log line."""
+    """Drop message text unless the format string is allow-listed."""
 
     def filter(self, record: logging.LogRecord) -> bool:
         if record.name == "uvicorn.access" or record.name.startswith("uvicorn.access"):
@@ -46,16 +37,18 @@ class ProductionLogFilter(logging.Filter):
             record.exc_text = None
             record.stack_info = None
             return True
-        try:
-            rendered = record.getMessage()
-        except Exception:
-            record.msg = "log redacted"
-            record.args = ()
+        template = record.msg if isinstance(record.msg, str) else ""
+        if (record.name, template) in ALLOW_LIST:
             return True
-        cleaned = _redact_text(rendered)
-        if cleaned != rendered:
-            record.msg = cleaned
-            record.args = ()
+        record.args = (
+            record.name,
+            record.funcName,
+            record.lineno,
+            record.levelname,
+        )
+        record.msg = _LOCATION
+        record.exc_text = None
+        record.stack_info = None
         return True
 
 
