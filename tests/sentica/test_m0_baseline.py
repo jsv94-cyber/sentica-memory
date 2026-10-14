@@ -13,8 +13,8 @@ ROOT = Path(__file__).resolve().parents[2]
 # file, line, snippet that line must contain. The map must cite file:line.
 REQUIRED_CITATIONS: tuple[tuple[str, int, str], ...] = (
     ("src/db.py", 75, "create_async_engine"),
-    ("src/db.py", 306, "SessionLocal"),
-    ("src/db.py", 324, "ReadSessionLocal"),
+    ("src/db.py", 347, "SessionLocal"),
+    ("src/db.py", 365, "ReadSessionLocal"),
     ("src/dependencies.py", 57, "tracked_db"),
     ("src/security.py", 31, "class JWTParams"),
     ("src/security.py", 105, "def verify_jwt"),

@@ -14,6 +14,8 @@ ones. Full enumeration is available via `uv run python scripts/configure_embeddi
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 from sqlalchemy import select, text
 from sqlalchemy.exc import SQLAlchemyError
@@ -33,6 +35,34 @@ from src.models import Collection, Workspace
 from src.vector_store import VectorStore
 
 logger = logging.getLogger(__name__)
+
+
+async def _bounded_connection(
+    engine: AsyncEngine,
+    work: Callable[[Any], Awaitable[Any]],
+) -> Any:
+    """Run one startup query on the maintenance bound and close on timeout."""
+    from src.db import run_maintenance_bounded
+
+    opened: list[Any] = []
+
+    async def _call() -> Any:
+        connection = await engine.connect()
+        opened.append(connection)
+        return await work(connection)
+
+    async def _close() -> None:
+        if not opened:
+            return
+        connection = opened.pop()
+        await connection.close()
+
+    try:
+        return await run_maintenance_bounded(_call(), close=_close)
+    finally:
+        if opened:
+            await _close()
+
 
 # Embedding tables that must exist with matching dim.
 _EMBEDDING_TABLES: tuple[str, ...] = ("documents", "message_embeddings")
@@ -127,12 +157,14 @@ async def _introspect_pgvector_dims_once(
           AND a.attname = 'embedding'
         """
     )
-    async with engine.connect() as conn:
-        result = await conn.execute(
+    async def _read(connection: Any) -> dict[str, int]:
+        result = await connection.execute(
             query,
             {"schema": schema, "tables": list(_EMBEDDING_TABLES)},
         )
         return {row.table_name: row.typmod for row in result}
+
+    return await _bounded_connection(engine, _read)
 
 
 def _assert_pgvector_dims_match(
@@ -236,9 +268,11 @@ async def _sample_workspace_names(engine: AsyncEngine, limit: int) -> list[str]:
     a non-public schema deployment must not silently sample the wrong table.
     """
     stmt = select(Workspace.name).order_by(Workspace.created_at.desc()).limit(limit)
-    async with engine.connect() as conn:
-        result = await conn.execute(stmt)
+    async def _read(connection: Any) -> list[str]:
+        result = await connection.execute(stmt)
         return [row[0] for row in result]
+
+    return await _bounded_connection(engine, _read)
 
 
 async def _sample_collection_keys(
@@ -252,9 +286,11 @@ async def _sample_collection_keys(
         .order_by(Collection.created_at.desc())
         .limit(limit)
     )
-    async with engine.connect() as conn:
-        result = await conn.execute(stmt)
+    async def _read(connection: Any) -> list[tuple[str, str, str]]:
+        result = await connection.execute(stmt)
         return [(row[0], row[1], row[2]) for row in result]
+
+    return await _bounded_connection(engine, _read)
 
 
 async def _probe_namespace_dim(store: VectorStore, namespace: str) -> int | None:

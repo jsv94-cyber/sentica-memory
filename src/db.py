@@ -103,6 +103,23 @@ def maintenance_db_call_timeout() -> float:
     return value
 
 
+async def run_maintenance_bounded(awaitable: Any, *, close: Any | None = None) -> Any:
+    """Run one maintenance call and close its connection if the bound expires."""
+    task: asyncio.Task[Any] = asyncio.create_task(awaitable)
+    done, _pending = await asyncio.wait({task}, timeout=maintenance_db_call_timeout())
+    if task in done:
+        return task.result()
+    if close is not None:
+        closing: asyncio.Task[Any] = asyncio.create_task(close())
+        await asyncio.wait({closing}, timeout=1)
+    await asyncio.wait({task}, timeout=0.2)
+    if task.done() and not task.cancelled():
+        error = task.exception()
+        if error is not None:
+            raise TimeoutError from error
+    raise TimeoutError
+
+
 def _session_call_timeout() -> float:
     selected = db_call_timeout.get()
     if selected is None:
@@ -291,6 +308,30 @@ class _BoundedSession(AsyncSession):
 
     async def flush(self, objects: Any = None) -> None:
         await self._bounded(super().flush(objects))
+
+    async def rollback(self) -> None:
+        await self._bounded(super().rollback())
+
+    async def close(self) -> None:
+        await self._bounded(super().close())
+
+    async def delete(self, instance: Any) -> None:
+        await self._bounded(super().delete(instance))
+
+    async def refresh(self, instance: Any, *args: Any, **kwargs: Any) -> None:
+        await self._bounded(super().refresh(instance, *args, **kwargs))
+
+    async def get(self, entity: Any, ident: Any, **kwargs: Any) -> Any:
+        return await self._bounded(super().get(entity, ident, **kwargs))
+
+    async def merge(self, instance: Any, **kwargs: Any) -> Any:
+        return await self._bounded(super().merge(instance, **kwargs))
+
+    async def connection(self, *args: Any, **kwargs: Any) -> Any:
+        return await self._bounded(super().connection(*args, **kwargs))
+
+    async def run_sync(self, fn: Any, *args: Any, **kwargs: Any) -> Any:
+        return await self._bounded(super().run_sync(fn, *args, **kwargs))
 
 
 _session_class = _BoundedSession if _sentica_instance is not None else AsyncSession

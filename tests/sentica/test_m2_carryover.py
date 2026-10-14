@@ -6,6 +6,8 @@ import logging
 import re
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS = ROOT / ".github" / "workflows"
 
@@ -34,6 +36,49 @@ def test_workflows_pin_ubuntu_2404_and_node24_actions() -> None:
             assert major >= PINNED_MAJORS[action], path.name
             seen[action] = True
     assert all(seen.values())
+
+
+def test_stalled_rollback_connection_and_run_sync_time_out() -> None:
+    import asyncio
+    import time
+
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from src.db import BoundedSession, db_call_timeout
+
+    async def stall(self: object, *_args: object, **_kwargs: object) -> None:
+        del self
+        await asyncio.sleep(30)
+
+    async def _check(name: str) -> None:
+        session = BoundedSession()
+        started = time.monotonic()
+        with pytest.raises(TimeoutError):
+            if name == "rollback":
+                await session.rollback()
+            elif name == "connection":
+                await session.connection()
+            else:
+                await session.run_sync(lambda _sync: None)
+        assert time.monotonic() - started < 2
+
+    async def _run() -> None:
+        token = db_call_timeout.set(0.25)
+        originals = {
+            name: getattr(AsyncSession, name)
+            for name in ("rollback", "connection", "run_sync")
+        }
+        try:
+            for name, original in originals.items():
+                setattr(AsyncSession, name, stall)
+                await _check(name)
+                setattr(AsyncSession, name, original)
+        finally:
+            for name, original in originals.items():
+                setattr(AsyncSession, name, original)
+            db_call_timeout.reset(token)
+
+    asyncio.run(_run())
 
 
 def test_production_log_strips_messages_except_the_allow_list() -> None:
