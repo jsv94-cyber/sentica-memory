@@ -14,16 +14,26 @@ from src.sentica.runtime import SenticaStartupError, load_instance
 from src.sentica.workspace_scope import require_workspace, workspace_policy_sql
 
 
-def _sync_dsn() -> str:
-    raw = os.environ["DB_CONNECTION_URI"].removeprefix("postgresql+psycopg://")
-    return "postgresql://" + raw
+def _sync_dsn(worker_id: str) -> str:
+    """Connect to the same database the pytest worker created."""
+    from sqlalchemy.engine.url import make_url
+
+    run_id = os.environ.get("HONCHO_TEST_RUN_ID", "local")
+    suffix = "" if worker_id == "master" else f"_{worker_id}"
+    url = make_url(os.environ["DB_CONNECTION_URI"]).set(
+        drivername="postgresql",
+        database=f"test_db_{run_id}{suffix}",
+    )
+    return url.render_as_string(hide_password=False)
 
 
 def _run(conn: Any, statement: str, params: tuple[object, ...] = ()) -> Any:
     return conn.execute(statement, params)
 
 
-def test_app_role_cannot_read_another_workspace(db_session: object) -> None:
+def test_app_role_cannot_read_another_workspace(
+    db_session: object, worker_id: str
+) -> None:
     del db_session
     left = "a" + uuid.uuid4().hex[:20]
     right = "b" + uuid.uuid4().hex[:20]
@@ -31,7 +41,7 @@ def test_app_role_cannot_read_another_workspace(db_session: object) -> None:
     right_id = "d" + uuid.uuid4().hex[:20]
     hook_left = "e" + uuid.uuid4().hex[:20]
     hook_right = "f" + uuid.uuid4().hex[:20]
-    with psycopg.connect(_sync_dsn(), autocommit=True) as conn:
+    with psycopg.connect(_sync_dsn(worker_id), autocommit=True) as conn:
         conn.execute(
             """
             DO $$ BEGIN
@@ -194,7 +204,7 @@ def test_app_role_cannot_read_another_workspace(db_session: object) -> None:
             "SELECT rolbypassrls, rolsuper FROM pg_roles WHERE rolname = 'sentica_app'"
         ).fetchone()
         assert bypass == (False, False)
-    with psycopg.connect(_sync_dsn()) as proof:
+    with psycopg.connect(_sync_dsn(worker_id)) as proof:
         proof.execute("SET ROLE sentica_app")
         for table in sorted(covered):
             count = _run(proof, 'SELECT count(*) FROM "' + table + '"').fetchone()
@@ -216,7 +226,7 @@ def test_app_role_cannot_read_another_workspace(db_session: object) -> None:
             assert foreign[0] == 0, table
             assert own[0] >= 1, table
         proof.rollback()
-    with psycopg.connect(_sync_dsn(), autocommit=True) as conn:
+    with psycopg.connect(_sync_dsn(worker_id), autocommit=True) as conn:
         for table in (
             "document_sources",
             "documents",
