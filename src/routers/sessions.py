@@ -708,7 +708,7 @@ async def get_session_peers(
 
 @router.get(
     "/{session_id}/context",
-    response_model=schemas.SessionContext | list[schemas.SessionContext],
+    response_model=schemas.SessionContext | schemas.SessionContextList,
 )
 async def get_session_context(
     workspace_id: str = Path(...),

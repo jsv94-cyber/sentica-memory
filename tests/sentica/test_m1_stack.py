@@ -78,11 +78,15 @@ def _compose(
     check: bool = True,
     stdin: str | None = None,
     timeout: float | None = None,
+    extra_files: list[str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     if not cert_dir_holder:
         raise RuntimeError("CERT_DIR is not set")
+    file_args = ["-f", str(COMPOSE_FILE)]
+    for extra in extra_files or []:
+        file_args.extend(["-f", extra])
     return _run(
-        ["docker", "compose", "-p", PROJECT, "-f", str(COMPOSE_FILE), *args],
+        ["docker", "compose", "-p", PROJECT, *file_args, *args],
         check=check,
         env={
             "CERT_DIR": cert_dir_holder[0],
@@ -144,7 +148,7 @@ def _assert_sqlstate(cert_dir: Path, sql: str, sqlstate: str) -> None:
 def _bind_workspace(cur: Any, workspace: str) -> None:
     """Let a raw tenant connection see one workspace under row-level security."""
     cur.execute(
-        "SELECT set_config('sentica.workspace', %s, false)",
+        "SELECT set_config('sentica.workspace', %s, true)",
         (workspace,),
     )
 
@@ -1627,69 +1631,143 @@ def test_posted_message_embedding_leaves_pending(stack: Path) -> None:
         json={"name": "p1"},
         timeout=20,
     ).status_code in (200, 201)
-    _compose(["stop", "deriver-a"])
-    try:
-        posted = httpx.post(
-            f"{API_A}/v3/workspaces/{workspace}/sessions/s1/messages",
-            headers=headers,
-            json={"messages": [{"peer_id": "p1", "content": content}]},
-            timeout=20,
-        )
-        assert posted.status_code in (200, 201), posted.text
-        script = (
-            "import asyncio\n"
-            "from src.config import settings\n"
-            "from src.embedding_client import embedding_client\n"
-            "from src.reconciler.sync_vectors import run_vector_reconciliation_cycle\n"
-            "dim = settings.EMBEDDING.VECTOR_DIMENSIONS\n"
-            "async def _embed(*_a, **_k):\n"
-            "    return [0.0] * dim\n"
-            "async def _batch(texts, *_a, **_k):\n"
-            "    return [[0.0] * dim for _text in texts]\n"
-            "embedding_client.embed = _embed\n"
-            "embedding_client.simple_batch_embed = _batch\n"
-            "embedding_client.batch_embed = _batch\n"
-            "metrics = asyncio.run(run_vector_reconciliation_cycle())\n"
-            "print('reconciled', metrics.message_embeddings_synced)\n"
-        )
-        deadline = time.monotonic() + 30
-        state = "pending"
-        while time.monotonic() < deadline and state == "pending":
-            # The request path leases the row for the backoff window. Clear that
-            # lease so this cycle, not a ten-minute wait, can embed it.
-            with (
-                _connect(PROXY_A, stack, "tenant_a", "tenant_a", "tenant_a") as conn,
-                conn.cursor() as cur,
-            ):
-                _bind_workspace(cur, workspace)
-                cur.execute(
-                    "UPDATE memory.message_embeddings SET last_sync_at = NULL "
-                    "WHERE content = %s AND sync_state = 'pending'",
-                    (content,),
-                )
-                conn.commit()
-            ran = _compose(
-                ["exec", "-T", "api-a", "/app/.venv/bin/python", "-"],
-                check=False,
-                stdin=script,
-                timeout=60,
+    posted = httpx.post(
+        f"{API_A}/v3/workspaces/{workspace}/sessions/s1/messages",
+        headers=headers,
+        json={"messages": [{"peer_id": "p1", "content": content}]},
+        timeout=20,
+    )
+    assert posted.status_code in (200, 201), posted.text
+    # The request path may embed the row immediately. Put it back so the
+    # scheduler gate, not that path, is what the deriver claims.
+    deadline = time.monotonic() + 20
+    saw_row = False
+    while time.monotonic() < deadline:
+        with (
+            _connect(PROXY_A, stack, "tenant_a", "tenant_a", "tenant_a") as conn,
+            conn.cursor() as cur,
+        ):
+            _bind_workspace(cur, workspace)
+            cur.execute(
+                "SELECT sync_state FROM memory.message_embeddings WHERE content = %s",
+                (content,),
             )
-            assert ran.returncode == 0, ran.stderr[-1500:] + ran.stdout[-1500:]
-            with (
-                _connect(PROXY_A, stack, "tenant_a", "tenant_a", "tenant_a") as conn,
-                conn.cursor() as cur,
-            ):
-                _bind_workspace(cur, workspace)
-                cur.execute(
-                    "SELECT sync_state FROM memory.message_embeddings "
-                    "WHERE content = %s",
-                    (content,),
-                )
-                row = cur.fetchone()
-            assert row is not None
-            state = str(row[0])
-            if state == "pending":
-                time.sleep(1)
-        assert state != "pending"
+            row = cur.fetchone()
+        if row is not None:
+            saw_row = True
+            if str(row[0]) != "pending":
+                break
+        time.sleep(0.5)
+    assert saw_row
+    with (
+        _connect(PROXY_A, stack, "tenant_a", "tenant_a", "tenant_a") as conn,
+        conn.cursor() as cur,
+    ):
+        _bind_workspace(cur, workspace)
+        cur.execute(
+            "UPDATE memory.message_embeddings SET sync_state = 'pending', "
+            "embedding = NULL, last_sync_at = NULL WHERE content = %s",
+            (content,),
+        )
+        conn.commit()
+    script = (
+        "import asyncio\n"
+        "from src.dependencies import tracked_db\n"
+        "from src.reconciler.scheduler import RECONCILER_TASKS, ReconcilerScheduler\n"
+        "from src.sentica.workspace_scope import fetch_pending_counts\n"
+        "wanted = " + repr(workspace) + "\n"
+        "async def main():\n"
+        "    async with tracked_db('stack.counts', read_only=True) as db:\n"
+        "        counts = await fetch_pending_counts(db)\n"
+        "    assert counts is not None\n"
+        "    names = [\n"
+        "        row.workspace_name for row in counts if row.pending_embeddings > 0\n"
+        "    ]\n"
+        "    print('gate', wanted in names)\n"
+        "    scheduler = ReconcilerScheduler()\n"
+        "    enqueued = await scheduler._try_enqueue_task(\n"
+        "        RECONCILER_TASKS['sync_vectors']\n"
+        "    )\n"
+        "    print('enqueued', bool(enqueued))\n"
+        "asyncio.run(main())\n"
+    )
+    assert "run_vector_reconciliation_cycle" not in script
+    ran = _compose(
+        ["exec", "-T", "deriver-a", "/app/.venv/bin/python", "-"],
+        check=False,
+        stdin=script,
+        timeout=60,
+    )
+    assert ran.returncode == 0, ran.stderr[-1500:] + ran.stdout[-1500:]
+    assert "gate True" in ran.stdout
+    assert "enqueued True" in ran.stdout
+    deadline = time.monotonic() + 90
+    state = "pending"
+    while time.monotonic() < deadline and state == "pending":
+        with (
+            _connect(PROXY_A, stack, "tenant_a", "tenant_a", "tenant_a") as conn,
+            conn.cursor() as cur,
+        ):
+            _bind_workspace(cur, workspace)
+            cur.execute(
+                "SELECT sync_state FROM memory.message_embeddings WHERE content = %s",
+                (content,),
+            )
+            row = cur.fetchone()
+        assert row is not None
+        state = str(row[0])
+        if state == "pending":
+            time.sleep(1)
+    assert state != "pending"
+
+
+def test_api_refuses_a_stale_schema_and_a_runtime_cert_as_ddl(stack: Path) -> None:
+    """api-a will not boot on an old revision, and the runtime cert is not ddl."""
+    with (
+        _connect(PROXY_A, stack, "tenant_a_ddl", "tenant_a", "tenant_a_ddl") as conn,
+        conn.cursor() as cur,
+    ):
+        cur.execute("SELECT version_num FROM memory.alembic_version")
+        current = cur.fetchone()
+        assert current is not None
+        head = str(current[0])
+        cur.execute(
+            "UPDATE memory.alembic_version SET version_num = %s",
+            ("3e7a1c9d5b20",),
+        )
+        conn.commit()
+    # api-a already owns 172.28.10.10. The one-off uses another address on net-a.
+    override = stack.parent / "api-a-once.yml"
+    override.write_text(
+        "services:\n"
+        "  api-a:\n"
+        "    networks:\n"
+        "      net-a:\n"
+        "        ipv4_address: 172.28.10.50\n",
+        encoding="utf-8",
+    )
+    try:
+        ran = _compose(
+            ["run", "--no-deps", "--rm", "-T", "api-a"],
+            check=False,
+            timeout=90,
+            extra_files=[str(override)],
+        )
+        output = ran.stdout + ran.stderr
+        assert ran.returncode != 0, output[-1500:]
+        assert "Refusing to start: schema revision is behind" in output
     finally:
-        _compose(["start", "deriver-a"])
+        override.unlink(missing_ok=True)
+        with (
+            _connect(
+                PROXY_A, stack, "tenant_a_ddl", "tenant_a", "tenant_a_ddl"
+            ) as conn,
+            conn.cursor() as cur,
+        ):
+            cur.execute(
+                "UPDATE memory.alembic_version SET version_num = %s",
+                (head,),
+            )
+            conn.commit()
+    with pytest.raises(psycopg.OperationalError):
+        _connect(PROXY_A, stack, "tenant_a_ddl", "tenant_a", "tenant_a").close()

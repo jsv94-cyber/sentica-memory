@@ -124,10 +124,10 @@ is observation or document.
   `(derived_id, source_id, position)`.
 
 `src/crud/collection.py:134` `get_or_create_collection` opens the pair's
-collection. `src/crud/representation.py:70` `RepresentationManager` writes
-derived observations (`save_representation` at `src/crud/representation.py:84`)
+collection. `src/crud/representation.py:84` `RepresentationManager` writes
+derived observations (`save_representation` at `src/crud/representation.py:98`)
 and reads them back (`get_working_representation` at
-`src/crud/representation.py:241`). Semantic search is
+`src/crud/representation.py:255`). Semantic search is
 `src/crud/document.py:380` `query_documents`.
 
 `src/routers/conclusions.py:22` is `/v3/workspaces/{workspace_id}/conclusions`.
@@ -197,7 +197,7 @@ is the store.
 
 The worker process is `python -m src.deriver` (`src/deriver/__main__.py:22`
 calls `src/deriver/queue_manager.py:1342` `main`). `src/deriver/queue_manager.py:140`
-`QueueManager.polling_loop` (`src/deriver/queue_manager.py:546`) claims work
+`QueueManager.polling_loop` (`src/deriver/queue_manager.py:548`) claims work
 units (`src/deriver/queue_manager.py:322`) and processes them in order.
 `src/deriver/consumer.py:47` `process_item` dispatches on `task_type`.
 Representation batches go to `src/deriver/deriver.py:44`
@@ -243,7 +243,7 @@ Embeddings do not use `honcho_llm_call`. `src/embedding_client.py:710`
 `src/embedding_client.py:308` `embed` calls the provider.
 The default transport is OpenAI `text-embedding-3-small`
 (`src/config.py` `EmbeddingSettings`). The OpenAI request is
-`src/embedding_client.py:351` `embeddings.create`. Gemini uses
+`src/embedding_client.py:360` `embeddings.create`. Gemini uses
 `embed_content` in the same class when the transport is `gemini`.
 Callers are message create (fast path), the reconciler
 (`src/reconciler/sync_vectors.py`), and document insert in

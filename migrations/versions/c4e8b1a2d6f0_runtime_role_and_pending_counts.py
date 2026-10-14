@@ -68,11 +68,17 @@ def upgrade() -> None:
     schema = settings.DB.SCHEMA
     bind = op.get_bind()
     quoted = _quote(schema)
+    # FORCE RLS hides NULL workspace rows, so the delete would match nothing
+    # and the NOT NULL change would then fail. Lift the force around it.
+    op.execute(sa.text(f"ALTER TABLE {quoted}.queue NO FORCE ROW LEVEL SECURITY"))
+    op.execute(sa.text(f"ALTER TABLE {quoted}.queue DISABLE ROW LEVEL SECURITY"))
     op.execute(
         sa.text(
             f"DELETE FROM {quoted}.queue WHERE workspace_name IS NULL"  # noqa: S608
         )
     )
+    op.execute(sa.text(f"ALTER TABLE {quoted}.queue ENABLE ROW LEVEL SECURITY"))
+    op.execute(sa.text(f"ALTER TABLE {quoted}.queue FORCE ROW LEVEL SECURITY"))
     op.alter_column("queue", "workspace_name", nullable=False, schema=schema)
     op.execute(sa.text(pending_counts_function_sql(schema)))
     runtime = _runtime_role(bind)
@@ -105,7 +111,15 @@ def upgrade() -> None:
     )
     current = bind.execute(sa.text("SELECT current_user")).scalar()
     if isinstance(current, str):
-        for table_name in ("queue", "message_embeddings"):
+        # The function is SECURITY DEFINER and owned by this role. FORCE RLS
+        # would otherwise hide every row, so each scanned table has a
+        # role-only read policy. The runtime role is not that role.
+        for table_name in (
+            "queue",
+            "message_embeddings",
+            "documents",
+            "collections",
+        ):
             op.execute(sa.text(ddl_select_policy_sql(schema, table_name, current)))
 
 
@@ -118,7 +132,12 @@ def downgrade() -> None:
         for table_name in _tables(bind, schema):
             table = quoted + "." + _quote(table_name)
             op.execute(sa.text(f"ALTER TABLE {table} OWNER TO {_quote(runtime)}"))
-    for table_name in ("queue", "message_embeddings"):
+    for table_name in (
+        "queue",
+        "message_embeddings",
+        "documents",
+        "collections",
+    ):
         table = quoted + "." + _quote(table_name)
         op.execute(sa.text(f"DROP POLICY IF EXISTS sentica_ddl_read ON {table}"))
     op.execute(sa.text(f"DROP FUNCTION IF EXISTS {quoted}.sentica_pending_counts()"))

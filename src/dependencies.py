@@ -77,8 +77,9 @@ async def tracked_db(operation_name: str | None = None, *, read_only: bool = Fal
         await db.rollback()
         raise
     finally:
-        # Always send ROLLBACK unconditionally — see get_db() comment. (Under
-        # read_only/AUTOCOMMIT it is a wire-level no-op.)
+        # Always send ROLLBACK. A read-only session is a real transaction
+        # (BEGIN READ ONLY), so rollback ends it and checkin clears
+        # sentica.workspace. It is not AUTOCOMMIT and it is not a no-op.
         await db.rollback()
         await db.close()
         if token:  # Only reset if we set it

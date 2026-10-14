@@ -19,6 +19,7 @@ class ReconcilerType(str, Enum):
 
     SYNC_VECTORS = "sync_vectors"
     CLEANUP_QUEUE = "cleanup_queue"
+    CLEANUP = "cleanup"
     BACKFILL_DOCUMENT_SOURCES = "backfill_document_sources"
     BACKFILL = "backfill"
 

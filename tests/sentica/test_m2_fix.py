@@ -54,6 +54,10 @@ def test_pending_counts_function_has_no_content_columns() -> None:
     assert "search_path = memory, pg_temp" in sql
     assert "pending_queue" in sql
     assert "pending_embeddings" in sql
+    assert "pending_backfills" in sql
+    assert "soft_deleted_documents" in sql
+    assert "dreams_due" in sql
+    assert "sentica_pending_counts()" in sql
     assert "content" not in sql
 
 
@@ -147,14 +151,46 @@ def test_data_migration_updates_each_workspace(worker_id: str) -> None:
 
 
 def test_queue_workspace_name_is_required(worker_id: str) -> None:
+    """A queue row without a workspace is rejected."""
+    from tests.sentica.rls_job import ddl_dsn, rls_job
+
     with (
         psycopg.connect(_sync_dsn(worker_id)) as conn,
-        pytest.raises(psycopg.Error),
+        pytest.raises(psycopg.Error) as exc,
     ):
         conn.execute(
             "INSERT INTO queue (work_unit_key, task_type, payload) "
             + "VALUES ('missing-workspace', 'representation', '{}')"
         )
+    # create_all has no policy, so NOT NULL reports 23502. FORCE RLS on the
+    # migrated schema rejects the row in WITH CHECK and reports 42501.
+    if rls_job():
+        assert exc.value.sqlstate == "42501"
+        with psycopg.connect(ddl_dsn(), autocommit=True) as owner:
+            left = _exec(
+                owner,
+                "SELECT count(*) FROM memory.queue "
+                + "WHERE work_unit_key = 'missing-workspace'",
+            ).fetchone()
+        assert left == (0,)
+        # The superuser bypasses RLS, so the same insert is the NOT NULL error.
+        import os
+
+        admin_dsn = os.environ["SENTICA_RLS_ADMIN_DSN"].replace(
+            "postgresql+psycopg://", "postgresql://", 1
+        )
+        with (
+            psycopg.connect(admin_dsn) as admin,
+            pytest.raises(psycopg.Error) as not_null,
+        ):
+            _exec(
+                admin,
+                "INSERT INTO memory.queue (work_unit_key, task_type, payload) "
+                + "VALUES ('missing-workspace-admin', 'representation', '{}')",
+            )
+        assert not_null.value.sqlstate == "23502"
+    else:
+        assert exc.value.sqlstate == "23502"
 
 
 def _revision_check_on_migrated_schema() -> None:
@@ -231,6 +267,16 @@ async def test_workspace_setting_is_not_inherited(
             count = await conn.scalar(text("SELECT count(*) FROM peers"))
             await conn.commit()
             reset_workspace(bound)
+            raw = await conn.get_raw_connection()
+            driver = raw.driver_connection
+            assert driver is not None
+            cursor = driver.cursor()
+            await cursor.execute("SELECT current_setting('sentica.workspace', true)")
+            raw_setting = await cursor.fetchone()
+            await cursor.close()
+            await driver.rollback()
+            assert raw_setting is not None
+            assert raw_setting[0] in ("", None)
             later = await conn.scalar(text("SELECT count(*) FROM peers"))
             await conn.commit()
             assert count == 1
@@ -250,9 +296,12 @@ async def test_workspace_setting_is_not_inherited(
             nested = await conn.begin_nested()
             await nested.rollback()
             reset_workspace(again)
-            switched = set_workspace(right)
-            await conn.execute(text("SELECT 1"))
-            reset_workspace(switched)
+            with pytest.raises(RuntimeError, match="open transaction"):
+                switched = set_workspace(right)
+                try:
+                    await conn.execute(text("SELECT 1"))
+                finally:
+                    reset_workspace(switched)
             await conn.rollback()
     finally:
         await engine.dispose()
@@ -529,6 +578,16 @@ async def _setting_not_inherited_as_runtime() -> None:
         count = await conn.scalar(text("SELECT count(*) FROM peers"))
         await conn.commit()
         reset_workspace(held)
+        raw = await conn.get_raw_connection()
+        driver = raw.driver_connection
+        assert driver is not None
+        cursor = driver.cursor()
+        await cursor.execute("SELECT current_setting('sentica.workspace', true)")
+        raw_setting = await cursor.fetchone()
+        await cursor.close()
+        await driver.rollback()
+        assert raw_setting is not None
+        assert raw_setting[0] in ("", None)
         later = await conn.scalar(text("SELECT count(*) FROM peers"))
         await conn.commit()
         assert count == 1
@@ -548,9 +607,12 @@ async def _setting_not_inherited_as_runtime() -> None:
         nested = await conn.begin_nested()
         await nested.rollback()
         reset_workspace(again)
-        switched = set_workspace(peers.right)
-        await conn.execute(text("SELECT 1"))
-        reset_workspace(switched)
+        with pytest.raises(RuntimeError, match="open transaction"):
+            switched = set_workspace(peers.right)
+            try:
+                await conn.execute(text("SELECT 1"))
+            finally:
+                reset_workspace(switched)
         await conn.rollback()
 
 
@@ -580,29 +642,33 @@ async def test_workspace_change_inside_an_open_transaction_is_refused(
                 reset_workspace(held)
 
 
-async def test_savepoint_rollback_clears_the_workspace_cache(
+async def test_savepoint_rollback_refuses_a_different_workspace(
     worker_id: str,
 ) -> None:
-    """Item 6: rolling back a savepoint lets the next statement change workspace."""
+    """A savepoint rollback keeps the pinned workspace and refuses a switch."""
     from src.sentica.workspace_scope import reset_workspace, set_workspace
 
     async with _isolated_peers(worker_id) as peers:
         held = set_workspace(peers.left)
-        switched = None
         try:
             async with peers.engine.connect() as conn:
                 await _use_runtime(conn, peers.role)
-                await conn.execute(text("SELECT 1"))
+                count = await conn.scalar(text("SELECT count(*) FROM peers"))
                 nested = await conn.begin_nested()
                 await nested.rollback()
+                again = await conn.scalar(text("SELECT count(*) FROM peers"))
+                assert count == 1
+                assert again == 1
                 reset_workspace(held)
                 held = None
-                switched = set_workspace(peers.right)
-                await conn.execute(text("SELECT 1"))
+                with pytest.raises(RuntimeError, match="open transaction"):
+                    switched = set_workspace(peers.right)
+                    try:
+                        await conn.execute(text("SELECT 1"))
+                    finally:
+                        reset_workspace(switched)
                 await conn.rollback()
         finally:
-            if switched is not None:
-                reset_workspace(switched)
             if held is not None:
                 reset_workspace(held)
 
@@ -624,3 +690,96 @@ async def test_workspace_setting_is_cleared_on_rollback(worker_id: str) -> None:
                 assert again == 1
         finally:
             reset_workspace(held)
+
+
+def test_null_queue_rows_are_deleted_when_force_rls_is_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-superuser ddl role can delete NULL queue rows and reach head."""
+    import os
+
+    from alembic import command
+    from alembic.config import Config
+    from sqlalchemy.engine.url import make_url
+
+    from src.config import settings
+    from tests.sentica.rls_job import rls_job
+
+    admin = (
+        os.environ["SENTICA_RLS_ADMIN_DSN"]
+        if rls_job()
+        else os.environ["DB_CONNECTION_URI"]
+    )
+    admin_url = make_url(admin).set(drivername="postgresql")
+    suffix = uuid.uuid4().hex[:10]
+    database = "m2mig" + suffix
+    role = "m2ddl" + suffix
+    password = "m2mig-secret"
+    maintenance = admin_url.set(database="postgres").render_as_string(
+        hide_password=False
+    )
+    # The job's admin URL names the tenant database, which can create another.
+    if rls_job():
+        maintenance = admin_url.render_as_string(hide_password=False)
+    schema = settings.DB.SCHEMA
+    role_url = admin_url.set(
+        username=role, password=password, database=database
+    ).render_as_string(hide_password=False)
+    monkeypatch.setattr(
+        settings.DB,
+        "CONNECTION_URI",
+        role_url.replace("postgresql://", "postgresql+psycopg://", 1),
+    )
+    with psycopg.connect(maintenance, autocommit=True) as conn:
+        _exec(
+            conn,
+            "CREATE ROLE "
+            + role
+            + " LOGIN PASSWORD 'm2mig-secret' NOSUPERUSER NOBYPASSRLS",
+        )
+        _exec(conn, "CREATE DATABASE " + database + " OWNER " + role)
+    try:
+        owner = admin_url.set(database=database).render_as_string(hide_password=False)
+        with psycopg.connect(owner, autocommit=True) as conn:
+            _exec(conn, "CREATE EXTENSION IF NOT EXISTS vector")
+            _exec(conn, "CREATE EXTENSION IF NOT EXISTS pg_trgm")
+        cfg = Config(str(ROOT / "alembic.ini"))
+        command.upgrade(cfg, "3e7a1c9d5b20")
+        with psycopg.connect(role_url, autocommit=True) as conn:
+            _exec(
+                conn,
+                "INSERT INTO "
+                + schema
+                + ".queue (work_unit_key, task_type, payload, workspace_name) "
+                + "VALUES (%s, 'representation', %s::jsonb, NULL)",
+                ("null-workspace", "{}"),
+            )
+        command.upgrade(cfg, "head")
+        with psycopg.connect(role_url, autocommit=True) as conn:
+            nullable = _exec(
+                conn,
+                """
+                SELECT is_nullable FROM information_schema.columns
+                WHERE table_schema = %s AND table_name = 'queue'
+                    AND column_name = 'workspace_name'
+                """,
+                (schema,),
+            ).fetchone()
+            left = _exec(
+                conn,
+                "SELECT count(*) FROM "
+                + schema
+                + ".queue WHERE workspace_name IS NULL",
+            ).fetchone()
+        assert nullable == ("NO",)
+        assert left == (0,)
+    finally:
+        with psycopg.connect(maintenance, autocommit=True) as conn:
+            _exec(
+                conn,
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                + "WHERE datname = %s AND pid <> pg_backend_pid()",
+                (database,),
+            )
+            _exec(conn, "DROP DATABASE IF EXISTS " + database)
+            _exec(conn, "DROP ROLE IF EXISTS " + role)

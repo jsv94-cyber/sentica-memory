@@ -153,9 +153,10 @@ Built:
   representation, and cards query one workspace at a time and re-check the
   token for each one.
 - Queue rows require a workspace. Pending work is counted by a
-  security-definer function that returns only the workspace name and two
-  counts. The deriver and the reconciler do that work one workspace per
-  transaction.
+  security-definer function that returns only the workspace name and the
+  five gate counts (pending queue, pending embeddings, pending backfills,
+  soft-deleted documents, dreams due). The deriver and the reconciler do
+  that work one workspace per transaction.
 - A workspace that is not in the token set is refused. An ambiguous token
   is refused. Production allows only the pgvector store.
 - Peer cache keys include the workspace name.
@@ -167,11 +168,11 @@ Test counts on 2026-10-14, against the local Postgres on host port 5433,
 with `SENTICA_MODE=test`:
 
 - `uv run pytest --ignore=tests/sentica/test_m1_stack.py -q --tb=line`:
-  **3247 passed, 53 skipped, 0 failed** (96.51s). The 53 skips are the
+  **3254 passed, 53 skipped, 0 failed** (102.95s). The 53 skips are the
   upstream live-llm tests and two pagination cases.
   `test_runtime_role_lockdown` is not collected here.
 - `uv run pytest tests/sentica/test_m1_stack.py -n0 -q --tb=line`:
-  **23 passed, 0 skipped, 0 failed** (170.37s).
+  **24 passed, 0 skipped, 0 failed** (175.26s).
 - Runtime-role job (`SENTICA_MODE=production`, app engine as `tenant_rls`):
-  **47 passed, 0 skipped, 0 failed** (11.20s). See `.review/M2-summary.md`.
+  **53 passed, 0 skipped, 0 failed** (15.89s). See `.review/M2-summary.md`.
 

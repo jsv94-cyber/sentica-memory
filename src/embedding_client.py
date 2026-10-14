@@ -173,6 +173,13 @@ def _publish_embedding_event(
         logger.debug("Failed to emit EmbeddingCallCompletedEvent", exc_info=True)
 
 
+def _local_dummy_key() -> bool:
+    """The stack's placeholder key never calls a provider."""
+    from src.config import settings
+
+    return settings.LLM.OPENAI_API_KEY == "sentica-local-dummy"
+
+
 class EmbeddingTokenLimitError(ValueError):
     """Raised when input text genuinely exceeds the model's token limit.
 
@@ -312,6 +319,8 @@ class _EmbeddingClient:
             raise EmbeddingTokenLimitError(
                 f"Query exceeds maximum token limit of {self.max_embedding_tokens} tokens (got {token_count} tokens)"
             )
+        if _local_dummy_key():
+            return [0.0] * self.vector_dimensions
 
         # Dispatch on transport rather than isinstance so this module never
         # needs the SDK types at runtime; the cast gives the closures a typed
@@ -403,9 +412,7 @@ class _EmbeddingClient:
         if not texts:
             return []
 
-        # Validate / cap per-input token limit and collect counts for batching
         prepared_texts: list[str] = []
-        token_counts: list[int] = []
         for idx, text in enumerate(texts):
             token_ids = self.encoding.encode(text)
             if len(token_ids) > self.max_embedding_tokens:
@@ -423,26 +430,11 @@ class _EmbeddingClient:
                         f"Text at index {idx} exceeds maximum token limit of "
                         + f"{self.max_embedding_tokens} tokens (got {len(token_ids)} tokens)"
                     )
-            else:
-                tokens = len(token_ids)
             prepared_texts.append(text)
-            token_counts.append(tokens)
 
-        # Use positional indices as text_ids so we can reassemble in input order.
-        text_chunks: dict[str, list[tuple[str, int]]] = {
-            str(i): [(prepared_texts[i], token_counts[i])]
-            for i in range(len(prepared_texts))
-        }
-
-        batches = self._create_batches(text_chunks)
-        batch_results = await asyncio.gather(
-            *[self._process_batch(batch) for batch in batches],
-        )
-
-        combined: dict[str, list[list[float]]] = self._accumulate_embeddings(
-            batch_results
-        )
-        return [combined[str(i)][0] for i in range(len(texts))]
+        indexed = {str(i): prepared_texts[i] for i in range(len(prepared_texts))}
+        embedded = await self.batch_embed(indexed)
+        return [embedded[str(i)][0] for i in range(len(texts))]
 
     def prepare_chunks(self, id_resource_dict: dict[str, str]) -> dict[str, list[str]]:
         """
@@ -571,6 +563,13 @@ class _EmbeddingClient:
             _emit_embedding_call emits a separate event per attempt — each
             attempt is a distinct provider hit and shows up as its own line
             item in analytics."""
+            if _local_dummy_key():
+                zeros: dict[str, dict[int, list[float]]] = defaultdict(dict)
+                for item in batch:
+                    zeros[item.text_id][item.chunk_index] = [
+                        0.0
+                    ] * self.vector_dimensions
+                return zeros
             result: dict[str, dict[int, list[float]]] = defaultdict(dict)
             if self.transport == "gemini":
                 from google.genai import types as genai_types

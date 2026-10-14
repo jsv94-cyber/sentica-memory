@@ -118,29 +118,51 @@ class DeriverMetricsPoller:
     async def refresh(self) -> None:
         """One pass. The snapshot only advances on a complete pass."""
         dreams_refreshed = False
-        from src.sentica.workspace_scope import fetch_pending_counts
+        from src.sentica.workspace_scope import (
+            fetch_pending_counts,
+            reset_workspace,
+            set_workspace,
+        )
 
+        dream_names: list[str] | None
         async with tracked_db("deriver_metrics", read_only=True) as db:
             counts = await fetch_pending_counts(db)
             if counts is None:
                 stats = await crud.get_deriver_metrics(db)
+                dream_names = None
             else:
                 names = [
-                    name
-                    for name, pending, embeddings in counts
-                    if pending or embeddings
+                    row.workspace_name
+                    for row in counts
+                    if row.pending_queue or row.pending_embeddings
                 ]
                 stats = (
                     await crud.metrics_for_workspaces(names)
                     if names
                     else crud.zero_deriver_metrics()
                 )
-            if self._dream_poll_due():
-                self._due_dreams = await list_due_dreams(db)
-                self._next_dream_poll = (
-                    time.monotonic() + settings.DREAM.DUE_POLL_INTERVAL_SECONDS
-                )
-                dreams_refreshed = True
+                dream_names = [
+                    row.workspace_name for row in counts if row.dreams_due > 0
+                ]
+
+        if self._dream_poll_due():
+            due: list[DueDream] = []
+            if dream_names is None:
+                async with tracked_db("dream_due", read_only=True) as db:
+                    due = await list_due_dreams(db)
+            else:
+                for name in dream_names:
+                    async with tracked_db("dream_due", read_only=True) as db:
+                        token = set_workspace(name)
+                        try:
+                            due.extend(await list_due_dreams(db))
+                        finally:
+                            reset_workspace(token)
+            self._due_dreams = due
+            self._next_dream_poll = (
+                time.monotonic() + settings.DREAM.DUE_POLL_INTERVAL_SECONDS
+            )
+            dreams_refreshed = True
 
         if dreams_refreshed and settings.DERIVER.SCHEDULER == "api":
             await self._enqueue_due_dreams()

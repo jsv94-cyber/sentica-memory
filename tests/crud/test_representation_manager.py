@@ -1211,6 +1211,41 @@ class TestSemanticQueryFailureDegrades:
             assert recent == []
 
     @pytest.mark.asyncio
+    async def test_read_only_transaction_error_does_not_poison_session(
+        self,
+        db_engine: AsyncEngine,
+        sample_data: tuple[models.Workspace, models.Peer],
+    ):
+        """A failed read on BEGIN READ ONLY is rolled back for the next query."""
+        test_workspace, test_peer = sample_data
+        manager = RepresentationManager(
+            test_workspace.name, observer=test_peer.name, observed=test_peer.name
+        )
+
+        async def aborted(db: AsyncSession, **_kwargs: object) -> list[object]:
+            await db.execute(text("SELECT 1/0"))
+            return []
+
+        factory = async_sessionmaker(
+            bind=db_engine.execution_options(
+                isolation_level="READ COMMITTED",
+                postgresql_readonly=True,
+            ),
+            expire_on_commit=False,
+        )
+        async with factory() as read_db:
+            with patch(
+                "src.crud.representation.crud.query_documents",
+                side_effect=aborted,
+            ):
+                semantic = await manager._query_documents_semantic(  # pyright: ignore[reportPrivateUsage]
+                    read_db, query="anything", top_k=5, embedding=[0.0] * 1536
+                )
+            assert semantic == []
+            again = await read_db.scalar(text("SELECT 1"))
+            assert again == 1
+
+    @pytest.mark.asyncio
     async def test_dropped_connection_on_write_session_propagates(
         self,
         db_engine: AsyncEngine,

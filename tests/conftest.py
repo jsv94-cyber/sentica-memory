@@ -1,9 +1,10 @@
 import logging
 import os
 import re
+import sys
 import time
 import uuid
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable, Generator
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -154,24 +155,60 @@ def pytest_collection_modifyitems(
             item.add_marker(skip_live)
 
 
+_M2_SKIPS: list[str] = []
+
+
 def pytest_collection_finish(session: pytest.Session) -> None:
-    """Fail the runtime-role job when it collects fewer tests than the files define."""
+    """Fail the runtime-role job unless it collected the pinned node ids."""
     if os.environ.get("SENTICA_RLS_JOB") != "1":
         return
-    from tests.sentica.rls_job import defined_m2_tests
+    from tests.sentica.rls_job import EXPECTED_M2_NODE_IDS
 
-    expected = defined_m2_tests()
-    collected = sum(
-        1 for item in session.items if "tests/sentica/test_m2_" in item.nodeid
-    )
-    if collected < expected:
+    collected = {
+        item.nodeid for item in session.items if "tests/sentica/test_m2_" in item.nodeid
+    }
+    expected = set(EXPECTED_M2_NODE_IDS)
+    if collected != expected:
+        missing = sorted(expected - collected)
+        extra = sorted(collected - expected)
         pytest.exit(
             "test-m2-rls collected "
-            + str(collected)
-            + " tests from tests/sentica/test_m2_*.py; those files define "
-            + str(expected),
+            + str(len(collected))
+            + " tests from tests/sentica/test_m2_*.py; the pin has "
+            + str(len(EXPECTED_M2_NODE_IDS))
+            + "; missing "
+            + repr(missing)
+            + "; extra "
+            + repr(extra),
             returncode=1,
         )
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(
+    item: pytest.Item, call: pytest.CallInfo[None]
+) -> Generator[None, Any]:
+    """Remember a skipped M2 test so the runtime-role job can fail."""
+    del call
+    outcome: Any = yield
+    if os.environ.get("SENTICA_RLS_JOB") != "1":
+        return
+    if "tests/sentica/test_m2_" not in item.nodeid:
+        return
+    report = outcome.get_result()
+    if bool(report.skipped):
+        _M2_SKIPS.append(item.nodeid)
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """A skipped M2 test is a failed runtime-role job."""
+    if os.environ.get("SENTICA_RLS_JOB") != "1" or not _M2_SKIPS:
+        return
+    session.exitstatus = max(exitstatus, 1)
+    print(
+        "test-m2-rls skipped " + ", ".join(_M2_SKIPS),
+        file=sys.stderr,
+    )
 
 
 _RUN_ID_ENV_VAR = "HONCHO_TEST_RUN_ID"
@@ -1042,13 +1079,17 @@ def mock_tracked_db(request: pytest.FixtureRequest):
     from contextlib import ExitStack, asynccontextmanager
 
     db_engine = request.getfixturevalue("db_engine")
-    session_factory = async_sessionmaker(bind=db_engine, expire_on_commit=False)
 
     @asynccontextmanager
     async def mock_tracked_db_context(_: str | None = None, *, read_only: bool = False):
-        # read_only is accepted (and ignored): in tests both engines resolve to
-        # the same per-test database session.
-        del read_only
+        # Honour read_only with the same BEGIN READ ONLY option the app uses.
+        bind = db_engine
+        if read_only:
+            bind = db_engine.execution_options(
+                isolation_level="READ COMMITTED",
+                postgresql_readonly=True,
+            )
+        session_factory = async_sessionmaker(bind=bind, expire_on_commit=False)
         async with session_factory() as session:
             try:
                 yield session

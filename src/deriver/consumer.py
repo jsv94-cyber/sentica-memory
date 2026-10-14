@@ -431,6 +431,11 @@ async def process_reconciler(payload: ReconcilerPayload) -> None:
                 )
             )
 
+    elif reconciler_type == ReconcilerType.CLEANUP:
+        logger.debug("Processing cleanup task")
+        from src.reconciler.sync_vectors import run_document_cleanup
+
+        await run_document_cleanup()
     elif reconciler_type == ReconcilerType.CLEANUP_QUEUE:
         logger.debug("Processing cleanup_queue task")
         deleted_count = await cleanup_queue_items()

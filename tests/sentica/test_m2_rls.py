@@ -2,18 +2,25 @@
 
 from __future__ import annotations
 
+import ast
 import uuid
 from pathlib import Path
+from typing import Any
 
 import psycopg
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from src.sentica.tokens import verify_sentica_token
-from tests.sentica.rls_job import ddl_dsn, defined_m2_tests, rls_job, runtime_dsn
+from tests.sentica.rls_job import EXPECTED_M2_NODE_IDS, ddl_dsn, rls_job, runtime_dsn
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def _exec(conn: Any, statement: str, params: tuple[Any, ...] = ()) -> Any:
+    return conn.execute(statement, params)
 
 
 def test_signed_token_names_its_workspaces(tmp_path: object) -> None:
@@ -68,13 +75,25 @@ def test_signed_token_names_its_workspaces(tmp_path: object) -> None:
 def test_rls_job_collects_every_m2_file(request: pytest.FixtureRequest) -> None:
     """The job's collected count covers every test function in test_m2_*.py."""
     if rls_job():
-        collected = [
+        collected = {
             item.nodeid
             for item in request.session.items
             if "tests/sentica/test_m2_" in item.nodeid
-        ]
-        assert len(collected) >= defined_m2_tests()
+        }
+        assert collected == EXPECTED_M2_NODE_IDS
         return
+    pinned_names = {
+        nodeid.split("::", 1)[1].split("[", 1)[0] for nodeid in EXPECTED_M2_NODE_IDS
+    }
+    defined_names: set[str] = set()
+    for path in sorted((ROOT / "tests" / "sentica").glob("test_m2_*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and (
+                node.name.startswith("test_")
+            ):
+                defined_names.add(node.name)
+    assert defined_names == pinned_names
     workflow = (ROOT / ".github" / "workflows" / "unittest.yml").read_text(
         encoding="utf-8"
     )
@@ -114,15 +133,16 @@ async def test_app_engine_is_the_runtime_role() -> None:
 def test_runtime_role_lockdown() -> None:
     dsn = runtime_dsn()
     with psycopg.connect(dsn, autocommit=True) as conn:
-        who = conn.execute(
-            "SELECT current_user, rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user"
+        who = _exec(
+            conn,
+            "SELECT current_user, rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user",
         ).fetchone()
         assert who is not None
         assert who[0] == "tenant_rls"
         assert who[1] is False
         assert who[2] is False
-        member = conn.execute(
-            "SELECT pg_has_role(current_user, 'tenant_rls_ddl', 'USAGE')"
+        member = _exec(
+            conn, "SELECT pg_has_role(current_user, 'tenant_rls_ddl', 'USAGE')"
         ).fetchone()
         assert member == (False,)
         for statement in (
@@ -131,14 +151,14 @@ def test_runtime_role_lockdown() -> None:
             "CREATE TABLE memory.should_fail (id int)",
         ):
             with pytest.raises(psycopg.Error) as denied:
-                conn.execute(statement)
+                _exec(conn, statement)
             assert denied.value.sqlstate == "42501"
-        version = conn.execute(
-            "SELECT version_num FROM memory.alembic_version"
+        version = _exec(
+            conn, "SELECT version_num FROM memory.alembic_version"
         ).fetchone()
         assert version is not None
-        description = conn.execute(
-            "SELECT * FROM memory.sentica_pending_counts() LIMIT 0"
+        description = _exec(
+            conn, "SELECT * FROM memory.sentica_pending_counts() LIMIT 0"
         )
         columns = description.description
         assert columns is not None
@@ -146,49 +166,431 @@ def test_runtime_role_lockdown() -> None:
             "workspace_name",
             "pending_queue",
             "pending_embeddings",
+            "pending_backfills",
+            "soft_deleted_documents",
+            "dreams_due",
         ]
+        proc = _exec(
+            conn,
+            """
+            SELECT p.pronargs, p.proconfig
+            FROM pg_proc AS p
+            JOIN pg_namespace AS n ON n.oid = p.pronamespace
+            WHERE n.nspname = 'memory' AND p.proname = 'sentica_pending_counts'
+            """,
+        ).fetchone()
+        assert proc is not None
+        assert proc[0] == 0
+        assert proc[1] is not None
+        assert any(
+            item.startswith("search_path=") and "pg_temp" in item for item in proc[1]
+        )
         left = "a" + uuid.uuid4().hex[:20]
         right = "b" + uuid.uuid4().hex[:20]
         for name in (left, right):
-            conn.execute(
+            _exec(
+                conn,
                 "INSERT INTO memory.workspaces (id, name) VALUES (%s, %s)",
                 (name, name),
             )
-        conn.execute("BEGIN")
-        conn.execute("SELECT set_config('sentica.workspace', %s, true)", (left,))
-        conn.execute(
+        _exec(conn, "BEGIN")
+        _exec(conn, "SELECT set_config('sentica.workspace', %s, true)", (left,))
+        _exec(
+            conn,
             "INSERT INTO memory.peers (id, name, workspace_name) VALUES (%s, %s, %s)",
             ("p" + uuid.uuid4().hex[:20], "peer", left),
         )
-        conn.execute("COMMIT")
-        conn.execute("BEGIN")
-        conn.execute("SELECT set_config('sentica.workspace', %s, true)", (left,))
+        _exec(conn, "COMMIT")
+        _exec(conn, "BEGIN")
+        _exec(conn, "SELECT set_config('sentica.workspace', %s, true)", (left,))
         with pytest.raises(psycopg.Error) as cross:
-            conn.execute(
+            _exec(
+                conn,
                 "INSERT INTO memory.peers (id, name, workspace_name) "
                 + "VALUES (%s, %s, %s)",
                 ("q" + uuid.uuid4().hex[:20], "peer", right),
             )
         assert cross.value.sqlstate == "42501"
-        conn.execute("ROLLBACK")
-        conn.execute("BEGIN")
-        conn.execute("SELECT set_config('sentica.workspace', '', true)")
-        empty = conn.execute("SELECT count(*) FROM memory.peers").fetchone()
-        conn.execute("COMMIT")
+        _exec(conn, "ROLLBACK")
+        _exec(conn, "BEGIN")
+        _exec(conn, "SELECT set_config('sentica.workspace', '', true)")
+        empty = _exec(conn, "SELECT count(*) FROM memory.peers").fetchone()
+        _exec(conn, "COMMIT")
         assert empty is not None and empty[0] == 0
-        conn.execute("BEGIN")
-        conn.execute("SELECT set_config('sentica.workspace', %s, true)", (left,))
-        visible = conn.execute("SELECT workspace_name FROM memory.peers").fetchall()
-        conn.execute("COMMIT")
+        _exec(conn, "BEGIN")
+        _exec(conn, "SELECT set_config('sentica.workspace', %s, true)", (left,))
+        visible = _exec(conn, "SELECT workspace_name FROM memory.peers").fetchall()
+        _exec(conn, "COMMIT")
         assert visible == [(left,)]
         ddl = ddl_dsn()
-        with psycopg.connect(ddl, autocommit=True) as owner:
-            owner.execute("ALTER TABLE memory.peers DISABLE ROW LEVEL SECURITY")
-        leaked = conn.execute(
-            "SELECT workspace_name FROM memory.peers WHERE workspace_name = %s",
-            (left,),
-        ).fetchall()
-        assert leaked == [(left,)]
-        with psycopg.connect(ddl, autocommit=True) as owner:
-            owner.execute("ALTER TABLE memory.peers ENABLE ROW LEVEL SECURITY")
-            owner.execute("ALTER TABLE memory.peers FORCE ROW LEVEL SECURITY")
+        try:
+            with psycopg.connect(ddl, autocommit=True) as owner:
+                owner.execute("ALTER TABLE memory.peers DISABLE ROW LEVEL SECURITY")
+            leaked = _exec(
+                conn,
+                "SELECT workspace_name FROM memory.peers WHERE workspace_name = %s",
+                (left,),
+            ).fetchall()
+            assert leaked == [(left,)]
+        finally:
+            with psycopg.connect(ddl, autocommit=True) as owner:
+                owner.execute("ALTER TABLE memory.peers ENABLE ROW LEVEL SECURITY")
+                owner.execute("ALTER TABLE memory.peers FORCE ROW LEVEL SECURITY")
+
+
+_READ_ENGINES: dict[int, AsyncEngine] = {}
+
+
+def _app_dsn(worker_id: str, db_engine: AsyncEngine | None = None) -> str:
+    """The database the request uses. The job uses the runtime role."""
+    if rls_job() or db_engine is None:
+        from tests.sentica.rls_job import sync_dsn
+
+        return sync_dsn(worker_id)
+    return db_engine.url.set(drivername="postgresql").render_as_string(
+        hide_password=False
+    )
+
+
+def _bind_unit_db(monkeypatch: pytest.MonkeyPatch, db_engine: AsyncEngine) -> None:
+    """Point tracked_db at the per-test engine and pin the workspace GUC on it."""
+    if rls_job():
+        return
+    from contextlib import asynccontextmanager
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    import src.sentica.workspace_scope as scope
+
+    read = _READ_ENGINES.get(id(db_engine))
+    if read is None:
+        read = db_engine.execution_options(
+            isolation_level="READ COMMITTED",
+            postgresql_readonly=True,
+        )
+        scope._installed = False  # pyright: ignore[reportPrivateUsage]
+        scope.install_workspace_scope(db_engine, read)
+        _READ_ENGINES[id(db_engine)] = read
+
+    @asynccontextmanager
+    async def _tracked(_name: str | None = None, *, read_only: bool = False):
+        bind = read if read_only else db_engine
+        factory = async_sessionmaker(bind=bind, expire_on_commit=False)
+        async with factory() as session:
+            try:
+                yield session
+            finally:
+                await session.rollback()
+                await session.close()
+
+    import importlib
+
+    modules = [
+        importlib.import_module(name)
+        for name in (
+            "src.dependencies",
+            "src.reconciler.scheduler",
+            "src.backlog",
+            "src.deriver.enqueue",
+        )
+    ]
+    for module in modules:
+        monkeypatch.setattr(module, "tracked_db", _tracked)
+
+
+def _install_counts(worker_id: str, db_engine: AsyncEngine | None = None) -> bool:
+    """Install the counts function on a create_all database. The job already has it."""
+    if rls_job():
+        return False
+    from src.config import settings
+    from src.sentica.workspace_scope import pending_counts_function_sql
+
+    schema = settings.DB.SCHEMA
+    with psycopg.connect(_app_dsn(worker_id, db_engine), autocommit=True) as conn:
+        _exec(
+            conn,
+            "DROP FUNCTION IF EXISTS " + '"' + schema + '".sentica_pending_counts()',
+        )
+        _exec(conn, pending_counts_function_sql(schema))
+    return True
+
+
+def _drop_counts(worker_id: str, db_engine: AsyncEngine | None = None) -> None:
+    from src.config import settings
+
+    schema = settings.DB.SCHEMA
+    with psycopg.connect(_app_dsn(worker_id, db_engine), autocommit=True) as conn:
+        _exec(
+            conn,
+            "DROP FUNCTION IF EXISTS " + '"' + schema + '".sentica_pending_counts()',
+        )
+
+
+async def test_reconciler_gate_enqueues_one_row_per_workspace(
+    client: object,
+    worker_id: str,
+    db_engine: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each gate enqueues only the workspaces whose own count is non-zero."""
+    from starlette.testclient import TestClient
+
+    from src.config import settings
+    from src.reconciler.scheduler import RECONCILER_TASKS, ReconcilerScheduler
+    from tests.sentica.rls_job import authorize
+
+    assert isinstance(client, TestClient)
+    assert isinstance(db_engine, AsyncEngine)
+    _bind_unit_db(monkeypatch, db_engine)
+    names = {
+        "embed": "e" + uuid.uuid4().hex[:8],
+        "backfill": "b" + uuid.uuid4().hex[:8],
+        "cleanup": "c" + uuid.uuid4().hex[:8],
+        "quiet": "q" + uuid.uuid4().hex[:8],
+    }
+    installed = _install_counts(worker_id, db_engine)
+    schema = settings.DB.SCHEMA
+    try:
+        for name in names.values():
+            authorize(client, [name])
+            assert client.post("/v3/workspaces", json={"name": name}).status_code in (
+                200,
+                201,
+            )
+            assert client.post(
+                f"/v3/workspaces/{name}/peers", json={"name": "p1"}
+            ).status_code in (200, 201)
+            assert client.post(
+                f"/v3/workspaces/{name}/sessions", json={"id": "s1"}
+            ).status_code in (200, 201)
+        with psycopg.connect(_app_dsn(worker_id, db_engine)) as conn:
+            _exec(conn, "BEGIN")
+            _exec(
+                conn,
+                "SELECT set_config('sentica.workspace', %s, true)",
+                (names["embed"],),
+            )
+            public_id = "m" + uuid.uuid4().hex[:20]
+            _exec(
+                conn,
+                "INSERT INTO "
+                + schema
+                + ".messages (public_id, session_name, content, token_count, "
+                + "seq_in_session, peer_name, workspace_name) "
+                + "VALUES (%s, 's1', 'pending-embed', 1, 1, 'p1', %s)",
+                (public_id, names["embed"]),
+            )
+            _exec(
+                conn,
+                "INSERT INTO "
+                + schema
+                + ".message_embeddings (content, message_id, workspace_name, "
+                + "session_name, peer_name, sync_state) "
+                + "VALUES ('pending-embed', %s, %s, 's1', 'p1', 'pending')",
+                (public_id, names["embed"]),
+            )
+            for name, source_ids, deleted in (
+                (names["backfill"], '["aaaaaaaaaaaaaaaaaaaaa"]', False),
+                (names["cleanup"], None, True),
+            ):
+                _exec(
+                    conn,
+                    "SELECT set_config('sentica.workspace', %s, true)",
+                    (name,),
+                )
+                _exec(
+                    conn,
+                    "INSERT INTO "
+                    + schema
+                    + ".collections (id, observer, observed, workspace_name) "
+                    + "VALUES (%s, 'p1', 'p1', %s)",
+                    ("k" + uuid.uuid4().hex[:20], name),
+                )
+                _exec(
+                    conn,
+                    "INSERT INTO "
+                    + schema
+                    + ".documents (id, content, observer, observed, "
+                    + "workspace_name, session_name, source_ids, deleted_at) "
+                    + "VALUES (%s, %s, 'p1', 'p1', %s, 's1', %s::jsonb, "
+                    + "CASE WHEN %s THEN now() - interval '10 minutes' "
+                    + "ELSE NULL END)",
+                    (
+                        "d" + uuid.uuid4().hex[:20],
+                        "row",
+                        name,
+                        source_ids,
+                        deleted,
+                    ),
+                )
+            _exec(conn, "COMMIT")
+            _exec(conn, "BEGIN")
+            _exec(
+                conn,
+                "SELECT set_config('sentica.workspace', %s, true)",
+                (names["embed"],),
+            )
+            pending = _exec(
+                conn,
+                "SELECT count(*) FROM "
+                + schema
+                + ".message_embeddings WHERE workspace_name = %s "
+                + "AND sync_state = 'pending'",
+                (names["embed"],),
+            ).fetchone()
+            _exec(conn, "COMMIT")
+            assert pending is not None and pending[0] >= 1
+            scheduler = ReconcilerScheduler()
+            sync_task = RECONCILER_TASKS["sync_vectors"]
+            backfill_task = RECONCILER_TASKS["backfill_document_sources"]
+            cleanup_task = RECONCILER_TASKS["cleanup"]
+            await scheduler._try_enqueue_task(sync_task)  # pyright: ignore[reportPrivateUsage]
+            await scheduler._try_enqueue_task(backfill_task)  # pyright: ignore[reportPrivateUsage]
+            await scheduler._try_enqueue_task(cleanup_task)  # pyright: ignore[reportPrivateUsage]
+            keys: set[str] = set()
+            for name in names.values():
+                _exec(conn, "BEGIN")
+                _exec(
+                    conn,
+                    "SELECT set_config('sentica.workspace', %s, true)",
+                    (name,),
+                )
+                found = _exec(
+                    conn,
+                    "SELECT work_unit_key FROM "
+                    + schema
+                    + ".queue WHERE workspace_name = %s",
+                    (name,),
+                ).fetchall()
+                _exec(conn, "ROLLBACK")
+                keys.update(str(row[0]) for row in found)
+        embed_key = sync_task.work_unit_key + ":" + names["embed"]
+        backfill_key = backfill_task.work_unit_key + ":" + names["backfill"]
+        cleanup_key = cleanup_task.work_unit_key + ":" + names["cleanup"]
+        assert embed_key in keys
+        assert backfill_key in keys
+        assert cleanup_key in keys
+        for name in (names["backfill"], names["cleanup"], names["quiet"]):
+            assert sync_task.work_unit_key + ":" + name not in keys
+        for name in (names["embed"], names["cleanup"], names["quiet"]):
+            assert backfill_task.work_unit_key + ":" + name not in keys
+        for name in (names["embed"], names["backfill"], names["quiet"]):
+            assert cleanup_task.work_unit_key + ":" + name not in keys
+    finally:
+        if installed:
+            _drop_counts(worker_id, db_engine)
+
+
+async def test_due_dream_is_reported_and_triggered(
+    client: object,
+    worker_id: str,
+    db_engine: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The runtime role reports a due dream and the api poll enqueues it."""
+    from datetime import UTC, datetime, timedelta
+
+    from starlette.testclient import TestClient
+
+    from src.backlog import DeriverMetricsPoller
+    from src.config import settings
+    from src.dreamer.dream_due import list_due_dreams
+    from tests.sentica.rls_job import authorize
+
+    assert isinstance(client, TestClient)
+    assert isinstance(db_engine, AsyncEngine)
+    _bind_unit_db(monkeypatch, db_engine)
+    name = "d" + uuid.uuid4().hex[:8]
+    installed = _install_counts(worker_id, db_engine)
+    schema = settings.DB.SCHEMA
+    seen: list[tuple[str | None, object]] = []
+    real_list = list_due_dreams
+
+    async def _wrapped(db: AsyncSession) -> Any:
+        from sqlalchemy import text
+
+        from src.sentica.workspace_scope import current_workspace
+
+        setting = await db.scalar(
+            text("SELECT current_setting('sentica.workspace', true)")
+        )
+        seen.append((current_workspace(), setting))
+        return await real_list(db)
+
+    monkeypatch.setattr("src.backlog.list_due_dreams", _wrapped)
+    monkeypatch.setattr(settings.DREAM, "DOCUMENT_THRESHOLD", 1)
+    monkeypatch.setattr(settings.DERIVER, "SCHEDULER", "api")
+    try:
+        authorize(client, [name])
+        assert client.post("/v3/workspaces", json={"name": name}).status_code in (
+            200,
+            201,
+        )
+        assert client.post(
+            f"/v3/workspaces/{name}/peers", json={"name": "p1"}
+        ).status_code in (200, 201)
+        assert client.post(
+            f"/v3/workspaces/{name}/sessions", json={"id": "s1"}
+        ).status_code in (200, 201)
+        created = datetime.now(UTC) - timedelta(days=2)
+        with psycopg.connect(_app_dsn(worker_id, db_engine)) as conn:
+            _exec(conn, "BEGIN")
+            _exec(conn, "SELECT set_config('sentica.workspace', %s, true)", (name,))
+            _exec(
+                conn,
+                "INSERT INTO "
+                + schema
+                + ".collections (id, observer, observed, workspace_name) "
+                + "VALUES (%s, 'p1', 'p1', %s)",
+                ("k" + uuid.uuid4().hex[:20], name),
+            )
+            _exec(
+                conn,
+                "INSERT INTO "
+                + schema
+                + ".documents (id, content, observer, observed, workspace_name, "
+                + "session_name, level, created_at) "
+                + "VALUES (%s, %s, 'p1', 'p1', %s, 's1', 'explicit', %s)",
+                ("d" + uuid.uuid4().hex[:20], "dream note", name, created),
+            )
+            _exec(conn, "COMMIT")
+        from sqlalchemy import text
+
+        from src.dependencies import tracked_db
+
+        async with tracked_db("dream.check", read_only=True) as db:
+            present = await db.scalar(
+                text("SELECT to_regprocedure(:name)"),
+                {"name": schema + ".sentica_pending_counts()"},
+            )
+            due_rows = (
+                await db.execute(
+                    text(
+                        "SELECT workspace_name, dreams_due FROM "
+                        + schema
+                        + ".sentica_pending_counts()"
+                    )
+                )
+            ).all()
+        assert present is not None, due_rows
+        assert any(row[0] == name and int(row[1]) >= 1 for row in due_rows), due_rows
+        poller = DeriverMetricsPoller()
+        await poller.refresh()
+        assert any(item[0] == name for item in seen), seen
+        assert poller.snapshot.dreams_due >= 1
+        with psycopg.connect(_app_dsn(worker_id, db_engine)) as conn:
+            _exec(conn, "BEGIN")
+            _exec(conn, "SELECT set_config('sentica.workspace', %s, true)", (name,))
+            row = _exec(
+                conn,
+                "SELECT payload::text FROM "
+                + schema
+                + ".queue WHERE workspace_name = %s AND task_type = 'dream'",
+                (name,),
+            ).fetchone()
+            _exec(conn, "COMMIT")
+        assert row is not None
+        assert "api_poll" in row[0]
+    finally:
+        if installed:
+            _drop_counts(worker_id, db_engine)

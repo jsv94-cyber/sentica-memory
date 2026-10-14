@@ -1623,6 +1623,7 @@ async def cleanup_soft_deleted_documents(
     external_vector_store: VectorStore,
     batch_size: int = 100,
     older_than_minutes: int = 5,
+    workspace_name: str | None = None,
 ) -> int:
     """
     Cleanup soft-deleted documents by removing their vectors and database records.
@@ -1654,6 +1655,8 @@ async def cleanup_soft_deleted_documents(
         .limit(batch_size)
         .with_for_update(skip_locked=True)
     )
+    if workspace_name is not None:
+        stmt = stmt.where(models.Document.workspace_name == workspace_name)
     result = await db.execute(stmt)
     documents = list(result.scalars().all())
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import contextvars
 from collections.abc import Iterable, Sequence
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -20,6 +20,17 @@ _workspace: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "sentica_workspace", default=None
 )
 _installed = False
+
+
+class PendingCount(NamedTuple):
+    """Names and counts only. The function takes no arguments."""
+
+    workspace_name: str
+    pending_queue: int
+    pending_embeddings: int
+    pending_backfills: int
+    soft_deleted_documents: int
+    dreams_due: int
 
 
 def current_workspace() -> str | None:
@@ -136,7 +147,8 @@ def install_workspace_scope(*engines: AsyncEngine) -> None:
         open_transaction = bool(in_transaction()) if callable(in_transaction) else False
         if previous is not None and previous != workspace and open_transaction:
             raise RuntimeError("workspace cannot change inside an open transaction")
-        if previous == workspace and open_transaction:
+        reapply = bool(info.pop("_sentica_reapply", False))
+        if previous == workspace and open_transaction and not reapply:
             return
         info["_sentica_applying"] = True
         try:
@@ -157,12 +169,14 @@ def install_workspace_scope(*engines: AsyncEngine) -> None:
             cast("dict[str, Any]", raw).pop("sentica_workspace", None)
 
     def _clear_savepoint(connection: object, *_extra: object) -> None:
-        _clear(connection)
         raw = getattr(connection, "info", None)
         if isinstance(raw, dict):
-            # The rollback statement itself is the next cursor event. Skip it
-            # so it does not cache a workspace the savepoint just undid.
-            cast("dict[str, Any]", raw)["_sentica_skip_next"] = True
+            info = cast("dict[str, Any]", raw)
+            # The pin stays for the transaction. The next statement re-applies
+            # the same workspace. A different one is refused while it is open.
+            # Skip the rollback statement itself so it does not re-apply early.
+            info["_sentica_reapply"] = True
+            info["_sentica_skip_next"] = True
 
     for async_engine in engines:
         sync_engine = async_engine.sync_engine
@@ -231,7 +245,10 @@ def pending_counts_function_sql(schema: str) -> str:
         RETURNS TABLE (
             workspace_name text,
             pending_queue bigint,
-            pending_embeddings bigint
+            pending_embeddings bigint,
+            pending_backfills bigint,
+            soft_deleted_documents bigint,
+            dreams_due bigint
         )
         LANGUAGE sql
         STABLE
@@ -248,6 +265,39 @@ def pending_counts_function_sql(schema: str) -> str:
                     SELECT count(*)::bigint
                     FROM {quoted}.message_embeddings AS e
                     WHERE e.sync_state = 'pending' AND e.workspace_name = w.name
+                ),
+                (
+                    SELECT count(*)::bigint
+                    FROM {quoted}.documents AS d
+                    WHERE d.workspace_name = w.name
+                        AND (
+                            d.source_ids IS NOT NULL
+                            OR d.internal_metadata ?| ARRAY['source_ids', 'premise_ids']
+                        )
+                ),
+                (
+                    SELECT count(*)::bigint
+                    FROM {quoted}.documents AS d
+                    WHERE d.workspace_name = w.name
+                        AND d.deleted_at IS NOT NULL
+                        AND d.deleted_at < now() - interval '5 minutes'
+                ),
+                (
+                    SELECT count(*)::bigint
+                    FROM {quoted}.collections AS c
+                    WHERE c.workspace_name = w.name
+                        AND (
+                            SELECT count(*)
+                            FROM {quoted}.documents AS d
+                            WHERE d.workspace_name = c.workspace_name
+                                AND d.observer = c.observer
+                                AND d.observed = c.observed
+                                AND d.level = 'explicit'
+                                AND d.deleted_at IS NULL
+                        ) > coalesce(
+                            (c.internal_metadata->'dream'->>'last_dream_document_count')::int,
+                            0
+                        )
                 )
             FROM {quoted}.workspaces AS w
             ORDER BY w.name
@@ -317,9 +367,7 @@ async def open_workspace(
     return token
 
 
-async def fetch_pending_counts(
-    db: Any,
-) -> list[tuple[str, int, int]] | None:
+async def fetch_pending_counts(db: Any) -> list[PendingCount] | None:
     """Counts from the migration-owned function, or None when it is not installed."""
     from sqlalchemy import text
 
@@ -335,10 +383,16 @@ async def fetch_pending_counts(
     if present is None:
         return None
     result = await db.execute(
-        text(
-            "SELECT workspace_name, pending_queue, pending_embeddings FROM "
-            + _ident(schema)
-            + ".sentica_pending_counts()"
-        )
+        text("SELECT * FROM " + _ident(schema) + ".sentica_pending_counts()")
     )
-    return [(str(row[0]), int(row[1]), int(row[2])) for row in result.all()]
+    return [
+        PendingCount(
+            workspace_name=str(row[0]),
+            pending_queue=int(row[1]),
+            pending_embeddings=int(row[2]),
+            pending_backfills=int(row[3]),
+            soft_deleted_documents=int(row[4]),
+            dreams_due=int(row[5]),
+        )
+        for row in result.all()
+    ]

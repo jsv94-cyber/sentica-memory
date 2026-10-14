@@ -27,6 +27,7 @@ from src.models import QueueItem
 from src.reconciler.backfill import BACKFILLS, Backfill, record_backfill_pending
 from src.reconciler.sync_vectors import (
     has_pending_work,
+    has_soft_deleted_documents,
     record_pending_embeddings_backlog,
 )
 from src.schemas import ReconcilerType
@@ -74,8 +75,28 @@ RECONCILER_TASKS: dict[str, ReconcilerTask] = {
         interval_seconds=QUEUE_CLEANUP_INTERVAL_SECONDS,
         payload={"reconciler_type": ReconcilerType.CLEANUP_QUEUE.value},
     ),
+    "cleanup": ReconcilerTask(
+        name="cleanup",
+        work_unit_key="reconciler:cleanup",
+        interval_seconds=settings.VECTOR_STORE.RECONCILIATION_INTERVAL_SECONDS,
+        payload={"reconciler_type": ReconcilerType.CLEANUP.value},
+        has_pending=has_soft_deleted_documents,
+    ),
     **{task.name: task for task in map(backfill_task, BACKFILLS.values())},
 }
+
+
+def _workspaces_for_task(task: ReconcilerTask, counts: list[Any]) -> list[str]:
+    """Each task enqueues only the workspaces whose own count is non-zero."""
+    if task.name == "sync_vectors":
+        return [row.workspace_name for row in counts if row.pending_embeddings > 0]
+    if task.name.startswith("backfill"):
+        return [row.workspace_name for row in counts if row.pending_backfills > 0]
+    if task.name == "cleanup":
+        return [row.workspace_name for row in counts if row.soft_deleted_documents > 0]
+    if task.has_pending is None:
+        return [row.workspace_name for row in counts]
+    return []
 
 
 _reconciler_scheduler: "ReconcilerScheduler | None" = None
@@ -265,11 +286,7 @@ class ReconcilerScheduler:
                     return False
                 names = list(await db.scalars(select(models.Workspace.name)))
             else:
-                names = [
-                    workspace
-                    for workspace, _queue, embeddings in counts
-                    if embeddings > 0 or task.has_pending is None
-                ]
+                names = _workspaces_for_task(task, counts)
         if not names:
             return False
         inserted = False

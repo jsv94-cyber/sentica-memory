@@ -21,6 +21,67 @@ def rls_job() -> bool:
     return os.environ.get("SENTICA_RLS_JOB") == "1"
 
 
+# Collected node ids for the runtime-role job, including parameters.
+# tests/conftest.py fails the job when the collected set differs.
+EXPECTED_M2_NODE_IDS: frozenset[str] = frozenset(
+    {
+        "tests/sentica/test_m2_rls.py::test_signed_token_names_its_workspaces",
+        "tests/sentica/test_m2_rls.py::test_rls_job_collects_every_m2_file",
+        "tests/sentica/test_m2_rls.py::test_app_engine_is_the_runtime_role",
+        "tests/sentica/test_m2_rls.py::test_runtime_role_lockdown",
+        "tests/sentica/test_m2_rls.py::test_reconciler_gate_enqueues_one_row_per_workspace",
+        "tests/sentica/test_m2_rls.py::test_due_dream_is_reported_and_triggered",
+        "tests/sentica/test_m2_fix.py::test_ambiguous_workspace_claims_are_refused",
+        "tests/sentica/test_m2_fix.py::test_pending_counts_function_has_no_content_columns",
+        "tests/sentica/test_m2_fix.py::test_db_call_timeout_rejects_nan_and_infinity",
+        "tests/sentica/test_m2_fix.py::test_workflow_job_builds_schema_as_the_ddl_role",
+        "tests/sentica/test_m2_fix.py::test_data_migration_updates_each_workspace",
+        "tests/sentica/test_m2_fix.py::test_queue_workspace_name_is_required",
+        "tests/sentica/test_m2_fix.py::test_workspace_setting_is_not_inherited",
+        "tests/sentica/test_m2_fix.py::test_revision_check_refuses_a_stale_schema",
+        "tests/sentica/test_m2_fix.py::test_pagination_cache_key_includes_the_workspace",
+        "tests/sentica/test_m2_fix.py::test_deriver_metrics_are_limited_to_the_token_workspaces",
+        "tests/sentica/test_m2_fix.py::test_execute_dream_and_delayed_dream_bind_the_workspace",
+        "tests/sentica/test_m2_fix.py::test_workspace_change_inside_an_open_transaction_is_refused",
+        "tests/sentica/test_m2_fix.py::test_savepoint_rollback_refuses_a_different_workspace",
+        "tests/sentica/test_m2_fix.py::test_workspace_setting_is_cleared_on_rollback",
+        "tests/sentica/test_m2_fix.py::test_null_queue_rows_are_deleted_when_force_rls_is_on",
+        "tests/sentica/test_m2_partitions.py::test_runtime_role_cannot_cross_workspaces",
+        "tests/sentica/test_m2_partitions.py::test_cached_card_for_r_is_not_served_without_r",
+        "tests/sentica/test_m2_partitions.py::test_workspace_outside_the_token_set_is_refused",
+        "tests/sentica/test_m2_partitions.py::test_removing_a_workspace_from_the_token_refuses_the_next_request",
+        "tests/sentica/test_m2_partitions.py::test_production_refuses_external_vector_stores[lancedb]",
+        "tests/sentica/test_m2_partitions.py::test_production_refuses_external_vector_stores[qdrant]",
+        "tests/sentica/test_m2_partitions.py::test_production_refuses_external_vector_stores[chroma]",
+        "tests/sentica/test_m2_partitions.py::test_production_refuses_external_vector_stores[chromadb]",
+        "tests/sentica/test_m2_partitions.py::test_production_refuses_external_vector_stores[turbopuffer]",
+        "tests/sentica/test_m2_partitions.py::test_production_refuses_external_vector_stores[pinecone]",
+        "tests/sentica/test_m2_partitions.py::test_search_tags_each_workspace",
+        "tests/sentica/test_m2_partitions.py::test_canary_written_only_to_r_stays_out_of_other_workspaces",
+        "tests/sentica/test_m2_partitions.py::test_harness_flags_the_canary_when_the_request_includes_its_workspace",
+        "tests/sentica/test_m2_partitions.py::test_membership_noop_lets_the_canary_through",
+        "tests/sentica/test_m2_partitions.py::test_search_scope_is_resolved_per_workspace",
+        "tests/sentica/test_m2_partitions.py::test_cold_cache_returns_each_peer_card",
+        "tests/sentica/test_m2_partitions.py::test_body_workspaces_outside_the_token_are_refused",
+        "tests/sentica/test_m2_partitions.py::test_crud_filter_removed_rls_still_hides_the_canary",
+        "tests/sentica/test_m2_partitions.py::test_crud_filter_removed_disabled_rls_shows_the_canary",
+        "tests/sentica/test_m2_carryover.py::test_workflows_pin_ubuntu_2404_and_node24_actions",
+        "tests/sentica/test_m2_carryover.py::test_bounded_session_method_times_out[rollback]",
+        "tests/sentica/test_m2_carryover.py::test_bounded_session_method_times_out[close]",
+        "tests/sentica/test_m2_carryover.py::test_bounded_session_method_times_out[delete]",
+        "tests/sentica/test_m2_carryover.py::test_bounded_session_method_times_out[refresh]",
+        "tests/sentica/test_m2_carryover.py::test_bounded_session_method_times_out[get]",
+        "tests/sentica/test_m2_carryover.py::test_bounded_session_method_times_out[merge]",
+        "tests/sentica/test_m2_carryover.py::test_bounded_session_method_times_out[connection]",
+        "tests/sentica/test_m2_carryover.py::test_bounded_session_method_times_out[run_sync]",
+        "tests/sentica/test_m2_carryover.py::test_cancelled_caller_stops_the_session_connection",
+        "tests/sentica/test_m2_carryover.py::test_database_receives_scram_verifiers_and_tmpfs",
+        "tests/sentica/test_m2_carryover.py::test_bounded_wait_matches_psycopg",
+        "tests/sentica/test_m2_carryover.py::test_production_log_strips_messages_except_the_allow_list",
+    }
+)
+
+
 def defined_m2_tests() -> int:
     """How many test functions the M2 files define, before parametrization."""
     root = Path(__file__).resolve().parent
@@ -96,6 +157,7 @@ def sign_broker_token(
     *,
     primary: str | None = None,
     peer: str | None = None,
+    session: str | None = None,
 ) -> str:
     """Sign a broker token with the job's private key."""
     raw = Path(os.environ["SENTICA_TOKEN_SIGNING_KEY"]).read_bytes()
@@ -116,6 +178,8 @@ def sign_broker_token(
     }
     if peer is not None:
         claims["p"] = peer
+    if session is not None:
+        claims["s"] = session
     return jwt.encode(claims, loaded, algorithm="EdDSA")
 
 

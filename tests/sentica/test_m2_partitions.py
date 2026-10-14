@@ -24,6 +24,27 @@ def _run(conn: Any, statement: str, params: tuple[object, ...] = ()) -> Any:
     return conn.execute(statement, params)
 
 
+def _unused_client(*_args: object, **_kwargs: object) -> object:
+    return object()
+
+
+def _tool_names(tools: object) -> list[str]:
+    found: list[str] = []
+    if not isinstance(tools, list):
+        return found
+    for tool in cast(list[object], tools):
+        if not isinstance(tool, dict):
+            continue
+        raw = cast(dict[str, object], tool)
+        function = raw.get("function", raw)
+        if not isinstance(function, dict):
+            continue
+        name = cast(dict[str, object], function).get("name")
+        if isinstance(name, str):
+            found.append(name)
+    return found
+
+
 def test_runtime_role_cannot_cross_workspaces(
     db_session: object, worker_id: str
 ) -> None:
@@ -48,7 +69,7 @@ def test_runtime_role_cannot_cross_workspaces(
             "SELECT rolsuper FROM pg_roles WHERE rolname = current_user"
         ).fetchone()
         if superuser is None or not superuser[0]:
-            pytest.skip("ddl setup needs a superuser; the runtime proof is test_m2_rls")
+            pytest.fail("ddl setup needs a superuser; the runtime proof is test_m2_rls")
         _run(conn, "CREATE ROLE " + ddl + " NOLOGIN NOBYPASSRLS")
         _run(conn, "CREATE ROLE " + runtime + " NOLOGIN NOBYPASSRLS")
         schema = conn.execute("SELECT current_schema()").fetchone()
@@ -270,6 +291,11 @@ def test_runtime_role_cannot_cross_workspaces(
         _run(conn, "DROP OWNED BY " + runtime)
         _run(conn, "DROP ROLE " + runtime)
         _run(conn, "DROP ROLE " + ddl)
+        for table_name in tables:
+            qualified = '"' + schema[0] + '"."' + table_name + '"'
+            _run(conn, "DROP POLICY IF EXISTS sentica_workspace ON " + qualified)
+            _run(conn, "ALTER TABLE " + qualified + " NO FORCE ROW LEVEL SECURITY")
+            _run(conn, "ALTER TABLE " + qualified + " DISABLE ROW LEVEL SECURITY")
         for table in (
             "document_sources",
             "documents",
@@ -852,130 +878,162 @@ async def test_canary_written_only_to_r_stays_out_of_other_workspaces(
     assert right_representation.status_code == 200, right_representation.text
     assert canary in right_representation.text
 
+    from src.dialectic.chat import agentic_chat_stream
     from src.dreamer.specialists import InductionSpecialist
+    from src.embedding_client import embedding_client
     from src.llm.backend import CompletionResult, StreamChunk, ToolCallResult
-    from src.llm.request_builder import execute_completion
+    from src.utils.representation import ExplicitObservationBase, PromptRepresentation
 
-    del execute_completion
+    counters = {
+        "deriver": 0,
+        "simple_batch_embed": 0,
+        "batch_embed": 0,
+        "induction": 0,
+        "deduction": 0,
+        "stream": 0,
+        "conclusions": 0,
+        "dialectic": 0,
+    }
     tool_rounds = {"n": 0}
+    tool_results = {"n": 0}
+    stream_saw_tool_result = {"ok": False}
+    width = settings.EMBEDDING.VECTOR_DIMENSIONS
+
+    def _has_tool_result(messages: object) -> bool:
+        text = repr(messages)
+        return (
+            "tool_result" in text
+            or "'role': 'tool'" in text
+            or '"role": "tool"' in text
+        )
+
+    def _note_followup(messages: object) -> None:
+        if _has_tool_result(messages):
+            tool_results["n"] += 1
+            recorded.append("tool-result:" + repr(messages))
+
+    async def _deriver(**kwargs: object) -> CompletionResult:
+        counters["deriver"] += 1
+        recorded.append("capture:deriver:" + str(kwargs.get("prompt")))
+        return CompletionResult(
+            content=PromptRepresentation(
+                explicit=[ExplicitObservationBase(content="local hello")]
+            ),
+            output_tokens=1,
+        )
+
+    async def _specialist(kind: str, messages: object) -> CompletionResult:
+        counters[kind] += 1
+        recorded.append("capture:" + kind + ":" + repr(messages))
+        if _has_tool_result(messages):
+            return CompletionResult(content="ok")
+        return CompletionResult(
+            content="",
+            tool_calls=[
+                ToolCallResult(kind[:1] + "1", "search_memory", {"query": "local"})
+            ],
+        )
+
+    async def _dialectic(messages: object) -> CompletionResult:
+        counters["dialectic"] += 1
+        recorded.append(repr(messages))
+        if _has_tool_result(messages):
+            _note_followup(messages)
+            return CompletionResult(content="ok")
+        tool_rounds["n"] += 1
+        return CompletionResult(
+            content="",
+            tool_calls=[
+                ToolCallResult("c1", "grep_messages", {"text": canary}),
+                ToolCallResult("c2", "grep_messages", {"text": right}),
+            ],
+        )
 
     async def _complete(
         _backend: object, _config: object, **kwargs: object
     ) -> CompletionResult:
-        recorded.append(repr(kwargs.get("messages")))
-        recorded.append(repr(kwargs.get("prompt")))
-        tools = kwargs.get("tools")
-        if tools and tool_rounds["n"] < 1:
-            tool_rounds["n"] += 1
-            return CompletionResult(
-                content="",
-                tool_calls=[
-                    ToolCallResult("c1", "grep_messages", {"text": canary}),
-                    ToolCallResult("c2", "grep_messages", {"text": right}),
-                    ToolCallResult("c3", "grep_messages", {"text": "p1"}),
-                ],
-            )
+        messages = kwargs.get("messages")
+        names = _tool_names(kwargs.get("tools"))
+        if kwargs.get("response_format") is PromptRepresentation:
+            return await _deriver(prompt=kwargs.get("prompt"))
+        if "create_observations_deductive" in names:
+            return await _specialist("deduction", messages)
+        if "create_observations_inductive" in names:
+            return await _specialist("induction", messages)
+        if "grep_messages" in names or "search_messages" in names:
+            return await _dialectic(messages)
         return CompletionResult(content="ok")
 
-    async def _embed(text: str, *_args: object, **_kwargs: object) -> list[float]:
-        recorded.append(text)
-        return [0.0] * settings.EMBEDDING.VECTOR_DIMENSIONS
-
-    width = settings.EMBEDDING.VECTOR_DIMENSIONS
-
-    async def _batch_map(
-        texts: dict[str, str], *_args: object, **_kwargs: object
-    ) -> dict[str, list[list[float]]]:
-        recorded.append("capture:batch_embed:" + repr(texts))
-        return {key: [[0.0] * width] for key in texts}
-
-    async def _simple(
-        texts: list[str], *_args: object, **_kwargs: object
-    ) -> list[list[float]]:
-        recorded.append("capture:simple_batch_embed:" + repr(list(texts)))
-        recorded.extend(texts)
-        await _batch_map({str(index): text for index, text in enumerate(texts)})
-        return [[0.0] * width for _text in texts]
-
-    from src.dialectic.chat import agentic_chat_stream
-    from src.llm.types import HonchoLLMCallResponse
-    from src.utils.representation import ExplicitObservationBase, PromptRepresentation
-
-    monkeypatch.setattr("src.routers.peers.agentic_chat", agentic_chat)
-    monkeypatch.setattr("src.routers.peers.agentic_chat_stream", agentic_chat_stream)
-
     async def _stream(_backend: object, _config: object, **kwargs: object) -> object:
-        recorded.append("capture:stream:" + repr(kwargs.get("messages")))
+        counters["stream"] += 1
+        messages = kwargs.get("messages")
+        recorded.append("capture:stream:" + repr(messages))
+        if _has_tool_result(messages):
+            stream_saw_tool_result["ok"] = True
+            recorded.append("tool-result:" + repr(messages))
 
         async def _chunks() -> object:
             yield StreamChunk(content="ok", is_done=True, finish_reason="stop")
 
         return _chunks()
 
-    async def _deriver_llm(
-        *_args: object, **kwargs: object
-    ) -> HonchoLLMCallResponse[PromptRepresentation]:
-        recorded.append("capture:deriver:" + str(kwargs.get("prompt")))
-        return HonchoLLMCallResponse(
-            content=PromptRepresentation(
-                explicit=[ExplicitObservationBase(content="local hello")]
-            ),
-            output_tokens=1,
-            finish_reasons=["stop"],
-        )
+    async def _batch(
+        texts: dict[str, str], *_args: object, **_kwargs: object
+    ) -> dict[str, list[list[float]]]:
+        counters["batch_embed"] += 1
+        recorded.append("capture:batch_embed:" + repr(texts))
+        return {key: [[0.0] * width] for key in texts}
 
-    async def _specialist_llm(
-        *_args: object, **kwargs: object
-    ) -> HonchoLLMCallResponse[str]:
-        telemetry = kwargs.get("telemetry")
-        agent = getattr(telemetry, "agent_type", "") if telemetry is not None else ""
-        messages = str(kwargs.get("messages"))
-        if agent == "induction":
-            recorded.append("capture:induction:" + messages)
-        if agent == "deduction":
-            recorded.append("capture:conclusions:" + messages)
-        return HonchoLLMCallResponse(
-            content="ok",
-            output_tokens=1,
-            finish_reasons=["stop"],
-        )
+    async def _zero_embed(_text: str, *_args: object, **_kwargs: object) -> list[float]:
+        return [0.0] * width
 
     settings.LLM.OPENAI_API_KEY = "test-key"
+    inner = embedding_client._get_client()  # pyright: ignore[reportPrivateUsage]
+    real_simple = inner.simple_batch_embed
+
+    async def _simple(
+        texts: list[str], *_args: object, **kwargs: object
+    ) -> list[list[float]]:
+        counters["simple_batch_embed"] += 1
+        recorded.append("capture:simple_batch_embed:" + repr(list(texts)))
+        on_oversize = kwargs.get("on_oversize", "raise")
+        if on_oversize not in ("raise", "truncate"):
+            on_oversize = "raise"
+        embedded = await real_simple(
+            texts,
+            on_oversize=on_oversize,  # type: ignore[arg-type]
+        )
+        return embedded
+
+    monkeypatch.setattr(inner, "batch_embed", _batch)
+    monkeypatch.setattr(inner, "simple_batch_embed", _simple)
+    monkeypatch.setattr(inner, "embed", _zero_embed)
+    monkeypatch.setattr(embedding_client, "simple_batch_embed", _simple)
+    monkeypatch.setattr(embedding_client, "batch_embed", _batch)
+    monkeypatch.setattr(embedding_client, "embed", _zero_embed)
+    monkeypatch.setattr("src.routers.peers.agentic_chat", agentic_chat)
+    monkeypatch.setattr("src.routers.peers.agentic_chat_stream", agentic_chat_stream)
+    monkeypatch.setattr("src.llm.executor.default_client", _unused_client)
+    monkeypatch.setattr("src.llm.executor.backend_for_provider", _unused_client)
     monkeypatch.setattr("src.llm.executor.execute_completion", _complete)
     monkeypatch.setattr("src.llm.executor.execute_stream", _stream)
-    monkeypatch.setattr("src.embedding_client.embedding_client.embed", _embed)
-    monkeypatch.setattr(
-        "src.embedding_client.embedding_client.simple_batch_embed", _simple
-    )
-    monkeypatch.setattr("src.embedding_client.embedding_client.batch_embed", _batch_map)
-    monkeypatch.setattr("src.deriver.deriver.honcho_llm_call", _deriver_llm)
-    monkeypatch.setattr("src.dreamer.specialists.honcho_llm_call", _specialist_llm)
+    import src.deriver.deriver as deriver_module
+    from src.llm.api import honcho_llm_call as real_llm_call
 
-    bound = set_workspace(left)
-    try:
-        embedding_row = await db_session.scalar(
-            select(models.MessageEmbedding).where(
-                models.MessageEmbedding.workspace_name == left,
-                models.MessageEmbedding.content == "local hello",
-            )
-        )
-        if embedding_row is not None:
-            embedding_row.embedding = None
-            from src.reconciler.sync_vectors import (
-                _sync_message_embeddings,  # pyright: ignore[reportPrivateUsage]
-            )
+    monkeypatch.setattr(deriver_module, "honcho_llm_call", real_llm_call)
 
-            await _sync_message_embeddings(
-                db_session,
-                [embedding_row],
-                None,
-            )
-        else:
-            from src.embedding_client import embedding_client
+    import src.crud as crud_pkg
 
-            await embedding_client.simple_batch_embed(["local hello"])
-    finally:
-        reset_workspace(bound)
+    real_documents = crud_pkg.get_documents_with_filters
+
+    def _documents(*args: object, **kwargs: object) -> object:
+        from collections.abc import Callable
+
+        counters["conclusions"] += 1
+        caller = cast(Callable[..., object], real_documents)
+        return caller(*args, **kwargs)
+
+    monkeypatch.setattr(crud_pkg, "get_documents_with_filters", _documents)
 
     responses: list[str] = []
     searched = client.post(
@@ -1065,10 +1123,25 @@ async def test_canary_written_only_to_r_stays_out_of_other_workspaces(
     assert refused_stream.status_code == 400, refused_stream.text
     listed = client.post(f"/v3/workspaces/{left}/conclusions/list", json={})
     assert listed.status_code == 200, listed.text
-    recorded.append("capture:conclusions:" + listed.text)
     responses.append(listed.text)
     bound = set_workspace(left)
     try:
+        present = await db_session.scalar(
+            select(models.Collection).where(
+                models.Collection.workspace_name == left,
+                models.Collection.observer == "p1",
+                models.Collection.observed == "p1",
+            )
+        )
+        if present is None:
+            db_session.add(
+                models.Collection(
+                    workspace_name=left,
+                    observer="p1",
+                    observed="p1",
+                )
+            )
+            await db_session.commit()
         dream = await DeductionSpecialist().run(
             workspace_name=left,
             observer="p1",
@@ -1085,30 +1158,26 @@ async def test_canary_written_only_to_r_stays_out_of_other_workspaces(
         responses.append(repr(induction))
         from src.deriver.deriver import process_representation_tasks_batch
 
-        try:
-            await process_representation_tasks_batch(
-                [left_message],
-                configuration,
-                observers=["p1"],
-                observed="p1",
-                queue_item_message_ids=[left_message.id],
-            )
-        except Exception as exc:
-            recorded.append(exc.__class__.__name__)
+        await process_representation_tasks_batch(
+            [left_message],
+            configuration,
+            observers=["p1"],
+            observed="p1",
+            queue_item_message_ids=[left_message.id],
+        )
     finally:
         reset_workspace(bound)
-    captured = "\n".join(recorded)
-    for marker in (
-        "capture:deriver:",
-        "capture:simple_batch_embed:",
-        "capture:batch_embed:",
-        "capture:induction:",
-        "capture:stream:",
-        "capture:conclusions:",
-    ):
-        assert marker in captured, marker
+    # Ten attack prompts, the streamed chat, and the left fan-out.
+    # The other fan-out workspace has no peer, so it never calls the model.
+    chats = len(prompts) + 2
+    assert tool_rounds["n"] == chats
+    assert tool_results["n"] == chats
+    assert stream_saw_tool_result["ok"]
+    for name, count in counters.items():
+        assert count > 0, name
     blob = "\n".join([*responses, *recorded])
     scrubbed = blob.replace(f'"text": "{canary}"', "")
+    scrubbed = scrubbed.replace(f"'text': '{canary}'", "")
     scrubbed = scrubbed.replace(f"No messages found containing '{canary}'", "")
     assert canary not in scrubbed
 
@@ -1281,257 +1350,460 @@ def test_search_scope_is_resolved_per_workspace(client: object) -> None:
     )
 
 
-def _broker_allows_only(left: str, right: str) -> None:
-    """A real signed token names left and does not name right."""
-    import time
+async def test_cold_cache_returns_each_peer_card(
+    client: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cold card read opens one session per workspace and tags both cards."""
+    from contextlib import asynccontextmanager
+
+    from starlette.testclient import TestClient
+
+    from src.cache.client import safe_cache_delete
+    from src.dependencies import tracked_db as real_tracked
+    from tests.sentica.rls_job import authorize
+
+    assert isinstance(client, TestClient)
+    left = "a" + uuid.uuid4().hex[:8]
+    right = "b" + uuid.uuid4().hex[:8]
+    left_fact = "left-card-" + uuid.uuid4().hex
+    right_fact = "right-card-" + uuid.uuid4().hex
+    for name in (left, right):
+        authorize(client, [left, right], primary=name)
+        assert client.post("/v3/workspaces", json={"name": name}).status_code in (
+            200,
+            201,
+        )
+        assert client.post(
+            f"/v3/workspaces/{name}/peers", json={"name": "p1"}
+        ).status_code in (200, 201)
+        stored = client.put(
+            f"/v3/workspaces/{name}/peers/p1/card",
+            json={"peer_card": [left_fact if name == left else right_fact]},
+        )
+        assert stored.status_code == 200, stored.text
+    await safe_cache_delete(peer_cache_key(left, "p1"))
+    await safe_cache_delete(peer_cache_key(right, "p1"))
+    opened: list[str] = []
+
+    @asynccontextmanager
+    async def _counting(operation_name: str | None = None, *, read_only: bool = False):
+        opened.append(str(operation_name))
+        async with real_tracked(operation_name, read_only=read_only) as db:
+            yield db
+
+    monkeypatch.setattr("src.routers.peers.tracked_db", _counting)
+    authorize(client, [left, right])
+    card = client.get(
+        f"/v3/workspaces/{left}/peers/p1/card",
+        params=[("workspaces", left), ("workspaces", right)],
+    )
+    assert card.status_code == 200, card.text
+    body = card.json()
+    assert isinstance(body, list)
+    tagged: dict[str, list[str]] = {}
+    for item in cast(list[object], body):
+        assert isinstance(item, dict)
+        row = cast(dict[str, object], item)
+        workspace_id = row.get("workspace_id")
+        card = row.get("peer_card")
+        assert isinstance(workspace_id, str)
+        assert isinstance(card, list)
+        tagged[workspace_id] = [str(part) for part in cast(list[object], card)]
+    assert left_fact in tagged[left]
+    assert right_fact in tagged[right]
+    assert opened.count("peers.card.fanout") == 2
+
+
+def _broker_headers(monkeypatch: pytest.MonkeyPatch, tmp_path: object):
+    """Headers for a real broker token. The unit suite turns production on."""
+    from contextlib import contextmanager
     from pathlib import Path
 
-    import jwt
-    from cryptography.hazmat.primitives.asymmetric import ed25519
-
-    from src.sentica.runtime import TOKEN_AUDIENCE, SenticaInstance
-    from src.sentica.tokens import verify_sentica_token
     from tests.sentica.rls_job import rls_job, sign_broker_token
 
-    if rls_job():
-        token = sign_broker_token([left], primary=left)
-        params = verify_sentica_token(token)
-    else:
+    @contextmanager
+    def _open():
+        if rls_job():
+
+            def _job(
+                workspaces: list[str],
+                *,
+                peer: str | None = None,
+                primary: str | None = None,
+            ) -> dict[str, str]:
+                token = sign_broker_token(
+                    workspaces,
+                    primary=primary if primary is not None else workspaces[0],
+                    peer=peer,
+                )
+                return {"Authorization": "Bearer " + token}
+
+            yield _job
+            return
+        import time
+
+        import jwt
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import ed25519
+
+        from src.db import BoundedSession, ReadSessionLocal, SessionLocal
+        from src.sentica.runtime import TOKEN_AUDIENCE
+
+        root = tmp_path if isinstance(tmp_path, Path) else Path(str(tmp_path))
         private = ed25519.Ed25519PrivateKey.generate()
-        public = private.public_key()
+        public = root / "token.pub"
+        public.write_bytes(
+            private.public_key().public_bytes(
+                serialization.Encoding.PEM,
+                serialization.PublicFormat.SubjectPublicKeyInfo,
+            )
+        )
+        for name in ("client.crt", "client.key", "ca.crt"):
+            (root / name).write_text("present\n", encoding="utf-8")
+        monkeypatch.setenv("SENTICA_MODE", "production")
+        monkeypatch.setenv("SENTICA_TENANT_ID", "tenant-a")
+        monkeypatch.setenv("SENTICA_DB_PROXY_HOST", "pgbouncer")
+        monkeypatch.setenv("SENTICA_DB_PROXY_PORT", "6432")
+        monkeypatch.setenv("SENTICA_DB_USER", "tenant_a")
+        monkeypatch.setenv("SENTICA_DB_NAME", "tenant_a")
+        monkeypatch.setenv("SENTICA_CLIENT_CERT_PATH", str(root / "client.crt"))
+        monkeypatch.setenv("SENTICA_CLIENT_KEY_PATH", str(root / "client.key"))
+        monkeypatch.setenv("SENTICA_PROXY_CA_PATH", str(root / "ca.crt"))
+        monkeypatch.setenv("SENTICA_TOKEN_PUBLIC_KEY_PATH", str(public))
+        monkeypatch.setenv("SENTICA_TOKEN_ISSUER", "sentica-broker")
+        monkeypatch.setenv("SENTICA_BIND_HOST", "127.0.0.1")
+        monkeypatch.setenv("HOME", str(root))
+        for name in (
+            "DB_CONNECTION_URI",
+            "DATABASE_URL",
+            "POSTGRES_PASSWORD",
+            "DB_PASSWORD",
+            "PGPASSWORD",
+            "PGPASSFILE",
+        ):
+            monkeypatch.delenv(name, raising=False)
         issued = int(time.time())
-        token = jwt.encode(
-            {
-                "iss": "sentica-rls-issuer",
+
+        def _local(
+            workspaces: list[str],
+            *,
+            peer: str | None = None,
+            primary: str | None = None,
+        ) -> dict[str, str]:
+            chosen = primary if primary is not None else workspaces[0]
+            claims: dict[str, object] = {
+                "iss": "sentica-broker",
                 "aud": TOKEN_AUDIENCE,
                 "iat": issued,
                 "exp": issued + 60,
-                "request_id": "policy-" + left,
-                "tenant_id": "tenant-rls",
-                "w": left,
-                "workspaces": [left],
-            },
-            private,
-            algorithm="EdDSA",
-        )
-        public_path = Path("/tmp")
-        params = verify_sentica_token(
-            token,
-            SenticaInstance(
-                tenant_id="tenant-rls",
-                proxy_host="localhost",
-                proxy_port=5432,
-                db_user="tenant_rls",
-                db_name="tenant_rls",
-                cert_path=public_path,
-                key_path=public_path,
-                ca_path=public_path,
-                token_public_key_path=public_path,
-                token_public_key=public,
-                token_issuer="sentica-rls-issuer",
-                bind_host="127.0.0.1",
-            ),
-        )
-    assert params.workspaces == [left]
-    assert right not in (params.workspaces or [])
+                "tenant_id": "tenant-a",
+                "request_id": "m2-" + chosen,
+                "w": chosen,
+                "workspaces": workspaces,
+            }
+            if peer is not None:
+                claims["p"] = peer
+            token = jwt.encode(claims, private, algorithm="EdDSA")
+            return {"Authorization": "Bearer " + token}
+
+        write_class = SessionLocal.class_
+        read_class = ReadSessionLocal.class_
+        SessionLocal.class_ = BoundedSession
+        ReadSessionLocal.class_ = BoundedSession
+        try:
+            yield _local
+        finally:
+            SessionLocal.class_ = write_class
+            ReadSessionLocal.class_ = read_class
+
+    return _open()
 
 
-async def test_disabled_rls_reaches_the_leak_harness(
-    db_engine: object, worker_id: str
+def test_body_workspaces_outside_the_token_are_refused(
+    client: object, monkeypatch: pytest.MonkeyPatch, tmp_path: object
 ) -> None:
-    """Disabling RLS on documents makes the harness see a canary the token cannot name."""
-    from sqlalchemy import text
+    """A token for left refuses a body that also names right, including members."""
+    from starlette.testclient import TestClient
+
+    from tests.sentica.rls_job import authorize
+
+    assert isinstance(client, TestClient)
+    left = "a" + uuid.uuid4().hex[:8]
+    right = "b" + uuid.uuid4().hex[:8]
+    for name in (left, right):
+        authorize(client, [left, right], primary=name)
+        assert client.post("/v3/workspaces", json={"name": name}).status_code in (
+            200,
+            201,
+        )
+        assert client.post(
+            f"/v3/workspaces/{name}/peers", json={"name": "p1"}
+        ).status_code in (200, 201)
+        assert client.post(
+            f"/v3/workspaces/{name}/sessions", json={"id": "s1"}
+        ).status_code in (200, 201)
+    authorize(client, [left], primary=left)
+    assert client.post(
+        f"/v3/workspaces/{left}/peers", json={"name": "member"}
+    ).status_code in (200, 201)
+    added = client.post(
+        f"/v3/workspaces/{left}/sessions/s1/peers",
+        json={"member": {}},
+    )
+    assert added.status_code in (200, 201), added.text
+    both = {"workspaces": [left, right]}
+    with _broker_headers(monkeypatch, tmp_path) as headers:
+        limited = headers([left], primary=left)
+        refused = [
+            client.post(
+                f"/v3/workspaces/{left}/search",
+                headers=limited,
+                json={"query": "x", "workspaces": [left, right]},
+            ),
+            client.post(
+                f"/v3/workspaces/{left}/peers/p1/chat",
+                headers=limited,
+                json={"query": "x", "workspaces": [left, right]},
+            ),
+            client.post(
+                f"/v3/workspaces/{left}/peers/p1/representation",
+                headers=limited,
+                json={"workspaces": [left, right]},
+            ),
+            client.get(
+                f"/v3/workspaces/{left}/peers/p1/card",
+                headers=limited,
+                params=both,
+            ),
+            client.get(
+                f"/v3/workspaces/{left}/peers/p1/context",
+                headers=limited,
+                params=both,
+            ),
+        ]
+        for response in refused:
+            assert response.status_code == 401, response.text
+        member = client.get(
+            f"/v3/workspaces/{left}/sessions/s1/context",
+            headers=headers([left, right], peer="member", primary=left),
+            params=both,
+        )
+        assert member.status_code == 401, member.text
+
+
+async def _message_layer(
+    client: object,
+    monkeypatch: pytest.MonkeyPatch,
+    _worker_id: str,
+    db_engine: object,
+    *,
+    disable_rls: bool,
+) -> None:
+    """Chat once with the message workspace filter removed."""
+    from sqlalchemy import select
+    from starlette.testclient import TestClient
+
+    import src.crud.message as message_crud
+    from src import models
+    from src.config import settings
+    from src.dialectic.chat import agentic_chat
+    from src.llm.backend import CompletionResult, ToolCallResult
+    from src.utils.formatting import ILIKE_ESCAPE_CHAR, escape_ilike_pattern
+    from tests.sentica.rls_job import authorize, ddl_dsn, rls_job
+
+    assert isinstance(client, TestClient)
+    left = "a" + uuid.uuid4().hex[:8]
+    right = "b" + uuid.uuid4().hex[:8]
+    canary = "layercanary" + uuid.uuid4().hex
+    for name, content in ((left, "hello from left"), (right, canary)):
+        authorize(client, [left, right], primary=name)
+        assert client.post("/v3/workspaces", json={"name": name}).status_code in (
+            200,
+            201,
+        )
+        assert client.post(
+            f"/v3/workspaces/{name}/peers", json={"name": "p1"}
+        ).status_code in (200, 201)
+        assert client.post(
+            f"/v3/workspaces/{name}/sessions", json={"id": "s1"}
+        ).status_code in (200, 201)
+        posted = client.post(
+            f"/v3/workspaces/{name}/sessions/s1/messages",
+            json={"messages": [{"content": content, "peer_id": "p1"}]},
+        )
+        assert posted.status_code in (200, 201), posted.text
+
+    schema = settings.DB.SCHEMA
+    role = "m2msg" + uuid.uuid4().hex[:8]
     from sqlalchemy.ext.asyncio import AsyncEngine
 
-    from src.sentica.workspace_scope import workspace_policy_sql
-    from tests.sentica.rls_job import ddl_dsn, rls_job, sync_dsn
-
     assert isinstance(db_engine, AsyncEngine)
-    left = "a" + uuid.uuid4().hex[:20]
-    right = "b" + uuid.uuid4().hex[:20]
-    canary = "policycanary" + uuid.uuid4().hex
-    _broker_allows_only(left, right)
-    role: str | None = None
-    schema = "public"
-    async with db_engine.connect() as conn:
-        current = await conn.scalar(text("SELECT current_schema()"))
-        await conn.rollback()
-    assert isinstance(current, str)
-    schema = current
+    layer_dsn = (
+        ddl_dsn()
+        if rls_job()
+        else db_engine.url.set(drivername="postgresql").render_as_string(
+            hide_password=False
+        )
+    )
 
-    async def _insert() -> None:
-        async with db_engine.begin() as conn:
-            await conn.execute(
-                text("INSERT INTO workspaces (id, name) VALUES (:id, :name)"),
-                {"id": "w" + uuid.uuid4().hex[:20], "name": right},
-            )
-            await conn.execute(
-                text("SELECT set_config('sentica.workspace', :name, true)"),
-                {"name": right},
-            )
-            await conn.execute(
-                text(
-                    "INSERT INTO peers (id, name, workspace_name) "
-                    + "VALUES (:id, 'p1', :name)"
-                ),
-                {"id": "p" + uuid.uuid4().hex[:20], "name": right},
-            )
-            await conn.execute(
-                text(
-                    "INSERT INTO collections (id, observer, observed, workspace_name) "
-                    + "VALUES (:id, 'p1', 'p1', :name)"
-                ),
-                {"id": "c" + uuid.uuid4().hex[:20], "name": right},
-            )
-            await conn.execute(
-                text(
-                    "INSERT INTO documents (id, content, observer, observed, "
-                    + "workspace_name) VALUES (:id, :content, 'p1', 'p1', :name)"
-                ),
-                {
-                    "id": "d" + uuid.uuid4().hex[:20],
-                    "content": canary,
-                    "name": right,
-                },
-            )
-
-    async def _visible() -> list[str]:
-        async with db_engine.connect() as conn:
-            if role is not None:
-                await conn.execute(text("SET ROLE " + role))
-            await conn.execute(
-                text("SELECT set_config('sentica.workspace', :name, true)"),
-                {"name": left},
-            )
-            rows = await conn.execute(
-                text('SELECT content FROM "' + schema + '"."documents"')
-            )
-            found = [str(row[0]) for row in rows if row[0] is not None]
-            await conn.rollback()
-            return found
-
-    def _ddl(enabled: bool) -> None:
+    def _messages_rls(enabled: bool) -> None:
         verb = "ENABLE" if enabled else "DISABLE"
-        with psycopg.connect(ddl_dsn(), autocommit=True) as owner:
-            _run(
-                owner,
-                "ALTER TABLE " + schema + ".documents " + verb + " ROW LEVEL SECURITY",
-            )
-            if enabled:
-                _run(
-                    owner,
-                    "ALTER TABLE " + schema + ".documents FORCE ROW LEVEL SECURITY",
-                )
-
-    if rls_job():
-        await _insert()
-    else:
-        role = "doc" + uuid.uuid4().hex[:8]
-        with psycopg.connect(sync_dsn(worker_id), autocommit=True) as conn:
-            _run(conn, "CREATE ROLE " + role + " NOLOGIN NOBYPASSRLS")
-            _run(conn, workspace_policy_sql(schema, "documents"))
+        force = "FORCE" if enabled else "NO FORCE"
+        with psycopg.connect(layer_dsn, autocommit=True) as conn:
             _run(
                 conn,
-                'GRANT SELECT ON "' + schema + '"."documents" TO ' + role,
+                "ALTER TABLE " + schema + ".messages " + force + " ROW LEVEL SECURITY",
             )
-        await _insert()
+            _run(
+                conn,
+                "ALTER TABLE " + schema + ".messages " + verb + " ROW LEVEL SECURITY",
+            )
+
+    if not rls_job():
+        from contextlib import asynccontextmanager
+
+        from sqlalchemy import text as sql_text
+        from sqlalchemy.ext.asyncio import async_sessionmaker
+
+        with psycopg.connect(layer_dsn, autocommit=True) as conn:
+            _run(conn, "CREATE ROLE " + role + " NOLOGIN NOBYPASSRLS")
+            _run(conn, workspace_policy_sql(schema, "messages"))
+            _run(
+                conn,
+                'GRANT SELECT ON ALL TABLES IN SCHEMA "' + schema + '" TO ' + role,
+            )
+
+        @asynccontextmanager
+        async def _as_role(_name: str | None = None, *, read_only: bool = False):
+            del read_only
+            factory = async_sessionmaker(bind=db_engine, expire_on_commit=False)
+            async with factory() as session:
+                await session.execute(sql_text("SET ROLE " + role))
+                try:
+                    yield session
+                finally:
+                    await session.rollback()
+                    await session.execute(sql_text("RESET ROLE"))
+                    await session.rollback()
+
+        monkeypatch.setattr("src.crud.message.tracked_db", _as_role)
+    if disable_rls:
+        _messages_rls(False)
+
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    async def _unscoped(
+        db: AsyncSession,
+        workspace_name: str,
+        session_name: str | None,
+        text: str,
+        limit: int = 10,
+        context_window: int = 2,
+        allowed_session_names: list[str] | None = None,
+    ) -> object:
+        escaped = escape_ilike_pattern(text)
+        match_stmt = (
+            select(models.Message)
+            .where(
+                models.Message.content.ilike(f"%{escaped}%", escape=ILIKE_ESCAPE_CHAR)
+            )
+            .order_by(models.Message.created_at.desc())
+            .limit(limit)
+        )
+        if session_name:
+            match_stmt = match_stmt.where(models.Message.session_name == session_name)
+        elif allowed_session_names is not None:
+            match_stmt = match_stmt.where(
+                models.Message.session_name.in_(allowed_session_names)
+            )
+        result = await db.execute(match_stmt)
+        matched = list(result.scalars().all())
+        snippet_name = "_build_merged_snippets"
+        build_snippets = getattr(message_crud, snippet_name)
+        return await build_snippets(
+            db,
+            workspace_name,
+            matched,
+            context_window,
+        )
+
+    followups: list[str] = []
+
+    async def _complete(
+        _backend: object, _config: object, **kwargs: object
+    ) -> CompletionResult:
+        messages = repr(kwargs.get("messages"))
+        if (
+            "tool_result" in messages
+            or "'role': 'tool'" in messages
+            or '"role": "tool"' in messages
+        ):
+            followups.append(messages)
+            return CompletionResult(content="ok")
+        if "grep_messages" in _tool_names(kwargs.get("tools")):
+            return CompletionResult(
+                content="",
+                tool_calls=[ToolCallResult("c1", "grep_messages", {"text": canary})],
+            )
+        return CompletionResult(content="ok")
+
+    monkeypatch.setattr("src.crud.message._grep_messages_internal", _unscoped)
+    monkeypatch.setattr(settings.LLM, "OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr("src.routers.peers.agentic_chat", agentic_chat)
+    monkeypatch.setattr("src.llm.executor.default_client", _unused_client)
+    monkeypatch.setattr("src.llm.executor.backend_for_provider", _unused_client)
+    monkeypatch.setattr("src.llm.executor.execute_completion", _complete)
     try:
-        hidden = await _visible()
-        assert canary not in hidden
-        if rls_job():
-            _ddl(False)
+        authorize(client, [left], primary=left)
+        answer = client.post(
+            f"/v3/workspaces/{left}/peers/p1/chat",
+            json={"query": "where is the note"},
+        )
+        assert answer.status_code == 200, answer.text
+        assert followups, "tool result did not reach the next model call"
+        blob = "\n".join(followups)
+        if disable_rls:
+            assert "Found " in blob
+            assert "No messages found containing" not in blob
         else:
-            async with db_engine.begin() as conn:
-                await conn.execute(
-                    text(
-                        'ALTER TABLE "'
-                        + schema
-                        + '".documents DISABLE ROW LEVEL SECURITY'
-                    )
-                )
-        leaked = await _visible()
-        recorded = ["capture:documents:" + item for item in leaked]
-        assert canary in "\n".join(recorded)
-        if rls_job():
-            _ddl(True)
-        else:
-            async with db_engine.begin() as conn:
-                await conn.execute(
-                    text(
-                        'ALTER TABLE "'
-                        + schema
-                        + '".documents ENABLE ROW LEVEL SECURITY'
-                    )
-                )
-                await conn.execute(
-                    text(
-                        'ALTER TABLE "'
-                        + schema
-                        + '".documents FORCE ROW LEVEL SECURITY'
-                    )
-                )
-        restored = await _visible()
-        assert canary not in restored
+            assert "No messages found containing" in blob
     finally:
-        if rls_job():
-            _ddl(True)
-            async with db_engine.begin() as conn:
-                await conn.execute(
-                    text("SELECT set_config('sentica.workspace', :name, true)"),
-                    {"name": right},
-                )
-                await conn.execute(
-                    text(
-                        'DELETE FROM "'
+        if disable_rls or not rls_job():
+            if disable_rls and rls_job():
+                _messages_rls(True)
+            elif not rls_job():
+                with psycopg.connect(layer_dsn, autocommit=True) as conn:
+                    _run(
+                        conn,
+                        "DROP POLICY IF EXISTS sentica_workspace ON "
                         + schema
-                        + '"."documents" WHERE workspace_name = :name'
-                    ),
-                    {"name": right},
-                )
-                await conn.execute(
-                    text(
-                        'DELETE FROM "'
+                        + ".messages",
+                    )
+                    _run(
+                        conn,
+                        "ALTER TABLE "
                         + schema
-                        + '"."collections" WHERE workspace_name = :name'
-                    ),
-                    {"name": right},
-                )
-                await conn.execute(
-                    text(
-                        'DELETE FROM "'
-                        + schema
-                        + '"."peers" WHERE workspace_name = :name'
-                    ),
-                    {"name": right},
-                )
-                await conn.execute(
-                    text("DELETE FROM workspaces WHERE name = :name"),
-                    {"name": right},
-                )
-        else:
-            with psycopg.connect(sync_dsn(worker_id), autocommit=True) as conn:
-                _run(
-                    conn,
-                    'DROP POLICY IF EXISTS sentica_workspace ON "'
-                    + schema
-                    + '"."documents"',
-                )
-                _run(
-                    conn,
-                    'ALTER TABLE "'
-                    + schema
-                    + '"."documents" DISABLE ROW LEVEL SECURITY',
-                )
-                conn.execute(
-                    "DELETE FROM documents WHERE workspace_name = %s",
-                    (right,),
-                )
-                conn.execute(
-                    "DELETE FROM collections WHERE workspace_name = %s",
-                    (right,),
-                )
-                conn.execute("DELETE FROM peers WHERE workspace_name = %s", (right,))
-                conn.execute("DELETE FROM workspaces WHERE name = %s", (right,))
-                if role is not None:
+                        + ".messages DISABLE ROW LEVEL SECURITY",
+                    )
                     _run(conn, "DROP OWNED BY " + role)
-                    _run(conn, "DROP ROLE " + role)
+                    _run(conn, "DROP ROLE IF EXISTS " + role)
+
+
+async def test_crud_filter_removed_rls_still_hides_the_canary(
+    client: object,
+    monkeypatch: pytest.MonkeyPatch,
+    worker_id: str,
+    db_engine: object,
+) -> None:
+    """With the message filter gone, row-level security still hides the canary."""
+    await _message_layer(client, monkeypatch, worker_id, db_engine, disable_rls=False)
+
+
+async def test_crud_filter_removed_disabled_rls_shows_the_canary(
+    client: object,
+    monkeypatch: pytest.MonkeyPatch,
+    worker_id: str,
+    db_engine: object,
+) -> None:
+    """The same chat sees the canary once the ddl role disables row-level security."""
+    await _message_layer(client, monkeypatch, worker_id, db_engine, disable_rls=True)

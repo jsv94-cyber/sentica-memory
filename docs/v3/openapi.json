@@ -1170,10 +1170,7 @@
                       "$ref": "#/components/schemas/RepresentationResponse"
                     },
                     {
-                      "type": "array",
-                      "items": {
-                        "$ref": "#/components/schemas/RepresentationResponse"
-                      }
+                      "$ref": "#/components/schemas/RepresentationList"
                     }
                   ],
                   "title": "Response Get Representation V3 Workspaces  Workspace Id  Peers  Peer Id  Representation Post"
@@ -1279,10 +1276,7 @@
                       "$ref": "#/components/schemas/PeerCardResponse"
                     },
                     {
-                      "type": "array",
-                      "items": {
-                        "$ref": "#/components/schemas/PeerCardResponse"
-                      }
+                      "$ref": "#/components/schemas/PeerCardList"
                     }
                   ],
                   "title": "Response Get Peer Card V3 Workspaces  Workspace Id  Peers  Peer Id  Card Get"
@@ -1564,10 +1558,7 @@
                       "$ref": "#/components/schemas/PeerContext"
                     },
                     {
-                      "type": "array",
-                      "items": {
-                        "$ref": "#/components/schemas/PeerContext"
-                      }
+                      "$ref": "#/components/schemas/PeerContextList"
                     }
                   ],
                   "title": "Response Get Peer Context V3 Workspaces  Workspace Id  Peers  Peer Id  Context Get"
@@ -2773,10 +2764,7 @@
                       "$ref": "#/components/schemas/SessionContext"
                     },
                     {
-                      "type": "array",
-                      "items": {
-                        "$ref": "#/components/schemas/SessionContext"
-                      }
+                      "$ref": "#/components/schemas/SessionContextList"
                     }
                   ],
                   "title": "Response Get Session Context V3 Workspaces  Workspace Id  Sessions  Session Id  Context Get"
@@ -6246,6 +6234,14 @@
         "type": "object",
         "title": "PeerCardConfiguration"
       },
+      "PeerCardList": {
+        "items": {
+          "$ref": "#/components/schemas/PeerCardResponse"
+        },
+        "type": "array",
+        "title": "PeerCardList",
+        "description": "Peer cards, one for each requested workspace."
+      },
       "PeerCardResponse": {
         "properties": {
           "peer_card": {
@@ -6353,6 +6349,14 @@
         ],
         "title": "PeerContext",
         "description": "Context for a peer, including representation and peer card."
+      },
+      "PeerContextList": {
+        "items": {
+          "$ref": "#/components/schemas/PeerContext"
+        },
+        "type": "array",
+        "title": "PeerContextList",
+        "description": "Peer contexts, one for each requested workspace."
       },
       "PeerCreate": {
         "properties": {
@@ -6680,6 +6684,14 @@
         },
         "type": "object",
         "title": "ReasoningConfiguration"
+      },
+      "RepresentationList": {
+        "items": {
+          "$ref": "#/components/schemas/RepresentationResponse"
+        },
+        "type": "array",
+        "title": "RepresentationList",
+        "description": "Representations, one for each requested workspace."
       },
       "RepresentationResponse": {
         "properties": {
@@ -7024,6 +7036,14 @@
           "messages"
         ],
         "title": "SessionContext"
+      },
+      "SessionContextList": {
+        "items": {
+          "$ref": "#/components/schemas/SessionContext"
+        },
+        "type": "array",
+        "title": "SessionContextList",
+        "description": "Session contexts, one for each requested workspace."
       },
       "SessionCreate": {
         "properties": {

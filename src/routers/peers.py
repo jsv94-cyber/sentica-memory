@@ -479,8 +479,7 @@ async def chat(
 
 @router.post(
     "/{peer_id}/representation",
-    response_model=schemas.RepresentationResponse
-    | list[schemas.RepresentationResponse],
+    response_model=schemas.RepresentationResponse | schemas.RepresentationList,
 )
 async def get_representation(
     workspace_id: str = Path(...),
@@ -657,7 +656,7 @@ async def get_representation(
 
 @router.get(
     "/{peer_id}/card",
-    response_model=schemas.PeerCardResponse | list[schemas.PeerCardResponse],
+    response_model=schemas.PeerCardResponse | schemas.PeerCardList,
 )
 async def get_peer_card(
     workspace_id: str = Path(...),
@@ -691,11 +690,14 @@ async def get_peer_card(
     if workspaces and len(targets) > 1:
         cards: list[schemas.PeerCardResponse] = []
         for name in targets:
-            token = await open_workspace(name, jwt_params, peer_name=peer_id)
-            try:
-                one = await get_peer_card(name, peer_id, jwt_params, target, None, db)
-            finally:
-                reset_workspace(token)
+            async with tracked_db("peers.card.fanout", read_only=True) as scoped:
+                token = await open_workspace(name, jwt_params, peer_name=peer_id)
+                try:
+                    one = await get_peer_card(
+                        name, peer_id, jwt_params, target, None, scoped
+                    )
+                finally:
+                    reset_workspace(token)
             if isinstance(one, schemas.PeerCardResponse):
                 one.workspace_id = name
                 cards.append(one)
@@ -754,7 +756,7 @@ async def set_peer_card(
 
 @router.get(
     "/{peer_id}/context",
-    response_model=schemas.PeerContext | list[schemas.PeerContext],
+    response_model=schemas.PeerContext | schemas.PeerContextList,
 )
 async def get_peer_context(
     workspace_id: str = Path(...),

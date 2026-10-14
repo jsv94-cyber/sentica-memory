@@ -19,6 +19,7 @@ from pydantic import (
     ConfigDict,
     Field,
     PrivateAttr,
+    RootModel,
     field_validator,
     model_validator,
 )
@@ -301,11 +302,19 @@ class RepresentationResponse(BaseModel):
     workspace_id: str | None = None
 
 
+class RepresentationList(RootModel[list[RepresentationResponse]]):
+    """Representations, one for each requested workspace."""
+
+
 class PeerCardResponse(BaseModel):
     peer_card: list[str] | None = Field(
         None, description="The peer card content, or None if not found"
     )
     workspace_id: str | None = None
+
+
+class PeerCardList(RootModel[list[PeerCardResponse]]):
+    """Peer cards, one for each requested workspace."""
 
 
 class PeerCardSet(BaseModel):
@@ -502,6 +511,10 @@ class SessionContext(SessionBase):
     )
 
 
+class SessionContextList(RootModel[list[SessionContext]]):
+    """Session contexts, one for each requested workspace."""
+
+
 class PeerContext(BaseModel):
     """Context for a peer, including representation and peer card."""
 
@@ -516,6 +529,10 @@ class PeerContext(BaseModel):
         description="The peer card for the target peer from the observer's perspective",
     )
     workspace_id: str | None = None
+
+
+class PeerContextList(RootModel[list[PeerContext]]):
+    """Peer contexts, one for each requested workspace."""
 
 
 class SessionSummaries(SessionBase):
