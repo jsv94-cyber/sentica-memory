@@ -93,8 +93,8 @@ behavior is removed.
   representation, or card body before any of those workspaces are queried.
   Each target is checked again, including member-read, inside its own
   transaction.
-- One workspace per task. `src/deriver/queue_manager.py:370` claims queue
-  rows once per workspace name. `src/deriver/queue_manager.py:698` sets that
+- One workspace per task. `src/deriver/queue_manager.py:368` claims queue
+  rows once per workspace name. `src/deriver/queue_manager.py:696` sets that
   workspace for the whole representation, summary, or dream task.
   `src/reconciler/scheduler.py:89` gates each reconciler task on its own
   count. `src/reconciler/scheduler.py:295` enqueues one row per workspace

@@ -348,9 +348,7 @@ class QueueManager:
             if counts is None:
                 names = list(await db.scalars(select(models.Workspace.name)))
             else:
-                names = [
-                    row.workspace_name for row in counts if row.pending_queue > 0
-                ]
+                names = [row.workspace_name for row in counts if row.pending_queue > 0]
         ordered, self._fair_index = fair_workspace_order(names, self._fair_index)
         claimed: dict[str, str] = {}
         remaining = limit

@@ -32,7 +32,7 @@ REQUIRED_CITATIONS: tuple[tuple[str, int, str], ...] = (
     ("src/crud/peer_card.py", 22, "get_peer_card"),
     ("src/utils/summarizer.py", 94, "SUMMARIES_KEY"),
     ("src/dreamer/orchestrator.py", 108, "def run_dream"),
-    ("src/deriver/queue_manager.py", 548, "def polling_loop"),
+    ("src/deriver/queue_manager.py", 546, "def polling_loop"),
     ("src/deriver/consumer.py", 47, "def process_item"),
     ("src/llm/api.py", 147, "def honcho_llm_call"),
     ("src/deriver/deriver.py", 162, "honcho_llm_call"),

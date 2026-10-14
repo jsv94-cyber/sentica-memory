@@ -197,7 +197,7 @@ is the store.
 
 The worker process is `python -m src.deriver` (`src/deriver/__main__.py:22`
 calls `src/deriver/queue_manager.py:1342` `main`). `src/deriver/queue_manager.py:140`
-`QueueManager.polling_loop` (`src/deriver/queue_manager.py:548`) claims work
+`QueueManager.polling_loop` (`src/deriver/queue_manager.py:546`) claims work
 units (`src/deriver/queue_manager.py:322`) and processes them in order.
 `src/deriver/consumer.py:47` `process_item` dispatches on `task_type`.
 Representation batches go to `src/deriver/deriver.py:44`
