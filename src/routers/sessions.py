@@ -1196,9 +1196,7 @@ async def search_session(
         try:
             scoped = dict(filters)
             scoped["workspace_id"] = name
-            found.extend(
-                await search(body.query, filters=scoped, limit=body.limit)
-            )
+            found.extend(await search(body.query, filters=scoped, limit=body.limit))
         finally:
             reset_workspace(token)
     return found

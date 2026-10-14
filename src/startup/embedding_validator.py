@@ -157,6 +157,7 @@ async def _introspect_pgvector_dims_once(
           AND a.attname = 'embedding'
         """
     )
+
     async def _read(connection: Any) -> dict[str, int]:
         result = await connection.execute(
             query,
@@ -268,6 +269,7 @@ async def _sample_workspace_names(engine: AsyncEngine, limit: int) -> list[str]:
     a non-public schema deployment must not silently sample the wrong table.
     """
     stmt = select(Workspace.name).order_by(Workspace.created_at.desc()).limit(limit)
+
     async def _read(connection: Any) -> list[str]:
         result = await connection.execute(stmt)
         return [row[0] for row in result]
@@ -286,6 +288,7 @@ async def _sample_collection_keys(
         .order_by(Collection.created_at.desc())
         .limit(limit)
     )
+
     async def _read(connection: Any) -> list[tuple[str, str, str]]:
         result = await connection.execute(stmt)
         return [(row[0], row[1], row[2]) for row in result]

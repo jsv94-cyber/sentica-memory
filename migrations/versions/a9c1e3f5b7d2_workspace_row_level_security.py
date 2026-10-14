@@ -88,9 +88,7 @@ def upgrade() -> None:
         if member:
             # The new owner must be allowed to create objects in the schema.
             op.execute(
-                sa.text(
-                    f"GRANT USAGE, CREATE ON SCHEMA {quoted_schema} TO sentica_ddl"
-                )
+                sa.text(f"GRANT USAGE, CREATE ON SCHEMA {quoted_schema} TO sentica_ddl")
             )
             for (table_name,) in rows:
                 table = quoted_schema + "." + _quote(table_name)

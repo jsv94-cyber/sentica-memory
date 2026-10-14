@@ -58,7 +58,7 @@ behavior is removed.
 - Role. `sentica_app` is `NOLOGIN`, `NOSUPERUSER`, and `NOBYPASSRLS`. When
   the migrating user is a member of `sentica_ddl`, the migration grants that
   role `CREATE` on the schema and moves table ownership to it at
-  `migrations/versions/a9c1e3f5b7d2_workspace_row_level_security.py:97`.
+  `migrations/versions/a9c1e3f5b7d2_workspace_row_level_security.py:95`.
   The app role is not the owner. Test:
   `test_app_role_cannot_read_another_workspace`. It inserts one row for
   workspace A and one for workspace B in every protected table, then `SET

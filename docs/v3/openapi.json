@@ -574,6 +574,17 @@
                         }
                       ],
                       "description": "What the answer was built from. Present only when `include_evidence` is true."
+                    },
+                    "workspace_id": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "title": "Workspace Id"
                     }
                   },
                   "required": [
@@ -1068,6 +1079,17 @@
                         }
                       ],
                       "description": "What the answer was built from. Present only when `include_evidence` is true."
+                    },
+                    "workspace_id": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "title": "Workspace Id"
                     }
                   },
                   "required": [
@@ -1143,7 +1165,18 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RepresentationResponse"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RepresentationResponse"
+                    },
+                    {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/RepresentationResponse"
+                      }
+                    }
+                  ],
+                  "title": "Response Get Representation V3 Workspaces  Workspace Id  Peers  Peer Id  Representation Post"
                 }
               }
             }
@@ -1212,6 +1245,27 @@
               "title": "Target"
             },
             "description": "Optional target peer to retrieve a card for, from the observer's perspective. If not provided, returns the observer's own card"
+          },
+          {
+            "name": "workspaces",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Workspaces to read. Each one is queried on its own.",
+              "title": "Workspaces"
+            },
+            "description": "Workspaces to read. Each one is queried on its own."
           }
         ],
         "responses": {
@@ -1220,7 +1274,18 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/PeerCardResponse"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/PeerCardResponse"
+                    },
+                    {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/PeerCardResponse"
+                      }
+                    }
+                  ],
+                  "title": "Response Get Peer Card V3 Workspaces  Workspace Id  Peers  Peer Id  Card Get"
                 }
               }
             }
@@ -1465,6 +1530,27 @@
               "title": "Max Conclusions"
             },
             "description": "Maximum number of conclusions to include in the representation"
+          },
+          {
+            "name": "workspaces",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Workspaces to read. Each one is queried on its own.",
+              "title": "Workspaces"
+            },
+            "description": "Workspaces to read. Each one is queried on its own."
           }
         ],
         "responses": {
@@ -1473,7 +1559,18 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/PeerContext"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/PeerContext"
+                    },
+                    {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/PeerContext"
+                      }
+                    }
+                  ],
+                  "title": "Response Get Peer Context V3 Workspaces  Workspace Id  Peers  Peer Id  Context Get"
                 }
               }
             }
@@ -2642,6 +2739,27 @@
               "title": "Max Conclusions"
             },
             "description": "Only used if `search_query` is provided. The maximum number of conclusions to include in the representation"
+          },
+          {
+            "name": "workspaces",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Workspaces to read. Each one is queried on its own.",
+              "title": "Workspaces"
+            },
+            "description": "Workspaces to read. Each one is queried on its own."
           }
         ],
         "responses": {
@@ -2650,7 +2768,18 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SessionContext"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/SessionContext"
+                    },
+                    {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/SessionContext"
+                      }
+                    }
+                  ],
+                  "title": "Response Get Session Context V3 Workspaces  Workspace Id  Sessions  Session Id  Context Get"
                 }
               }
             }
@@ -5445,6 +5574,21 @@
             "title": "Include Evidence",
             "description": "When true, the response includes an `evidence` object listing the conclusions and messages the agent read while answering, plus the tool calls it made. Evidence is collated from what the agent accessed; the model is never asked to cite anything, so evidence may over-report (accessed is not the same as used).",
             "default": false
+          },
+          "workspaces": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workspaces",
+            "description": "Workspaces to query. Each one is answered on its own."
           }
         },
         "type": "object",
@@ -5705,6 +5849,21 @@
             "title": "Limit",
             "description": "Number of results to return",
             "default": 10
+          },
+          "workspaces": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workspaces",
+            "description": "Workspaces to search. Each one is queried on its own."
           }
         },
         "type": "object",
@@ -6103,6 +6262,17 @@
             ],
             "title": "Peer Card",
             "description": "The peer card content, or None if not found"
+          },
+          "workspace_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workspace Id"
           }
         },
         "type": "object",
@@ -6163,6 +6333,17 @@
             ],
             "title": "Peer Card",
             "description": "The peer card for the target peer from the observer's perspective"
+          },
+          "workspace_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workspace Id"
           }
         },
         "type": "object",
@@ -6372,6 +6553,21 @@
             "title": "Max Conclusions",
             "description": "Only used if `search_query` is provided. Maximum number of conclusions to include in the representation",
             "default": 25
+          },
+          "workspaces": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workspaces",
+            "description": "Workspaces to read. Each one is queried on its own."
           }
         },
         "type": "object",
@@ -6490,6 +6686,17 @@
           "representation": {
             "type": "string",
             "title": "Representation"
+          },
+          "workspace_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workspace Id"
           }
         },
         "type": "object",
@@ -6798,6 +7005,17 @@
             ],
             "title": "Peer Card",
             "description": "The peer card, if context is requested from a specific perspective"
+          },
+          "workspace_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workspace Id"
           }
         },
         "type": "object",
@@ -7320,6 +7538,21 @@
             "title": "Include Evidence",
             "description": "When true, the response includes an `evidence` object listing the conclusions and messages the agent read while answering, plus the tool calls it made. Evidence is collated from what the agent accessed; the model is never asked to cite anything, so evidence may over-report (accessed is not the same as used).",
             "default": false
+          },
+          "workspaces": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workspaces",
+            "description": "Workspaces to query. Each one is answered on its own."
           }
         },
         "type": "object",
@@ -7474,6 +7707,21 @@
             "title": "Limit",
             "description": "Number of results to return",
             "default": 10
+          },
+          "workspaces": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workspaces",
+            "description": "Workspaces to search. Each one is queried on its own."
           },
           "scope": {
             "anyOf": [

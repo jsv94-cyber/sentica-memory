@@ -455,7 +455,8 @@ async def chat(
 
 @router.post(
     "/{peer_id}/representation",
-    response_model=schemas.RepresentationResponse | list[schemas.RepresentationResponse],
+    response_model=schemas.RepresentationResponse
+    | list[schemas.RepresentationResponse],
 )
 async def get_representation(
     workspace_id: str = Path(...),
