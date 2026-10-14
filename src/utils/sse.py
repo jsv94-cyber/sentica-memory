@@ -14,6 +14,7 @@ from src.utils.evidence import EvidenceAccumulator
 async def format_dialectic_sse_stream(
     chunks: AsyncIterator[str],
     evidence: EvidenceAccumulator | None = None,
+    workspace_id: str | None = None,
 ) -> AsyncIterator[str]:
     """Frame answer chunks as SSE events, then a terminal event.
 
@@ -23,9 +24,14 @@ async def format_dialectic_sse_stream(
     did not ask for evidence and the terminal event carries only `done`.
     """
     async for chunk in chunks:
-        yield f"data: {json.dumps({'delta': {'content': chunk}, 'done': False})}\n\n"
+        frame: dict[str, object] = {"delta": {"content": chunk}, "done": False}
+        if workspace_id is not None:
+            frame["workspace_id"] = workspace_id
+        yield f"data: {json.dumps(frame)}\n\n"
 
     final: dict[str, object] = {"done": True}
+    if workspace_id is not None:
+        final["workspace_id"] = workspace_id
     if evidence is not None:
         final["evidence"] = _serializable(evidence.build())
     yield f"data: {json.dumps(final)}\n\n"

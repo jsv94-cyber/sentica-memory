@@ -4,7 +4,7 @@ import logging
 from contextlib import suppress
 from time import perf_counter
 
-from fastapi import APIRouter, Body, Depends, Path, Query, Response
+from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Response
 from fastapi.responses import StreamingResponse
 from fastapi_pagination.bases import AbstractParams
 from pydantic import BaseModel
@@ -240,6 +240,20 @@ async def get_sessions_for_peer(
     )
 
 
+async def _peer_exists(workspace_id: str, peer_id: str) -> bool:
+    """True when this workspace already has the peer. Multi-workspace chat does not create it."""
+    from sqlalchemy import select
+
+    async with tracked_db("peers.chat.exists", read_only=True) as peer_db:
+        found = await peer_db.scalar(
+            select(models.Peer.name).where(
+                models.Peer.workspace_name == workspace_id,
+                models.Peer.name == peer_id,
+            )
+        )
+    return found is not None
+
+
 @router.post(
     "/{peer_id}/chat",
     summary="Peer Chat",
@@ -266,21 +280,30 @@ async def chat(
     Query a Peer's representation using natural language. Performs agentic search and reasoning to comprehensively
     answer the query based on all latent knowledge gathered about the peer from their messages and conclusions.
     """
-    from src.sentica.runtime import production_enabled
     from src.sentica.workspace_scope import (
         enforce_targets,
+        open_workspace,
         reset_workspace,
-        set_workspace,
+        token_allowed,
     )
 
-    allowed = jwt_params.workspaces if production_enabled() else None
+    allowed = token_allowed(jwt_params)
     targets = enforce_targets(workspace_id, options.workspaces, allowed)
+    if len(targets) > 1 and options.stream:
+        raise HTTPException(
+            status_code=400, detail="stream requires a single workspace"
+        )
     if options.workspaces and len(targets) > 1:
         child = options.model_copy(update={"workspaces": None, "stream": False})
         answers: list[schemas.DialecticResponse] = []
         for name in targets:
-            token = set_workspace(name)
+            token = await open_workspace(name, jwt_params, peer_name=peer_id)
             try:
+                if not await _peer_exists(name, peer_id):
+                    answers.append(
+                        schemas.DialecticResponse(content="", workspace_id=name)
+                    )
+                    continue
                 one = await chat(name, peer_id, child, jwt_params)
             finally:
                 reset_workspace(token)
@@ -420,6 +443,7 @@ async def chat(
                     evidence=evidence,
                 ),
                 evidence,
+                workspace_id,
             ),
             media_type="text/event-stream",
         )
@@ -476,20 +500,20 @@ async def get_representation(
     If a target is provided, we get the Representation of the target from the perspective of the Peer.
     If no target is provided, we get the omniscient Honcho Representation of the Peer.
     """
-    from src.sentica.runtime import production_enabled
     from src.sentica.workspace_scope import (
         enforce_targets,
+        open_workspace,
         reset_workspace,
-        set_workspace,
+        token_allowed,
     )
 
-    allowed = jwt_params.workspaces if production_enabled() else None
+    allowed = token_allowed(jwt_params)
     targets = enforce_targets(workspace_id, options.workspaces, allowed)
     if options.workspaces and len(targets) > 1:
         child = options.model_copy(update={"workspaces": None})
         parts: list[schemas.RepresentationResponse] = []
         for name in targets:
-            token = set_workspace(name)
+            token = await open_workspace(name, jwt_params, peer_name=peer_id)
             try:
                 one = await get_representation(name, peer_id, child, jwt_params)
             finally:
@@ -655,19 +679,19 @@ async def get_peer_card(
     Returns the peer card that the observer peer has for the target peer if it exists.
     If no target is specified, returns the observer's own peer card.
     """
-    from src.sentica.runtime import production_enabled
     from src.sentica.workspace_scope import (
         enforce_targets,
+        open_workspace,
         reset_workspace,
-        set_workspace,
+        token_allowed,
     )
 
-    allowed = jwt_params.workspaces if production_enabled() else None
+    allowed = token_allowed(jwt_params)
     targets = enforce_targets(workspace_id, workspaces, allowed)
     if workspaces and len(targets) > 1:
         cards: list[schemas.PeerCardResponse] = []
         for name in targets:
-            token = set_workspace(name)
+            token = await open_workspace(name, jwt_params, peer_name=peer_id)
             try:
                 one = await get_peer_card(name, peer_id, jwt_params, target, None, db)
             finally:
@@ -783,19 +807,19 @@ async def get_peer_context(
     This is useful for getting all the context needed about a peer without
     making multiple API calls.
     """
-    from src.sentica.runtime import production_enabled
     from src.sentica.workspace_scope import (
         enforce_targets,
+        open_workspace,
         reset_workspace,
-        set_workspace,
+        token_allowed,
     )
 
-    allowed = jwt_params.workspaces if production_enabled() else None
+    allowed = token_allowed(jwt_params)
     targets = enforce_targets(workspace_id, workspaces, allowed)
     if workspaces and len(targets) > 1:
         merged: list[schemas.PeerContext] = []
         for name in targets:
-            token = set_workspace(name)
+            token = await open_workspace(name, jwt_params, peer_name=peer_id)
             try:
                 one = await get_peer_context(
                     name,
@@ -926,20 +950,20 @@ async def search_peer(
     ),
 ):
     """Search a Peer's messages, optionally filtered by various criteria."""
-    from src.sentica.runtime import production_enabled
     from src.sentica.workspace_scope import (
         enforce_targets,
+        open_workspace,
         reset_workspace,
-        set_workspace,
+        token_allowed,
     )
 
     filters = body.filters or {}
     filters["peer_id"] = peer_id
-    allowed = jwt_params.workspaces if production_enabled() else None
+    allowed = token_allowed(jwt_params)
     targets = enforce_targets(workspace_id, body.workspaces, allowed)
     found: list[models.Message] = []
     for name in targets:
-        token = set_workspace(name)
+        token = await open_workspace(name, jwt_params, peer_name=peer_id)
         try:
             scoped = dict(filters)
             scoped["workspace_id"] = name

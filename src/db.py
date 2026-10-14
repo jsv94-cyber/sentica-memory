@@ -352,11 +352,13 @@ SessionLocal = async_sessionmaker(
     class_=_session_class,
 )
 
-# Read-only engine: shares `engine`'s pool, but checks connections out in DBAPI
-# AUTOCOMMIT mode, so psycopg emits NO BEGIN — a SELECT never autobegins a
-# transaction. The backend therefore returns to state 'idle' (not 'idle in
-# transaction') the moment a statement completes.
-read_engine = engine.execution_options(isolation_level="AUTOCOMMIT")
+# Read-only engine: shares `engine`'s pool. Every checkout runs inside
+# BEGIN READ ONLY, so sentica.workspace is SET LOCAL and dies at commit or
+# rollback. The next checkout on the same pooled connection does not keep it.
+read_engine = engine.execution_options(
+    isolation_level="READ COMMITTED",
+    postgresql_readonly=True,
+)
 
 install_workspace_scope(engine, read_engine)
 

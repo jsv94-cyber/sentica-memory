@@ -249,45 +249,50 @@ class ReconcilerScheduler:
         Returns:
             True if a task was enqueued, False if skipped
         """
-        async with tracked_db("reconciler_enqueue") as db:
-            if task.has_pending is not None and not await task.has_pending(db):
-                logger.debug("Task %s has nothing to do, skipping enqueue", task.name)
-                return False
+        from src.sentica.workspace_scope import (
+            fetch_pending_counts,
+            reset_workspace,
+            set_workspace,
+        )
 
-            names = list(await db.scalars(select(models.Workspace.name)))
-            targets = (
-                [(f"{task.work_unit_key}:{name}", name) for name in names]
-                if names
-                else [(task.work_unit_key, None)]
-            )
-            from src.sentica.workspace_scope import reset_workspace, set_workspace
-
-            inserted = False
-            for key, workspace_name in targets:
-                token = (
-                    set_workspace(workspace_name)
-                    if workspace_name is not None
-                    else None
-                )
+        async with tracked_db("reconciler_enqueue_plan", read_only=True) as db:
+            counts = await fetch_pending_counts(db)
+            if counts is None:
+                if task.has_pending is not None and not await task.has_pending(db):
+                    logger.debug(
+                        "Task %s has nothing to do, skipping enqueue", task.name
+                    )
+                    return False
+                names = list(await db.scalars(select(models.Workspace.name)))
+            else:
+                names = [
+                    workspace
+                    for workspace, _queue, embeddings in counts
+                    if embeddings > 0 or task.has_pending is None
+                ]
+        if not names:
+            return False
+        inserted = False
+        for name in names:
+            async with tracked_db("reconciler_enqueue") as db:
+                token = set_workspace(name)
                 try:
-                    if await self._enqueue_one(db, key, workspace_name, task.payload):
-                        inserted = True
+                    if await self._enqueue_one(
+                        db,
+                        f"{task.work_unit_key}:{name}",
+                        name,
+                        task.payload,
+                    ):
+                        try:
+                            await db.commit()
+                            inserted = True
+                        except IntegrityError:
+                            await db.rollback()
                 finally:
-                    if token is not None:
-                        reset_workspace(token)
-            if not inserted:
-                return False
-            try:
-                await db.commit()
-            except IntegrityError:
-                await db.rollback()
-                logger.debug(
-                    "Task %s already enqueued by another instance, skipping",
-                    task.name,
-                )
-                return False
+                    reset_workspace(token)
+        if inserted:
             logger.debug("Enqueued reconciler task: %s", task.name)
-            return True
+        return inserted
 
     async def _enqueue_one(
         self,

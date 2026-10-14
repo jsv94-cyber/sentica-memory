@@ -57,7 +57,7 @@ async def process_item(queue_item: models.QueueItem) -> None:
     pop_and_check_tenant(queue_payload)
     workspace_name = queue_item.workspace_name
 
-    # Handle reconciler first - it's the only task type that doesn't require workspace_name
+    # Reconciler tasks poll on their own and do not share the payload models below.
     if task_type == "reconciler":
         # No top-level transaction here: reconciler tasks poll on a fixed
         # interval and usually find no work. Tracing is started per-batch
@@ -74,10 +74,6 @@ async def process_item(queue_item: models.QueueItem) -> None:
             raise ValueError(f"Invalid payload structure: {str(e)}") from e
         await process_reconciler(validated)
         return
-
-    # All other task types require a workspace_name
-    if workspace_name is None:
-        raise ValueError(f"{task_type} tasks require a workspace_name")
 
     if task_type == "webhook":
         try:

@@ -2,9 +2,11 @@
 
 from logging import getLogger
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
 from src.backlog import DeriverMetricsPoller
+from src.security import JWTParams, require_auth
+from src.sentica.workspace_scope import token_allowed
 
 logger = getLogger(__name__)
 
@@ -21,13 +23,32 @@ def set_deriver_metrics_poller(poller: DeriverMetricsPoller | None) -> None:
 # Deriver queue internals: an operational signal for scaling, not a public
 # resource.
 @router.get("/metrics", include_in_schema=False)
-async def get_deriver_metrics_response() -> dict[str, float | int]:
+async def get_deriver_metrics_response(
+    jwt_params: JWTParams = Depends(require_auth()),
+) -> dict[str, float | int]:
     """Seconds of outstanding deriver work, plus the raw counts behind it."""
     snapshot = _poller.snapshot if _poller is not None else None
     if snapshot is None or snapshot.measured_at is None:
         raise HTTPException(
             status_code=503, detail="No deriver measurement available yet"
         )
+    allowed = token_allowed(jwt_params)
+    if allowed is not None:
+        from src.crud import metrics_for_workspaces
+
+        scoped = await metrics_for_workspaces(allowed)
+        return {
+            "outstanding_work_seconds": snapshot.signal_seconds,
+            "eligible_work_units": scoped.eligible_work_units,
+            "claimed_work_units": scoped.claimed_work_units,
+            "pending_items": scoped.pending_items,
+            "oldest_pending_age_seconds": scoped.oldest_pending_age_seconds,
+            "embeddings_pending": scoped.embeddings_pending,
+            "embeddings_pending_due": scoped.embeddings_pending_due,
+            "dreams_due": snapshot.dreams_due,
+            "measured_at": snapshot.measured_at,
+            "measurement_age_seconds": snapshot.age_seconds or 0.0,
+        }
 
     return {
         "outstanding_work_seconds": snapshot.signal_seconds,

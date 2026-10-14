@@ -8,6 +8,8 @@ from .deriver import (
     get_deriver_metrics,
     get_deriver_status,
     get_queue_status,
+    metrics_for_workspaces,
+    zero_deriver_metrics,
 )
 from .document import (
     CreateDocumentsResult,
@@ -112,6 +114,8 @@ __all__ = [
     # Deriver
     "cleanup_stale_work_units",
     "get_deriver_metrics",
+    "metrics_for_workspaces",
+    "zero_deriver_metrics",
     "get_deriver_status",
     "get_queue_status",
     # Document

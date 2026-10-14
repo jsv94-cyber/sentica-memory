@@ -143,11 +143,98 @@ jobs:
       - name: Run the two-instance proof
         run: uv run pytest tests/sentica/test_m1_stack.py -n0 --tb=short
 
+  test-m2-rls:
+    runs-on: ubuntu-24.04
+    services:
+      database:
+        image: pgvector/pgvector:pg15
+        env:
+          POSTGRES_DB: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.3.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: "Set up Python"
+        uses: actions/setup-python@v7
+        with:
+          python-version-file: ".python-version"
+
+      - name: Install the project
+        run: uv sync --all-extras --dev
+
+      - name: Build the schema as the ddl role
+        env:
+          SENTICA_MODE: test
+          DB_SCHEMA: memory
+          DB_CONNECTION_URI: postgresql+psycopg://tenant_rls_ddl@localhost:5432/tenant_rls
+        run: |
+          set -eu
+          psql "postgresql://postgres@localhost:5432/postgres" <<'SQL'
+          CREATE ROLE tenant_rls LOGIN NOBYPASSRLS;
+          CREATE ROLE tenant_rls_ddl LOGIN NOBYPASSRLS;
+          CREATE DATABASE tenant_rls OWNER tenant_rls_ddl;
+          SQL
+          psql "postgresql://postgres@localhost:5432/tenant_rls" <<'SQL'
+          CREATE SCHEMA memory AUTHORIZATION tenant_rls_ddl;
+          CREATE EXTENSION IF NOT EXISTS vector SCHEMA memory;
+          CREATE EXTENSION IF NOT EXISTS pg_trgm SCHEMA memory;
+          GRANT USAGE ON SCHEMA memory TO tenant_rls;
+          GRANT tenant_rls_ddl TO postgres;
+          SQL
+          uv run alembic upgrade head
+          psql "postgresql://postgres@localhost:5432/tenant_rls" <<'SQL'
+          GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA memory TO tenant_rls;
+          GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA memory TO tenant_rls;
+          REVOKE INSERT, UPDATE, DELETE ON memory.alembic_version FROM tenant_rls;
+          GRANT SELECT ON memory.alembic_version TO tenant_rls;
+          GRANT EXECUTE ON FUNCTION memory.sentica_pending_counts() TO tenant_rls;
+          SQL
+
+      - name: Run the runtime-role proof
+        env:
+          SENTICA_MODE: production
+          SENTICA_RLS_JOB: "1"
+          DB_SCHEMA: memory
+          AUTH_USE_AUTH: "false"
+          SENTRY_ENABLED: "false"
+          VECTOR_STORE_TYPE: pgvector
+          SENTICA_TENANT_ID: tenant-rls
+          SENTICA_DB_PROXY_HOST: localhost
+          SENTICA_DB_PROXY_PORT: "5432"
+          SENTICA_DB_USER: tenant_rls
+          SENTICA_DB_NAME: tenant_rls
+          SENTICA_CLIENT_CERT_PATH: /tmp/rls-certs/client.crt
+          SENTICA_CLIENT_KEY_PATH: /tmp/rls-certs/client.key
+          SENTICA_PROXY_CA_PATH: /tmp/rls-certs/ca.crt
+          SENTICA_TOKEN_PUBLIC_KEY_PATH: /tmp/rls-certs/token.pub
+          SENTICA_TOKEN_ISSUER: sentica-rls-issuer
+          SENTICA_BIND_HOST: 127.0.0.1
+        run: |
+          set -eu
+          mkdir -p /tmp/rls-certs
+          uv run python -c 'from cryptography.hazmat.primitives import serialization; from cryptography.hazmat.primitives.asymmetric import ed25519; from pathlib import Path; key = ed25519.Ed25519PrivateKey.generate(); Path("/tmp/rls-certs/token.pub").write_bytes(key.public_key().public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)); Path("/tmp/rls-certs/client.crt").write_text("placeholder\n"); Path("/tmp/rls-certs/client.key").write_text("placeholder\n"); Path("/tmp/rls-certs/ca.crt").write_text("placeholder\n")'
+          uv run pytest tests/sentica/test_m2_rls.py -n0 --tb=short
+
   # Status check for branch protection rules
   # This job always runs and reports success only if all required jobs pass
   test-status:
     runs-on: ubuntu-24.04
-    needs: [test-python, test-m1-stack]
+    needs: [test-python, test-m1-stack, test-m2-rls]
     if: always()
     steps:
       - name: Check test results

@@ -118,8 +118,23 @@ class DeriverMetricsPoller:
     async def refresh(self) -> None:
         """One pass. The snapshot only advances on a complete pass."""
         dreams_refreshed = False
+        from src.sentica.workspace_scope import fetch_pending_counts
+
         async with tracked_db("deriver_metrics", read_only=True) as db:
-            stats = await crud.get_deriver_metrics(db)
+            counts = await fetch_pending_counts(db)
+            if counts is None:
+                stats = await crud.get_deriver_metrics(db)
+            else:
+                names = [
+                    name
+                    for name, pending, embeddings in counts
+                    if pending or embeddings
+                ]
+                stats = (
+                    await crud.metrics_for_workspaces(names)
+                    if names
+                    else crud.zero_deriver_metrics()
+                )
             if self._dream_poll_due():
                 self._due_dreams = await list_due_dreams(db)
                 self._next_dream_poll = (

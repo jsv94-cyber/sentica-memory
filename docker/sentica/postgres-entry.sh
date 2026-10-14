@@ -5,11 +5,16 @@ set -euo pipefail
 
 install -d -o postgres -g postgres -m 700 /var/lib/postgresql/certs
 install -d -o postgres -g postgres -m 700 /var/lib/postgresql/secrets
-if [ -s /secrets/tenant-a ] && [ -s /secrets/tenant-b ]; then
+if [ -s /secrets/tenant-a ] && [ -s /secrets/tenant-b ] \
+    && [ -s /secrets/tenant-a-ddl ] && [ -s /secrets/tenant-b-ddl ]; then
     install -o postgres -g postgres -m 600 \
         /secrets/tenant-a /var/lib/postgresql/secrets/tenant-a
     install -o postgres -g postgres -m 600 \
         /secrets/tenant-b /var/lib/postgresql/secrets/tenant-b
+    install -o postgres -g postgres -m 600 \
+        /secrets/tenant-a-ddl /var/lib/postgresql/secrets/tenant-a-ddl
+    install -o postgres -g postgres -m 600 \
+        /secrets/tenant-b-ddl /var/lib/postgresql/secrets/tenant-b-ddl
 fi
 if [ ! -s /var/lib/postgresql/certs/server.key ]; then
     openssl req -new -x509 -days 1 -nodes \

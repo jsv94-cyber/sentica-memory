@@ -36,10 +36,9 @@ async def get_read_db():
     """FastAPI Dependency Generator for SELECT-only handlers.
 
     Same lazy-checkout semantics as get_db, but the session is bound to the
-    AUTOCOMMIT read engine: no BEGIN is ever emitted, so the connection can not
-    sit 'idle in transaction' between the query and this teardown — a delayed
-    finally here is harmless (the backend is plain 'idle'). close() is still
-    required to release the connection itself back to the pool.
+    read engine: the first statement opens BEGIN READ ONLY and the workspace
+    setting is local to that transaction. rollback() in the teardown ends it,
+    so the next checkout does not inherit the workspace.
 
     MUST only be used by handlers that never mutate; see ReadSessionLocal.
     """
@@ -47,8 +46,7 @@ async def get_read_db():
     try:
         yield db
     finally:
-        # rollback is a wire-level no-op under AUTOCOMMIT; kept to reset any
-        # Python-side session state before close, mirroring get_db.
+        # Ends the read-only transaction so the workspace setting dies with it.
         await db.rollback()
         await db.close()
 
@@ -61,10 +59,8 @@ async def tracked_db(operation_name: str | None = None, *, read_only: bool = Fal
     tracing/attribution, then yields a lazy session (see get_db).
 
     Pass read_only=True for SELECT-only windows: the session is then bound to
-    the AUTOCOMMIT read engine, so the work inside the block never holds an
-    open transaction (no idle-in-transaction parking; the pooler can reclaim
-    the backend between statements). Never use read_only=True on a path that
-    mutates — see ReadSessionLocal.
+    the read engine and runs inside BEGIN READ ONLY. Never use read_only=True
+    on a path that mutates. See ReadSessionLocal.
     """
     # Get request ID if available, or create operation-specific one
     context = request_context.get()

@@ -171,39 +171,38 @@ async def search_workspace(
     """
     # take user-provided filter and add workspace_id to it
     filters = body.filters or {}
-    if body.scope is not None:
-        if "session_id" in filters:
-            raise ValidationException(
-                "`scope` and a 'session_id' filter are mutually exclusive"
-            )
-        async with tracked_db(
-            "workspaces.search.resolve_scope", read_only=True
-        ) as scope_db:
-            [scope_peer] = await crud.resolve_scope_peers(
-                scope_db, workspace_id, [body.scope]
-            )
-            scope_sessions = await get_peer_session_names(
-                scope_db, workspace_id, scope_peer
-            )
-        if not scope_sessions:
-            no_results: list[models.Message] = []
-            return no_results
-        filters["session_id"] = {"in": scope_sessions}
-    from src.sentica.runtime import production_enabled
+    if body.scope is not None and "session_id" in filters:
+        raise ValidationException(
+            "`scope` and a 'session_id' filter are mutually exclusive"
+        )
     from src.sentica.workspace_scope import (
         enforce_targets,
+        open_workspace,
         reset_workspace,
-        set_workspace,
+        token_allowed,
     )
 
-    allowed = jwt_params.workspaces if production_enabled() else None
+    allowed = token_allowed(jwt_params)
     targets = enforce_targets(workspace_id, body.workspaces, allowed)
     found: list[models.Message] = []
     for name in targets:
-        token = set_workspace(name)
+        token = await open_workspace(name, jwt_params)
         try:
             scoped = dict(filters)
             scoped["workspace_id"] = name
+            if body.scope is not None:
+                async with tracked_db(
+                    "workspaces.search.resolve_scope", read_only=True
+                ) as scope_db:
+                    [scope_peer] = await crud.resolve_scope_peers(
+                        scope_db, name, [body.scope]
+                    )
+                    scope_sessions = await get_peer_session_names(
+                        scope_db, name, scope_peer
+                    )
+                if not scope_sessions:
+                    continue
+                scoped["session_id"] = {"in": scope_sessions}
             found.extend(await search(body.query, filters=scoped, limit=body.limit))
         finally:
             reset_workspace(token)
@@ -335,20 +334,26 @@ async def chat(
 
     Set `stream: true` to receive the answer as a `text/event-stream` of `{"delta": {"content": ...}, "done": false}` chunks terminated by `{"done": true}`. Requires a workspace- or admin-level key.
     """
-    from src.sentica.runtime import production_enabled
     from src.sentica.workspace_scope import (
         enforce_targets,
+        open_workspace,
         reset_workspace,
-        set_workspace,
+        token_allowed,
     )
 
-    allowed = jwt_params.workspaces if production_enabled() else None
+    allowed = token_allowed(jwt_params)
     targets = enforce_targets(workspace_id, options.workspaces, allowed)
+    if len(targets) > 1 and options.stream:
+        from fastapi import HTTPException
+
+        raise HTTPException(
+            status_code=400, detail="stream requires a single workspace"
+        )
     if options.workspaces and len(targets) > 1:
         child = options.model_copy(update={"workspaces": None, "stream": False})
         answers: list[schemas.DialecticResponse] = []
         for name in targets:
-            token = set_workspace(name)
+            token = await open_workspace(name, jwt_params)
             try:
                 one = await chat(name, child, jwt_params)
             finally:
@@ -406,6 +411,7 @@ async def chat(
                     evidence=evidence,
                 ),
                 evidence,
+                workspace_id,
             ),
             media_type="text/event-stream",
         )

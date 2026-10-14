@@ -802,41 +802,50 @@ async def get_session_context(
     to the summary, and 60% to recent messages -- as many as can fit. Note that the summary will usually take up less space than
     this. If the caller does not want a summary, we allocate all the tokens to recent messages.
     """
-    from src.sentica.runtime import production_enabled
+    from src.dependencies import tracked_db
     from src.sentica.workspace_scope import (
         enforce_targets,
+        open_workspace,
         reset_workspace,
-        set_workspace,
+        token_allowed,
     )
 
-    allowed = jwt_params.workspaces if production_enabled() else None
+    allowed = token_allowed(jwt_params)
     targets = enforce_targets(workspace_id, workspaces, allowed)
     if workspaces and len(targets) > 1:
         merged: list[schemas.SessionContext] = []
         for name in targets:
-            token = set_workspace(name)
-            try:
-                one = await get_session_context(
+            async with tracked_db(
+                "sessions.context.fanout", read_only=True
+            ) as scoped_db:
+                token = await open_workspace(
                     name,
-                    session_id,
                     jwt_params,
-                    db,
-                    tokens,
-                    search_query=search_query,
-                    include_summary=include_summary,
-                    peer_target=peer_target,
-                    peer_perspective=peer_perspective,
-                    scope=scope,
-                    sessions=sessions,
-                    limit_to_session=limit_to_session,
-                    search_top_k=search_top_k,
-                    search_max_distance=search_max_distance,
-                    include_most_frequent=include_most_frequent,
-                    max_conclusions=max_conclusions,
-                    workspaces=None,
+                    session_name=session_id,
+                    allow_member_read=True,
                 )
-            finally:
-                reset_workspace(token)
+                try:
+                    one = await get_session_context(
+                        name,
+                        session_id,
+                        jwt_params,
+                        scoped_db,
+                        tokens,
+                        search_query=search_query,
+                        include_summary=include_summary,
+                        peer_target=peer_target,
+                        peer_perspective=peer_perspective,
+                        scope=scope,
+                        sessions=sessions,
+                        limit_to_session=limit_to_session,
+                        search_top_k=search_top_k,
+                        search_max_distance=search_max_distance,
+                        include_most_frequent=include_most_frequent,
+                        max_conclusions=max_conclusions,
+                        workspaces=None,
+                    )
+                finally:
+                    reset_workspace(token)
             if isinstance(one, schemas.SessionContext):
                 one.workspace_id = name
                 merged.append(one)
@@ -1179,23 +1188,28 @@ async def search_session(
     """
     Search a Session with optional filters. Use `limit` to control the number of results returned.
     """
-    from src.sentica.runtime import production_enabled
     from src.sentica.workspace_scope import (
         enforce_targets,
+        open_workspace,
         reset_workspace,
-        set_workspace,
+        token_allowed,
     )
 
     filters = body.filters or {}
-    filters["session_id"] = session_id
-    allowed = jwt_params.workspaces if production_enabled() else None
+    allowed = token_allowed(jwt_params)
     targets = enforce_targets(workspace_id, body.workspaces, allowed)
     found: list[models.Message] = []
     for name in targets:
-        token = set_workspace(name)
+        token = await open_workspace(
+            name,
+            jwt_params,
+            session_name=session_id,
+            allow_member_read=True,
+        )
         try:
             scoped = dict(filters)
             scoped["workspace_id"] = name
+            scoped["session_id"] = session_id
             found.extend(await search(body.query, filters=scoped, limit=body.limit))
         finally:
             reset_workspace(token)

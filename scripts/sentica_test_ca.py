@@ -139,6 +139,8 @@ def main() -> None:
 
     _client(out, ca_key, ca_name, "tenant_a")
     _client(out, ca_key, ca_name, "tenant_b")
+    _client(out, ca_key, ca_name, "tenant_a_ddl")
+    _client(out, ca_key, ca_name, "tenant_b_ddl")
     _client(out, ca_key, ca_name, "sentica_operator")
     shutil.copyfile(out / "ca.crt", out / "client-ca.crt")
     _server(out, ca_key, ca_name, "pgbouncer-a")

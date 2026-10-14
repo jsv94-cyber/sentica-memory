@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
+import math
 import os
 import tomllib
 from dataclasses import dataclass
@@ -145,7 +146,7 @@ def db_call_timeout_seconds() -> float:
         raise SenticaStartupError(
             "Refusing to start: SENTICA_DB_CALL_TIMEOUT_SECONDS is not a number"
         ) from exc
-    if value <= 0 or value > 600:
+    if not math.isfinite(value) or value <= 0 or value > 600:
         raise SenticaStartupError(
             "Refusing to start: SENTICA_DB_CALL_TIMEOUT_SECONDS must be "
             + "greater than 0 and at most 600"
@@ -263,12 +264,12 @@ def _refuse_unsafe_runtime() -> None:
     traces = os.environ.get("REASONING_TRACES_FILE", "").strip()
     if traces or settings.REASONING_TRACES_FILE:
         raise SenticaStartupError("Refusing to start: REASONING_TRACES_FILE is set")
-    vector_store = (
-        os.environ.get("VECTOR_STORE_TYPE", str(settings.VECTOR_STORE.TYPE))
-        .strip()
-        .lower()
-    )
-    if vector_store in {"lancedb", "qdrant", "chroma", "chromadb"}:
+    configured = os.environ.get("VECTOR_STORE_TYPE")
+    if configured is None or not configured.strip():
+        vector_store = str(settings.VECTOR_STORE.TYPE).strip().lower()
+    else:
+        vector_store = configured.strip().lower()
+    if vector_store != "pgvector":
         raise SenticaStartupError(
             "Refusing to start: an external vector store is not allowed in production"
         )

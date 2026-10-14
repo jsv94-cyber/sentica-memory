@@ -162,6 +162,7 @@ class QueueManager:
 
         # Initialize from settings
         self.workers: int = settings.DERIVER.WORKERS
+        self._fair_index: int = 0
         self.semaphore: asyncio.Semaphore = asyncio.Semaphore(self.workers)
 
         # Get or create the singleton dream scheduler
@@ -336,104 +337,130 @@ class QueueManager:
             settings.DERIVER.REPRESENTATION_BATCH_WORK_UNIT_TARGET_TOKENS
         )
 
+        representation_prefix = REPRESENTATION_WORK_UNIT_PREFIX
+        async with tracked_db("get_available_work_units_plan", read_only=True) as db:
+            from src.sentica.workspace_scope import (
+                fair_workspace_order,
+                fetch_pending_counts,
+            )
+
+            counts = await fetch_pending_counts(db)
+            if counts is None:
+                names = list(await db.scalars(select(models.Workspace.name)))
+            else:
+                names = [name for name, pending, _embeddings in counts if pending > 0]
+        ordered, self._fair_index = fair_workspace_order(names, self._fair_index)
+        claimed: dict[str, str] = {}
+        remaining = limit
+        for name in ordered:
+            if remaining <= 0:
+                break
+            got = await self._claim_workspace(
+                name,
+                remaining,
+                representation_prefix,
+                work_unit_target_tokens,
+            )
+            claimed.update(got)
+            remaining -= len(got)
+        return claimed
+
+    async def _claim_workspace(
+        self,
+        name: str,
+        limit: int,
+        representation_prefix: str,
+        work_unit_target_tokens: int,
+    ) -> dict[str, str]:
+        """Claim up to ``limit`` work units in one workspace and one transaction."""
+        from src.sentica.workspace_scope import reset_workspace, set_workspace
+
         async with tracked_db("get_available_work_units") as db:
-            representation_prefix = REPRESENTATION_WORK_UNIT_PREFIX
-            token_stats_subq = (
-                select(
-                    models.QueueItem.work_unit_key,
-                    func.sum(models.Message.token_count).label("total_tokens"),
-                    func.min(models.QueueItem.created_at).label("oldest_created_at"),
-                )
-                .join(
-                    models.Message,
-                    models.QueueItem.message_id == models.Message.id,
-                )
-                .where(~models.QueueItem.processed)
-                .where(models.QueueItem.work_unit_key.startswith(representation_prefix))
-                .group_by(models.QueueItem.work_unit_key)
-                .subquery()
-            )
-
-            work_units_subq = (
-                select(
-                    models.QueueItem.work_unit_key,
-                    func.min(models.QueueItem.created_at).label("oldest_created_at"),
-                )
-                .where(~models.QueueItem.processed)
-                .group_by(models.QueueItem.work_unit_key)
-                .subquery()
-            )
-
-            query = (
-                select(
-                    work_units_subq.c.work_unit_key,
-                    token_stats_subq.c.total_tokens,
-                    token_stats_subq.c.oldest_created_at,
-                )
-                .outerjoin(
-                    token_stats_subq,
-                    work_units_subq.c.work_unit_key == token_stats_subq.c.work_unit_key,
-                )
-                .where(unclaimed_work_unit_clause(work_units_subq.c.work_unit_key))
-                .order_by(
-                    work_units_subq.c.oldest_created_at.asc(),
-                    work_units_subq.c.work_unit_key.asc(),
-                )
-                .limit(limit)
-            )
-
-            # Apply batch threshold filter (skip if FLUSH_ENABLED is True)
-            threshold_clause = representation_batch_threshold_clause(
-                work_unit_key=work_units_subq.c.work_unit_key,
-                total_tokens=token_stats_subq.c.total_tokens,
-                oldest_created_at=token_stats_subq.c.oldest_created_at,
-            )
-            if threshold_clause is not None:
-                query = query.where(threshold_clause)
-
-            from src.sentica.workspace_scope import reset_workspace, set_workspace
-
-            names = list(await db.scalars(select(models.Workspace.name)))
-            scopes: list[str | None] = [*names, None] if names else [None]
-            available_rows: list[tuple[str, Any, Any]] = []
-            seen: set[str] = set()
-            for name in scopes:
-                token = set_workspace(name) if name is not None else None
-                try:
-                    result = await db.execute(query)
-                    for row in result.all():
-                        work_unit_key = cast("str", row[0])
-                        if work_unit_key in seen:
-                            continue
-                        seen.add(work_unit_key)
-                        available_rows.append((work_unit_key, row[1], row[2]))
-                finally:
-                    if token is not None:
-                        reset_workspace(token)
-            available_units: list[str] = []
-            for work_unit_key, total_tokens, oldest_created_at in available_rows:
-                available_units.append(work_unit_key)
-                if (
-                    not settings.DERIVER.FLUSH_ENABLED
-                    and settings.DERIVER.REPRESENTATION_BATCH_MAX_AGE_SECONDS > 0
-                    and work_unit_key.startswith(representation_prefix)
-                    and int(total_tokens or 0) < work_unit_target_tokens
-                ):
-                    logger.info(
-                        "age-flushing work unit %s (tokens=%s < %s, oldest=%s)",
-                        work_unit_key,
-                        total_tokens or 0,
-                        work_unit_target_tokens,
-                        oldest_created_at,
+            token = set_workspace(name)
+            try:
+                token_stats_subq = (
+                    select(
+                        models.QueueItem.work_unit_key,
+                        func.sum(models.Message.token_count).label("total_tokens"),
+                        func.min(models.QueueItem.created_at).label(
+                            "oldest_created_at"
+                        ),
                     )
-            if not available_units:
+                    .join(
+                        models.Message,
+                        models.QueueItem.message_id == models.Message.id,
+                    )
+                    .where(~models.QueueItem.processed)
+                    .where(
+                        models.QueueItem.work_unit_key.startswith(representation_prefix)
+                    )
+                    .group_by(models.QueueItem.work_unit_key)
+                    .subquery()
+                )
+                work_units_subq = (
+                    select(
+                        models.QueueItem.work_unit_key,
+                        func.min(models.QueueItem.created_at).label(
+                            "oldest_created_at"
+                        ),
+                    )
+                    .where(~models.QueueItem.processed)
+                    .group_by(models.QueueItem.work_unit_key)
+                    .subquery()
+                )
+                query = (
+                    select(
+                        work_units_subq.c.work_unit_key,
+                        token_stats_subq.c.total_tokens,
+                        token_stats_subq.c.oldest_created_at,
+                    )
+                    .outerjoin(
+                        token_stats_subq,
+                        work_units_subq.c.work_unit_key
+                        == token_stats_subq.c.work_unit_key,
+                    )
+                    .where(unclaimed_work_unit_clause(work_units_subq.c.work_unit_key))
+                    .order_by(
+                        work_units_subq.c.oldest_created_at.asc(),
+                        work_units_subq.c.work_unit_key.asc(),
+                    )
+                    .limit(limit)
+                )
+                threshold_clause = representation_batch_threshold_clause(
+                    work_unit_key=work_units_subq.c.work_unit_key,
+                    total_tokens=token_stats_subq.c.total_tokens,
+                    oldest_created_at=token_stats_subq.c.oldest_created_at,
+                )
+                if threshold_clause is not None:
+                    query = query.where(threshold_clause)
+                result = await db.execute(query)
+                available_units: list[str] = []
+                for row in result.all():
+                    work_unit_key = cast("str", row[0])
+                    total_tokens = row[1]
+                    oldest_created_at = row[2]
+                    available_units.append(work_unit_key)
+                    if (
+                        not settings.DERIVER.FLUSH_ENABLED
+                        and settings.DERIVER.REPRESENTATION_BATCH_MAX_AGE_SECONDS > 0
+                        and work_unit_key.startswith(representation_prefix)
+                        and int(total_tokens or 0) < work_unit_target_tokens
+                    ):
+                        logger.info(
+                            "age-flushing work unit %s (tokens=%s < %s, oldest=%s)",
+                            work_unit_key,
+                            total_tokens or 0,
+                            work_unit_target_tokens,
+                            oldest_created_at,
+                        )
+                if not available_units:
+                    await db.commit()
+                    return {}
+                claimed_mapping = await self.claim_work_units(db, available_units)
                 await db.commit()
-                return {}
-
-            claimed_mapping = await self.claim_work_units(db, available_units)
-            await db.commit()
-
-            return claimed_mapping
+                return claimed_mapping
+            finally:
+                reset_workspace(token)
 
     async def claim_work_units(
         self, db: AsyncSession, work_unit_keys: Sequence[str]
