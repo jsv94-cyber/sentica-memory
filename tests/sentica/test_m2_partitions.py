@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import uuid
-from typing import Any
+from typing import Any, cast
 
 import psycopg
 import pytest
@@ -747,9 +747,10 @@ async def test_canary_written_only_to_r_stays_out_of_other_workspaces(
     )
     assert multi.status_code == 200, multi.text
     responses.append(multi.text)
-    multi_body = multi.json()
+    multi_body: Any = multi.json()
     assert isinstance(multi_body, list)
-    missing = [item for item in multi_body if item.get("workspace_id") == mid]
+    rows = cast("list[dict[str, Any]]", multi_body)
+    missing = [item for item in rows if item.get("workspace_id") == mid]
     assert missing and missing[0]["content"] == ""
     refused_stream = client.post(
         f"/v3/workspaces/{left}/peers/p1/chat",
