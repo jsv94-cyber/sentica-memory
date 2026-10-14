@@ -52,7 +52,7 @@ from src.telemetry import prometheus_metrics
 from src.telemetry.sentry import initialize_sentry
 from src.utils.queue_payload import RETRY_ATTEMPTS_PAYLOAD_KEY
 from src.utils.retryable_errors import is_retryable_error
-from src.utils.work_unit import parse_work_unit_key
+from src.utils.work_unit import ParsedWorkUnit, parse_work_unit_key
 from src.webhooks.events import (
     QueueEmptyEvent,
     publish_webhook_event,
@@ -391,8 +391,25 @@ class QueueManager:
             if threshold_clause is not None:
                 query = query.where(threshold_clause)
 
-            result = await db.execute(query)
-            available_rows = result.all()
+            from src.sentica.workspace_scope import reset_workspace, set_workspace
+
+            names = list(await db.scalars(select(models.Workspace.name)))
+            scopes: list[str | None] = [*names, None] if names else [None]
+            available_rows: list[tuple[str, Any, Any]] = []
+            seen: set[str] = set()
+            for name in scopes:
+                token = set_workspace(name) if name is not None else None
+                try:
+                    result = await db.execute(query)
+                    for row in result.all():
+                        work_unit_key = cast("str", row[0])
+                        if work_unit_key in seen:
+                            continue
+                        seen.add(work_unit_key)
+                        available_rows.append((work_unit_key, row[1], row[2]))
+                finally:
+                    if token is not None:
+                        reset_workspace(token)
             available_units: list[str] = []
             for work_unit_key, total_tokens, oldest_created_at in available_rows:
                 available_units.append(work_unit_key)
@@ -647,6 +664,17 @@ class QueueManager:
         """Process all queue items for a specific work unit by routing to the correct handler."""
         logger.debug(f"Starting to process work unit {work_unit_key}")
         work_unit = parse_work_unit_key(work_unit_key)
+        from src.sentica.workspace_scope import reset_workspace, set_workspace
+
+        workspace_token = set_workspace(work_unit.workspace_name)
+        try:
+            await self._process_work_unit(work_unit_key, worker_id, work_unit)
+        finally:
+            reset_workspace(workspace_token)
+
+    async def _process_work_unit(
+        self, work_unit_key: str, worker_id: str, work_unit: ParsedWorkUnit
+    ) -> None:
         async with self.semaphore:
             queue_item_count = 0
             try:

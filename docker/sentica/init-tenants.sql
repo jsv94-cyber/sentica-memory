@@ -3,6 +3,9 @@
 
 CREATE ROLE tenant_a LOGIN;
 CREATE ROLE tenant_b LOGIN;
+CREATE ROLE sentica_ddl NOLOGIN NOBYPASSRLS;
+GRANT sentica_ddl TO tenant_a;
+GRANT sentica_ddl TO tenant_b;
 
 CREATE DATABASE tenant_a OWNER postgres;
 CREATE DATABASE tenant_b OWNER postgres;

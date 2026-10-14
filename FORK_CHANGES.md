@@ -38,3 +38,13 @@ release v3.3.0 (`608aec8a928da13c540262ed980c569448fb53ab`).
 | `tests/sentica/test_m1_startup.py` | Startup refuses missing config, a public bind, and a database password. | M1 |
 | `tests/sentica/test_m1_tokens.py` | Tokens: expiry, issuer, tenant, admin claim, lifetime. | M1 |
 | `tests/sentica/test_m1_stack.py` | Two-instance compose proof. Collected by the default suite. | M1 |
+| `src/sentica/workspace_scope.py` | Bind each database transaction to one workspace. A workspace outside the token set is refused. | M2 |
+| `migrations/versions/a9c1e3f5b7d2_workspace_row_level_security.py` | Enable and force row-level security on every table that has `workspace_name`. The app role does not own those tables and cannot bypass the policy. | M2 |
+| `src/routers/peers.py`, `src/routers/sessions.py`, `src/routers/workspaces.py` | Search, context, chat, representation, and card reads run one workspace at a time and tag each returned item. | M2 |
+| `src/deriver/queue_manager.py` | Claim and run each deriver, summary, and dream task under that task's workspace. | M2 |
+| `src/reconciler/scheduler.py` | Enqueue reconciler work once per workspace so the row is visible under row-level security. | M2 |
+| `src/sentica/runtime.py` | Production refuses LanceDB, Qdrant, and Chroma. pgvector is the production vector store. | M2 |
+| `tests/sentica/test_m2_partitions.py` | Row-level security proof, canary leak test, cache key test, and the next-request token test. | M2 |
+| `docs/CONFIG.md` | `SENTICA_MIGRATION_TIMEOUT_SECONDS` and the rule that it must be greater than the lock wait. | M1 carry-over |
+| `.review/M2-summary.md` | Review notes for M2, including the M9 deferrals. | M2 |
+

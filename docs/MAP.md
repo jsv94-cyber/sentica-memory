@@ -6,21 +6,21 @@ Public API routes are mounted under `/v3` at `src/main.py:218`.
 
 ## Database engine and sessions
 
-`src/db.py:74` builds one async SQLAlchemy engine from
+`src/db.py:75` builds one async SQLAlchemy engine from
 `settings.DB.CONNECTION_URI` (default in `src/config.py`, class `DBSettings`).
 The driver is psycopg. Pool size, overflow, recycle, and pre-ping come from
 `DBSettings`. `POOL_CLASS=null` selects `NullPool`.
 
 Two session factories share that engine:
 
-- `src/db.py:346` `SessionLocal` is the write session. It is lazy: the pool
+- `src/db.py:347` `SessionLocal` is the write session. It is lazy: the pool
   connection is checked out on the first statement, not at construction.
-- `src/db.py:358` sets a read engine with isolation level `AUTOCOMMIT`.
-  `src/db.py:364` `ReadSessionLocal` is for SELECT-only work. Writes through it
+- `src/db.py:359` sets a read engine with isolation level `AUTOCOMMIT`.
+  `src/db.py:367` `ReadSessionLocal` is for SELECT-only work. Writes through it
   commit immediately. Callers must not use it to mutate.
 
-`src/db.py:592` reads `settings.DB.SCHEMA` (default `public`) and
-`src/db.py:597` binds it to the declarative `Base`. Every ORM table lives in
+`src/db.py:595` reads `settings.DB.SCHEMA` (default `public`) and
+`src/db.py:600` binds it to the declarative `Base`. Every ORM table lives in
 that schema.
 
 Request and worker code opens sessions in `src/dependencies.py`:
@@ -40,7 +40,7 @@ extension before migrations run.
 
 Auth is off unless `AUTH_USE_AUTH` is set. `src/config.py:753` `AuthSettings`
 defaults `USE_AUTH` to false at `src/config.py:756`. When auth is off and `SENTICA_MODE=test`,
-`src/security.py:215` treats every caller as an admin JWT and does not read a
+`src/security.py:220` treats every caller as an admin JWT and does not read a
 token. `SENTICA_MODE=production` is checked first and does not take that path.
 Unset, empty, and any other mode refuse to start.
 
@@ -56,14 +56,14 @@ When auth is on, tokens are HS256 JWTs signed with `AUTH_JWT_SECRET`.
 | `p` | Peer name. |
 | `s` | Session name. |
 
-`src/security.py:73` `create_jwt` encodes the claims.
-`src/security.py:66` `create_admin_jwt` sets `ad=True` and an empty timestamp.
-`src/security.py:105` `verify_jwt` decodes HS256, rejects expired and malformed
+`src/security.py:74` `create_jwt` encodes the claims.
+`src/security.py:67` `create_admin_jwt` sets `ad=True` and an empty timestamp.
+`src/security.py:106` `verify_jwt` decodes HS256, rejects expired and malformed
 tokens, and rejects a peer or session claim that has no workspace
-(`scope_requires_workspace` at `src/security.py:83`).
+(`scope_requires_workspace` at `src/security.py:84`).
 
-`src/security.py:143` `require_auth` is the route dependency.
-`src/security.py:197` `auth` compares the token's narrowest claim to the route.
+`src/security.py:144` `require_auth` is the route dependency.
+`src/security.py:198` `auth` compares the token's narrowest claim to the route.
 An admin token returns immediately. A peer-scoped token cannot act on a
 sibling peer. `allow_member_read=True` is an extra grant for read-only session
 routes when the token's peer is a member of the session.
@@ -196,8 +196,8 @@ copy of the queue. The message text in that column is in the database, which
 is the store.
 
 The worker process is `python -m src.deriver` (`src/deriver/__main__.py:22`
-calls `src/deriver/queue_manager.py:1251` `main`). `src/deriver/queue_manager.py:140`
-`QueueManager.polling_loop` (`src/deriver/queue_manager.py:502`) claims work
+calls `src/deriver/queue_manager.py:1342` `main`). `src/deriver/queue_manager.py:140`
+`QueueManager.polling_loop` (`src/deriver/queue_manager.py:519`) claims work
 units (`src/deriver/queue_manager.py:322`) and processes them in order.
 `src/deriver/consumer.py:47` `process_item` dispatches on `task_type`.
 Representation batches go to `src/deriver/deriver.py:44`

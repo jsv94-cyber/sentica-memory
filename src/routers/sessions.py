@@ -8,7 +8,7 @@ from fastapi import APIRouter, Body, Depends, Path, Query, Response
 from fastapi_pagination.bases import AbstractParams
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src import config, crud, schemas
+from src import config, crud, models, schemas
 from src.cache.client import safe_cache_delete
 from src.crud.message import get_peer_session_names
 from src.crud.session import session_cache_key
@@ -708,7 +708,7 @@ async def get_session_peers(
 
 @router.get(
     "/{session_id}/context",
-    response_model=schemas.SessionContext,
+    response_model=schemas.SessionContext | list[schemas.SessionContext],
 )
 async def get_session_context(
     workspace_id: str = Path(...),
@@ -792,6 +792,9 @@ async def get_session_context(
         le=100,
         description="Only used if `search_query` is provided. The maximum number of conclusions to include in the representation",
     ),
+    workspaces: list[str] | None = Query(
+        None, description="Workspaces to read. Each one is queried on its own."
+    ),
 ):
     """
     Produce a context object from the Session. The caller provides an optional token limit which the entire context must fit into.
@@ -799,6 +802,46 @@ async def get_session_context(
     to the summary, and 60% to recent messages -- as many as can fit. Note that the summary will usually take up less space than
     this. If the caller does not want a summary, we allocate all the tokens to recent messages.
     """
+    from src.sentica.runtime import production_enabled
+    from src.sentica.workspace_scope import (
+        enforce_targets,
+        reset_workspace,
+        set_workspace,
+    )
+
+    allowed = jwt_params.workspaces if production_enabled() else None
+    targets = enforce_targets(workspace_id, workspaces, allowed)
+    if workspaces and len(targets) > 1:
+        merged: list[schemas.SessionContext] = []
+        for name in targets:
+            token = set_workspace(name)
+            try:
+                one = await get_session_context(
+                    name,
+                    session_id,
+                    jwt_params,
+                    db,
+                    tokens,
+                    search_query=search_query,
+                    include_summary=include_summary,
+                    peer_target=peer_target,
+                    peer_perspective=peer_perspective,
+                    scope=scope,
+                    sessions=sessions,
+                    limit_to_session=limit_to_session,
+                    search_top_k=search_top_k,
+                    search_max_distance=search_max_distance,
+                    include_most_frequent=include_most_frequent,
+                    max_conclusions=max_conclusions,
+                    workspaces=None,
+                )
+            finally:
+                reset_workspace(token)
+            if isinstance(one, schemas.SessionContext):
+                one.workspace_id = name
+                merged.append(one)
+        return merged
+
     token_limit = (
         tokens if tokens is not None else config.settings.GET_CONTEXT_MAX_TOKENS
     )
@@ -903,6 +946,7 @@ async def get_session_context(
             name=session_id,
             messages=messages,
             summary=summary,
+            workspace_id=workspace_id,
         )
         emit(
             GetContextEvent(
@@ -1039,6 +1083,7 @@ async def get_session_context(
         summary=summary,
         peer_representation=representation.format_as_markdown(),
         peer_card=card,
+        workspace_id=workspace_id,
     )
     emit(
         GetContextEvent(
@@ -1116,15 +1161,6 @@ async def get_session_summaries(
 @router.post(
     "/{session_id}/search",
     response_model=list[schemas.Message],
-    dependencies=[
-        Depends(
-            require_auth(
-                workspace_name="workspace_id",
-                session_name="session_id",
-                allow_member_read=True,
-            )
-        )
-    ],
 )
 async def search_session(
     workspace_id: str = Path(...),
@@ -1132,16 +1168,37 @@ async def search_session(
     body: schemas.MessageSearchOptions = Body(
         ..., description="Message search parameters"
     ),
+    jwt_params: JWTParams = Depends(
+        require_auth(
+            workspace_name="workspace_id",
+            session_name="session_id",
+            allow_member_read=True,
+        )
+    ),
 ):
     """
     Search a Session with optional filters. Use `limit` to control the number of results returned.
     """
-    # take user-provided filter and add workspace_id and session_id to it
-    filters = body.filters or {}
-    filters["workspace_id"] = workspace_id
-    filters["session_id"] = session_id
-    return await search(
-        body.query,
-        filters=filters,
-        limit=body.limit,
+    from src.sentica.runtime import production_enabled
+    from src.sentica.workspace_scope import (
+        enforce_targets,
+        reset_workspace,
+        set_workspace,
     )
+
+    filters = body.filters or {}
+    filters["session_id"] = session_id
+    allowed = jwt_params.workspaces if production_enabled() else None
+    targets = enforce_targets(workspace_id, body.workspaces, allowed)
+    found: list[models.Message] = []
+    for name in targets:
+        token = set_workspace(name)
+        try:
+            scoped = dict(filters)
+            scoped["workspace_id"] = name
+            found.extend(
+                await search(body.query, filters=scoped, limit=body.limit)
+            )
+        finally:
+            reset_workspace(token)
+    return found

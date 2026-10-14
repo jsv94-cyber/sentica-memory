@@ -141,6 +141,25 @@ def _assert_sqlstate(cert_dir: Path, sql: str, sqlstate: str) -> None:
     assert exc.value.sqlstate == sqlstate
 
 
+def _bind_workspace(cur: Any, workspace: str) -> None:
+    """Let a raw tenant connection see one workspace under row-level security."""
+    cur.execute(
+        "SELECT set_config('sentica.workspace', %s, false)",
+        (workspace,),
+    )
+
+
+def _ensure_workspace(cur: Any, workspace: str) -> None:
+    cur.execute(
+        """
+        INSERT INTO memory.workspaces (id, name)
+        VALUES (%s, %s)
+        ON CONFLICT (name) DO NOTHING
+        """,
+        (uuid.uuid4().hex[:21], workspace),
+    )
+
+
 def _connect(
     port: int, cert_dir: Path, user: str, dbname: str, cert_name: str
 ) -> psycopg.Connection[tuple[object, ...]]:
@@ -669,6 +688,7 @@ def test_revocation_rolls_back_and_reports_unavailable(stack: Path) -> None:
                 _connect(PROXY_A, stack, "tenant_a", "tenant_a", "tenant_a") as conn,
                 conn.cursor() as cur,
             ):
+                _bind_workspace(cur, workspace)
                 cur.execute(
                     "SELECT count(*) FROM memory.messages WHERE content = %s",
                     (canary,),
@@ -687,10 +707,14 @@ def test_deriver_refuses_other_tenant(stack: Path) -> None:
     canary = f"canary-{uuid.uuid4().hex}"
     with _connect(PROXY_A, stack, "tenant_a", "tenant_a", "tenant_a") as conn:
         with conn.cursor() as cur:
+            _ensure_workspace(cur, "m1ws")
+            _bind_workspace(cur, "m1ws")
             cur.execute(
                 """
-                INSERT INTO memory.queue (work_unit_key, task_type, payload, processed)
-                VALUES (%s, 'deletion', %s::jsonb, false)
+                INSERT INTO memory.queue (
+                    work_unit_key, task_type, payload, processed, workspace_name
+                )
+                VALUES (%s, 'deletion', %s::jsonb, false, %s)
                 """,
                 (
                     "deletion:m1ws:message:m1msg",
@@ -702,6 +726,7 @@ def test_deriver_refuses_other_tenant(stack: Path) -> None:
                             "marker": canary,
                         }
                     ),
+                    "m1ws",
                 ),
             )
         conn.commit()
@@ -713,6 +738,7 @@ def test_deriver_refuses_other_tenant(stack: Path) -> None:
             _connect(PROXY_A, stack, "tenant_a", "tenant_a", "tenant_a") as conn,
             conn.cursor() as cur,
         ):
+            _bind_workspace(cur, "m1ws")
             cur.execute(
                 "SELECT error FROM memory.queue WHERE work_unit_key = %s",
                 ("deletion:m1ws:message:m1msg",),
@@ -962,6 +988,7 @@ def test_reconciler_and_webhook_complete(stack: Path) -> None:
             _connect(PROXY_A, stack, "tenant_a", "tenant_a", "tenant_a") as conn,
             conn.cursor() as cur,
         ):
+            _bind_workspace(cur, "m1-workspace")
             cur.execute(
                 "SELECT task_type, processed, error, payload->>'tenant_id' "
                 "FROM memory.queue WHERE task_type IN ('reconciler', 'webhook') "
@@ -987,7 +1014,9 @@ def test_reconciler_and_webhook_complete(stack: Path) -> None:
 def test_representation_rows_for_other_tenant_are_all_errored(stack: Path) -> None:
     from src.deriver.queue_manager import QueueManager
 
-    source = inspect.getsource(QueueManager.process_work_unit)
+    source = inspect.getsource(
+        QueueManager._process_work_unit  # pyright: ignore[reportPrivateUsage]
+    )
     assert source.index("await self.reject_foreign_queue_rows") < source.index(
         "await self.get_queue_item_batch"
     )
@@ -995,16 +1024,20 @@ def test_representation_rows_for_other_tenant_are_all_errored(stack: Path) -> No
     work_unit = "representation:m1-workspace:m1-session:m1-peer"
     with _connect(PROXY_A, stack, "tenant_a", "tenant_a", "tenant_a") as conn:
         with conn.cursor() as cur:
+            _ensure_workspace(cur, "m1-workspace")
+            _bind_workspace(cur, "m1-workspace")
             for _ in range(2):
                 cur.execute(
                     """
-                    INSERT INTO memory.queue
-                        (work_unit_key, task_type, payload, processed)
-                    VALUES (%s, 'representation', %s::jsonb, false)
+                    INSERT INTO memory.queue (
+                        work_unit_key, task_type, payload, processed, workspace_name
+                    )
+                    VALUES (%s, 'representation', %s::jsonb, false, %s)
                     """,
                     (
                         work_unit,
                         json.dumps({"tenant_id": "tenant-b", "content": canary}),
+                        "m1-workspace",
                     ),
                 )
         conn.commit()
@@ -1015,6 +1048,7 @@ def test_representation_rows_for_other_tenant_are_all_errored(stack: Path) -> No
             _connect(PROXY_A, stack, "tenant_a", "tenant_a", "tenant_a") as conn,
             conn.cursor() as cur,
         ):
+            _bind_workspace(cur, "m1-workspace")
             cur.execute(
                 "SELECT processed, error FROM memory.queue WHERE work_unit_key = %s",
                 (work_unit,),
@@ -1031,52 +1065,68 @@ def test_representation_rows_for_other_tenant_are_all_errored(stack: Path) -> No
 
 
 def test_deriver_resumes_a_pending_row_once(stack: Path) -> None:
-    work_unit = "reconciler:cleanup_queue"
+    workspace = "m1-resume"
+    work_unit = "reconciler:cleanup_queue:m1-resume"
     _compose(["stop", "deriver-a"])
-    with _connect(PROXY_A, stack, "tenant_a", "tenant_a", "tenant_a") as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO memory.queue
-                    (work_unit_key, task_type, payload, processed)
-                VALUES (%s, 'reconciler', %s::jsonb, false)
-                """,
-                (
-                    work_unit,
-                    json.dumps(
-                        {"tenant_id": "tenant-a", "reconciler_type": "cleanup_queue"}
-                    ),
-                ),
-            )
-        conn.commit()
-    _compose(["stop", "pgbouncer-a"])
-    _compose(["start", "deriver-a"])
-    time.sleep(2)
-    _compose(["start", "pgbouncer-a"])
-    deadline = time.monotonic() + 40
     count = 0
     error = "pending"
-    while time.monotonic() < deadline:
-        try:
-            with (
-                _connect(PROXY_A, stack, "tenant_a", "tenant_a", "tenant_a") as conn,
-                conn.cursor() as cur,
-            ):
+    try:
+        with _connect(PROXY_A, stack, "tenant_a", "tenant_a", "tenant_a") as conn:
+            with conn.cursor() as cur:
+                _ensure_workspace(cur, workspace)
+                _bind_workspace(cur, workspace)
                 cur.execute(
-                    "SELECT count(*), max(error) FROM memory.queue "
-                    "WHERE work_unit_key = %s AND processed",
-                    (work_unit,),
+                    """
+                    INSERT INTO memory.queue (
+                        work_unit_key, task_type, payload, processed,
+                        workspace_name
+                    )
+                    VALUES (%s, 'reconciler', %s::jsonb, false, %s)
+                    """,
+                    (
+                        work_unit,
+                        json.dumps(
+                            {
+                                "tenant_id": "tenant-a",
+                                "reconciler_type": "cleanup_queue",
+                            }
+                        ),
+                        workspace,
+                    ),
                 )
-                row = cur.fetchone()
-                assert row is not None
-                count = int(str(row[0]))
-                error = "" if row[1] is None else str(row[1])
-                if count == 1 and not error:
-                    break
-        except psycopg.Error:
+            conn.commit()
+        _compose(["stop", "pgbouncer-a"])
+        _compose(["start", "deriver-a"])
+        time.sleep(2)
+        _compose(["start", "pgbouncer-a"])
+        deadline = time.monotonic() + 40
+        while time.monotonic() < deadline:
+            try:
+                with (
+                    _connect(
+                        PROXY_A, stack, "tenant_a", "tenant_a", "tenant_a"
+                    ) as conn,
+                    conn.cursor() as cur,
+                ):
+                    _bind_workspace(cur, workspace)
+                    cur.execute(
+                        "SELECT count(*), max(error) FROM memory.queue "
+                        "WHERE work_unit_key = %s AND processed",
+                        (work_unit,),
+                    )
+                    row = cur.fetchone()
+                    assert row is not None
+                    count = int(str(row[0]))
+                    error = "" if row[1] is None else str(row[1])
+                    if count == 1 and not error:
+                        break
+            except psycopg.Error:
+                time.sleep(0.5)
+                continue
             time.sleep(0.5)
-            continue
-        time.sleep(0.5)
+    finally:
+        _compose(["start", "pgbouncer-a"], check=False)
+        _compose(["start", "deriver-a"], check=False)
     assert count == 1
     assert not error
 
@@ -1414,15 +1464,16 @@ def test_api_and_deriver_have_no_tenant_password(stack: Path) -> None:
                 continue
             passwords.append(line.split('"')[3])
     assert len(passwords) == 2
+    # Search inside the container and print only hits. Copying every file
+    # back to the test process exhausts memory.
     script = (
         "import pathlib\n"
-        "env = pathlib.Path('/proc/1/environ').read_bytes().decode("
-        "'utf-8', 'replace')\n"
-        "print('ENV_BEGIN')\n"
-        "print(env.replace('\\x00', '\\n'))\n"
-        "print('ENV_END')\n"
+        f"passwords = {passwords!r}\n"
+        "env = pathlib.Path('/proc/1/environ').read_bytes()\n"
+        "for password in passwords:\n"
+        "    if password.encode() in env:\n"
+        "        print('ENV_HIT')\n"
         "skip = ('/proc', '/sys', '/dev')\n"
-        "print('FILES_BEGIN')\n"
         "for path in pathlib.Path('/').rglob('*'):\n"
         "    text = str(path)\n"
         "    if text.startswith(skip):\n"
@@ -1439,8 +1490,8 @@ def test_api_and_deriver_have_no_tenant_password(stack: Path) -> None:
         "        data = path.read_bytes()\n"
         "    except OSError:\n"
         "        continue\n"
-        "    print(data.decode('utf-8', 'ignore'))\n"
-        "print('FILES_END')\n"
+        "    if any(password.encode() in data for password in passwords):\n"
+        "        print('FILE_HIT', text)\n"
     )
     for service in ("api-a", "api-b", "deriver-a", "deriver-b"):
         ran = _compose(
@@ -1451,5 +1502,5 @@ def test_api_and_deriver_have_no_tenant_password(stack: Path) -> None:
         assert ran.returncode == 0, ran.stderr[-1500:]
         combined = ran.stdout + ran.stderr
         assert "FORBIDDEN" not in combined
-        for password in passwords:
-            assert password not in combined
+        assert "ENV_HIT" not in combined
+        assert "FILE_HIT" not in combined

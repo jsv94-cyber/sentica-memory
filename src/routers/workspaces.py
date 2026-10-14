@@ -154,13 +154,13 @@ async def delete_workspace(
 @router.post(
     "/{workspace_id}/search",
     response_model=list[schemas.Message],
-    dependencies=[Depends(require_auth(workspace_name="workspace_id"))],
 )
 async def search_workspace(
     workspace_id: str = Path(...),
     body: schemas.WorkspaceMessageSearchOptions = Body(
         ..., description="Message search parameters"
     ),
+    jwt_params: JWTParams = Depends(require_auth(workspace_name="workspace_id")),
 ):
     """
     Search messages in a Workspace using optional filters. Use `limit` to control the number of
@@ -186,12 +186,28 @@ async def search_workspace(
                 scope_db, workspace_id, scope_peer
             )
         if not scope_sessions:
-            # A scope with no member sessions matches nothing, not everything.
             no_results: list[models.Message] = []
             return no_results
         filters["session_id"] = {"in": scope_sessions}
-    filters["workspace_id"] = workspace_id
-    return await search(body.query, filters=filters, limit=body.limit)
+    from src.sentica.runtime import production_enabled
+    from src.sentica.workspace_scope import (
+        enforce_targets,
+        reset_workspace,
+        set_workspace,
+    )
+
+    allowed = jwt_params.workspaces if production_enabled() else None
+    targets = enforce_targets(workspace_id, body.workspaces, allowed)
+    found: list[models.Message] = []
+    for name in targets:
+        token = set_workspace(name)
+        try:
+            scoped = dict(filters)
+            scoped["workspace_id"] = name
+            found.extend(await search(body.query, filters=scoped, limit=body.limit))
+        finally:
+            reset_workspace(token)
+    return found
 
 
 @router.get(
@@ -319,6 +335,29 @@ async def chat(
 
     Set `stream: true` to receive the answer as a `text/event-stream` of `{"delta": {"content": ...}, "done": false}` chunks terminated by `{"done": true}`. Requires a workspace- or admin-level key.
     """
+    from src.sentica.runtime import production_enabled
+    from src.sentica.workspace_scope import (
+        enforce_targets,
+        reset_workspace,
+        set_workspace,
+    )
+
+    allowed = jwt_params.workspaces if production_enabled() else None
+    targets = enforce_targets(workspace_id, options.workspaces, allowed)
+    if options.workspaces and len(targets) > 1:
+        child = options.model_copy(update={"workspaces": None, "stream": False})
+        answers: list[schemas.DialecticResponse] = []
+        for name in targets:
+            token = set_workspace(name)
+            try:
+                one = await chat(name, child, jwt_params)
+            finally:
+                reset_workspace(token)
+            if isinstance(one, schemas.DialecticResponse):
+                one.workspace_id = name
+                answers.append(one)
+        return answers
+
     session_allowlist: list[str] | None = None
     if options.scope is not None:
         validate_scope_read_option(
@@ -383,4 +422,5 @@ async def chat(
     return schemas.DialecticResponse(
         content=response if response else None,
         evidence=evidence.build() if evidence is not None else None,
+        workspace_id=workspace_id,
     )

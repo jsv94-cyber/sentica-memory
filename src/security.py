@@ -61,6 +61,7 @@ class JWTParams(BaseModel):
     w: str | None = None
     p: str | None = None
     s: str | None = None
+    workspaces: list[str] | None = None
 
 
 def create_admin_jwt() -> str:
@@ -212,6 +213,10 @@ async def auth(
         if not credentials or not credentials.credentials:
             raise AuthenticationException("missing token")
         jwt_params = verify_sentica_token(credentials.credentials)
+        if workspace_name:
+            from src.sentica.workspace_scope import require_workspace
+
+            require_workspace(workspace_name, jwt_params.workspaces or [])
     elif not settings.AUTH.USE_AUTH:
         return JWTParams(t="", ad=True)
     else:
@@ -237,7 +242,11 @@ async def auth(
     # Every scoped, non-admin path requires the token's workspace to match the
     # route's. Check it once here so no individual branch below can forget it
     # and silently re-open cross-workspace access (the bug this module fixes).
-    if workspace_name and jwt_params.w != workspace_name:
+    if (
+        workspace_name
+        and jwt_params.w != workspace_name
+        and workspace_name not in (jwt_params.workspaces or [])
+    ):
         raise AuthenticationException("JWT not permissioned for this resource")
 
     if jwt_params.s is not None:

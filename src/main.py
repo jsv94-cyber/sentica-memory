@@ -257,6 +257,25 @@ async def sentica_production_token(
     return await call_next(request)
 
 
+@app.middleware("http")
+async def sentica_workspace_scope(
+    request: Request,
+    call_next: Callable[[Request], Awaitable[Response]],
+) -> Response:
+    """Bind the request to the workspace named in the path."""
+    from src.sentica.workspace_scope import reset_workspace, set_workspace
+
+    parts = [part for part in request.url.path.split("/") if part]
+    workspace = None
+    if len(parts) >= 3 and parts[0] == "v3" and parts[1] == "workspaces":
+        workspace = parts[2]
+    token = set_workspace(workspace)
+    try:
+        return await call_next(request)
+    finally:
+        reset_workspace(token)
+
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint for monitoring and container orchestration."""

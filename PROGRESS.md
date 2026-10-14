@@ -132,4 +132,34 @@ Test counts: `uv run pytest --ignore=tests/sentica/test_m1_stack.py` on
 The 53 skips are upstream. The proof file is not in that run. A separate
 `uv run pytest tests/sentica/test_m1_stack.py -n0` was **18 passed, 0
 skipped, 0 failed** (104.34s). The fork adds no skip. Map citations for
-the engine are `src/db.py:74`, `src/db.py:346`, and `src/db.py:364`.
+the engine are `src/db.py:75`, `src/db.py:347`, and `src/db.py:367`.
+
+## M2. Workspace partitions
+
+Built:
+
+- Postgres row-level security is enabled and forced on every table that has
+  `workspace_name`. The policy keeps a row only when `sentica.workspace` is
+  set and equals that column. An unset or empty setting returns no rows.
+- The app role `sentica_app` does not own those tables and does not bypass
+  row-level security. When the migrating role is a member of `sentica_ddl`,
+  ownership moves to that role after it is granted `CREATE` on the schema.
+- Each transaction sets `sentica.workspace` to one workspace from the token.
+  Search, context, chat, representation, and cards query one workspace at a
+  time, merge in Python, and tag each item with its workspace id.
+- Deriver, summary, and dream tasks carry one workspace and use the same
+  setting. A peer name in two workspaces has two representations.
+- A workspace that is not in the token set is refused. It is not skipped.
+- Peer cache keys include the workspace name.
+- Production refuses LanceDB, Qdrant, and Chroma.
+
+Tables without `workspace_name` are `workspaces`, `active_queue_sessions`,
+and `alembic_version`. See `.review/M2-summary.md`.
+
+Test counts: `uv run pytest --ignore=tests/sentica/test_m1_stack.py -q --tb=line`
+on 2026-10-14, against the local Postgres on host port 5433, with
+`SENTICA_MODE=test`: **3215 passed, 53 skipped, 0 failed** (188.01s).
+The 53 skips are upstream. The proof file is not in that run. A separate
+`uv run pytest tests/sentica/test_m1_stack.py -n0 -q --tb=line` was
+**20 passed, 0 skipped, 0 failed** (127.69s).
+

@@ -86,6 +86,17 @@ async def _queue_rows(db: AsyncSession, work_unit_key: str) -> list[models.Queue
     return list(result.scalars().all())
 
 
+async def _queue_rows_prefixed(
+    db: AsyncSession, work_unit_key: str
+) -> list[models.QueueItem]:
+    result = await db.execute(
+        select(models.QueueItem).where(
+            models.QueueItem.work_unit_key.startswith(work_unit_key + ":")
+        )
+    )
+    return list(result.scalars().all())
+
+
 def _capture_events(monkeypatch: pytest.MonkeyPatch) -> list[BaseEvent]:
     events: list[BaseEvent] = []
     monkeypatch.setattr(consumer, "emit", events.append)
@@ -103,7 +114,7 @@ def _reconciler_item(payload: dict[str, Any]) -> models.QueueItem:
     )
 
 
-async def _legacy_document(db: AsyncSession) -> tuple[str, str]:
+async def _legacy_document(db: AsyncSession) -> tuple[str, str, str]:
     workspace = models.Workspace(name=str(generate_nanoid()))
     db.add(workspace)
     await db.commit()
@@ -128,7 +139,7 @@ async def _legacy_document(db: AsyncSession) -> tuple[str, str]:
     )
     db.add(doc)
     await db.commit()
-    return doc.id, parent
+    return doc.id, parent, workspace.name
 
 
 # ---------------------------------------------------------------------------
@@ -144,10 +155,20 @@ async def test_generic_enqueue_gated_on_has_pending(
     task = backfill_task(_fake_backfill(_Rows(remaining)))
 
     enqueued = await ReconcilerScheduler()._try_enqueue_task(task)  # pyright: ignore[reportPrivateUsage]
+    names = list((await db_session.scalars(select(models.Workspace.name))).all())
     rows = await _queue_rows(db_session, "reconciler:backfill.fake")
+    if names:
+        rows = await _queue_rows_prefixed(db_session, "reconciler:backfill.fake")
 
     assert enqueued is (remaining > 0)
-    assert len(rows) == (1 if remaining else 0)
+    if remaining == 0:
+        assert rows == []
+    elif names:
+        assert {row.work_unit_key for row in rows} == {
+            f"reconciler:backfill.fake:{name}" for name in names
+        }
+    else:
+        assert len(rows) == 1
     if rows:
         assert rows[0].payload == {
             "reconciler_type": "backfill",
@@ -170,10 +191,12 @@ async def test_document_sources_enqueues_under_legacy_shape(
 
     await _legacy_document(db_session)
     assert await scheduler._try_enqueue_task(task)  # pyright: ignore[reportPrivateUsage]
-    rows = await _queue_rows(db_session, legacy_key)
-    assert [row.payload for row in rows] == [
-        {"reconciler_type": "backfill_document_sources"}
-    ]
+    rows = await _queue_rows_prefixed(db_session, legacy_key)
+    assert rows
+    assert all(
+        row.payload == {"reconciler_type": "backfill_document_sources"} for row in rows
+    )
+    assert all(row.workspace_name is not None for row in rows)
 
 
 # ---------------------------------------------------------------------------
@@ -185,7 +208,7 @@ async def test_new_worker_processes_legacy_payload(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     events = _capture_events(monkeypatch)
-    doc_id, parent = await _legacy_document(db_session)
+    doc_id, parent, _workspace = await _legacy_document(db_session)
 
     await consumer.process_item(
         _reconciler_item({"reconciler_type": "backfill_document_sources"})

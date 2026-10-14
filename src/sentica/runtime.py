@@ -263,6 +263,15 @@ def _refuse_unsafe_runtime() -> None:
     traces = os.environ.get("REASONING_TRACES_FILE", "").strip()
     if traces or settings.REASONING_TRACES_FILE:
         raise SenticaStartupError("Refusing to start: REASONING_TRACES_FILE is set")
+    vector_store = (
+        os.environ.get("VECTOR_STORE_TYPE", str(settings.VECTOR_STORE.TYPE))
+        .strip()
+        .lower()
+    )
+    if vector_store in {"lancedb", "qdrant", "chroma", "chromadb"}:
+        raise SenticaStartupError(
+            "Refusing to start: an external vector store is not allowed in production"
+        )
     metrics_on = _truthy("METRICS_ENABLED") or settings.METRICS.ENABLED
     labeled = any(
         _workspace_labeled(metric)

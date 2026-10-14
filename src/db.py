@@ -20,6 +20,7 @@ from src.sentica.db_connect import (
 )
 from src.sentica.log_policy import install_production_log_filter
 from src.sentica.runtime import capped_pool_recycle
+from src.sentica.workspace_scope import install_workspace_scope
 from src.telemetry.prometheus.metrics import (
     db_connections_established_counter,
     db_connections_open_gauge,
@@ -356,6 +357,8 @@ SessionLocal = async_sessionmaker(
 # transaction. The backend therefore returns to state 'idle' (not 'idle in
 # transaction') the moment a statement completes.
 read_engine = engine.execution_options(isolation_level="AUTOCOMMIT")
+
+install_workspace_scope(engine, read_engine)
 
 # Sessions for SELECT-only work (same lazy-checkout semantics as SessionLocal).
 # MUST NOT be used for writes: with no enclosing transaction, begin_nested()

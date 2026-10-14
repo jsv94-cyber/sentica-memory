@@ -119,16 +119,29 @@ async def test_enqueue_gated_on_pending_work(
         (
             await db_session.execute(
                 select(models.QueueItem).where(
-                    models.QueueItem.work_unit_key == "reconciler:sync_vectors"
+                    models.QueueItem.work_unit_key.startswith("reconciler:sync_vectors")
                 )
             )
         )
         .scalars()
         .all()
     )
+    names = list(
+        (await db_session.execute(select(models.Workspace.name))).scalars().all()
+    )
 
     assert enqueued is has_work
-    assert len(rows) == (1 if has_work else 0)
+    if not has_work:
+        assert rows == []
+    elif names:
+        assert {row.work_unit_key for row in rows} == {
+            f"reconciler:sync_vectors:{name}" for name in names
+        }
+        assert {row.workspace_name for row in rows} == set(names)
+    else:
+        assert len(rows) == 1
+        assert rows[0].work_unit_key == "reconciler:sync_vectors"
+        assert rows[0].workspace_name is None
 
 
 def test_sync_vectors_registers_its_gate() -> None:

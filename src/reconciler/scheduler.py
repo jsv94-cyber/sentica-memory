@@ -250,60 +250,85 @@ class ReconcilerScheduler:
             True if a task was enqueued, False if skipped
         """
         async with tracked_db("reconciler_enqueue") as db:
-            # Check if task is already in progress
-            in_progress_check = select(
-                exists(
-                    select(models.ActiveQueueSession.id).where(
-                        models.ActiveQueueSession.work_unit_key == task.work_unit_key
-                    )
-                )
-            )
-            is_in_progress = await db.scalar(in_progress_check)
-
-            if is_in_progress:
-                logger.debug("Task %s already in progress, skipping enqueue", task.name)
-                return False
-
-            # Check if there's already a pending task
-            pending_check = select(
-                exists(
-                    select(QueueItem.id).where(
-                        QueueItem.work_unit_key == task.work_unit_key,
-                        QueueItem.processed == False,  # noqa: E712
-                    )
-                )
-            )
-            is_pending = await db.scalar(pending_check)
-
-            if is_pending:
-                logger.debug(
-                    "Task %s already pending in queue, skipping enqueue", task.name
-                )
-                return False
-
             if task.has_pending is not None and not await task.has_pending(db):
                 logger.debug("Task %s has nothing to do, skipping enqueue", task.name)
                 return False
 
-            # Enqueue the task using ORM
-            queue_item = QueueItem(
-                work_unit_key=task.work_unit_key,
-                payload=task.payload,
-                session_id=None,
-                task_type="reconciler",
-                workspace_name=None,
-                message_id=None,
+            names = list(await db.scalars(select(models.Workspace.name)))
+            targets = (
+                [(f"{task.work_unit_key}:{name}", name) for name in names]
+                if names
+                else [(task.work_unit_key, None)]
             )
-            db.add(queue_item)
+            from src.sentica.workspace_scope import reset_workspace, set_workspace
+
+            inserted = False
+            for key, workspace_name in targets:
+                token = (
+                    set_workspace(workspace_name)
+                    if workspace_name is not None
+                    else None
+                )
+                try:
+                    if await self._enqueue_one(db, key, workspace_name, task.payload):
+                        inserted = True
+                finally:
+                    if token is not None:
+                        reset_workspace(token)
+            if not inserted:
+                return False
             try:
                 await db.commit()
             except IntegrityError:
-                # Another instance already enqueued this task (unique constraint)
                 await db.rollback()
                 logger.debug(
-                    "Task %s already enqueued by another instance, skipping", task.name
+                    "Task %s already enqueued by another instance, skipping",
+                    task.name,
                 )
                 return False
-
             logger.debug("Enqueued reconciler task: %s", task.name)
             return True
+
+    async def _enqueue_one(
+        self,
+        db: AsyncSession,
+        key: str,
+        workspace_name: str | None,
+        payload: dict[str, Any],
+    ) -> bool:
+        """Insert one reconciler row while the workspace setting is current."""
+        in_progress = await db.scalar(
+            select(
+                exists(
+                    select(models.ActiveQueueSession.id).where(
+                        models.ActiveQueueSession.work_unit_key == key
+                    )
+                )
+            )
+        )
+        if in_progress:
+            return False
+        pending = await db.scalar(
+            select(
+                exists(
+                    select(QueueItem.id).where(
+                        QueueItem.work_unit_key == key,
+                        QueueItem.processed == False,  # noqa: E712
+                    )
+                )
+            )
+        )
+        if pending:
+            return False
+        db.add(
+            QueueItem(
+                work_unit_key=key,
+                payload=payload,
+                session_id=None,
+                task_type="reconciler",
+                workspace_name=workspace_name,
+                message_id=None,
+            )
+        )
+        await db.flush()
+        return True
