@@ -256,6 +256,20 @@ def test_db_call_timeout_refuses_unparsable_and_over_cap(
     assert "not as individual files" in instance_doc
 
 
+def test_m2_summary_defers_proxy_tls_redis_and_internal_networks() -> None:
+    text = Path(".review/M2-summary.md").read_text(encoding="utf-8")
+    heading = text.index("## Deferred to M9")
+    deferred = text[heading:]
+    assert "server_tls_sslmode" in deferred
+    assert "verify-full" in deferred
+    assert "Redis" in deferred
+    assert "non-root" in deferred or "root" in deferred
+    assert "internal: true" in deferred
+    assert "db" in deferred
+    assert "net-a" in deferred
+    assert "net-b" in deferred
+
+
 def test_production_connect_args_include_connect_timeout(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
