@@ -13,14 +13,14 @@ The driver is psycopg. Pool size, overflow, recycle, and pre-ping come from
 
 Two session factories share that engine:
 
-- `src/db.py:350` `SessionLocal` is the write session. It is lazy: the pool
+- `src/db.py:352` `SessionLocal` is the write session. It is lazy: the pool
   connection is checked out on the first statement, not at construction.
-- `src/db.py:362` sets a read engine with isolation level `AUTOCOMMIT`.
-  `src/db.py:368` `ReadSessionLocal` is for SELECT-only work. Writes through it
+- `src/db.py:364` sets a read engine with isolation level `AUTOCOMMIT`.
+  `src/db.py:370` `ReadSessionLocal` is for SELECT-only work. Writes through it
   commit immediately. Callers must not use it to mutate.
 
-`src/db.py:596` reads `settings.DB.SCHEMA` (default `public`) and
-`src/db.py:601` binds it to the declarative `Base`. Every ORM table lives in
+`src/db.py:598` reads `settings.DB.SCHEMA` (default `public`) and
+`src/db.py:603` binds it to the declarative `Base`. Every ORM table lives in
 that schema.
 
 Request and worker code opens sessions in `src/dependencies.py`:

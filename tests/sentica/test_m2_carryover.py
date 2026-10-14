@@ -159,6 +159,33 @@ def test_database_receives_scram_verifiers_and_tmpfs() -> None:
     assert "scram_verifier(password_b)" in fixture
 
 
+def test_bounded_wait_matches_psycopg() -> None:
+    import inspect
+
+    import psycopg.waiting as waiting
+    from psycopg._enums import Ready
+
+    from src.db import _DRIVER_READY_RW  # pyright: ignore[reportPrivateUsage]
+
+    expected = {
+        "wait_async": (
+            ("gen", "fileno", "interval"),
+            ("wakeup", "fileno", "ev", "ready"),
+        ),
+        "wait_conn_async": (("gen", "interval"), ("wakeup", "fileno", "ev", "ready")),
+    }
+    for name, (parameters, locals_) in expected.items():
+        function = getattr(waiting, name)
+        assert inspect.iscoroutinefunction(function)
+        assert tuple(inspect.signature(function).parameters) == parameters
+        names = function.__code__.co_varnames + function.__code__.co_cellvars
+        for local in locals_:
+            assert local in names
+    assert int(Ready.RW) == _DRIVER_READY_RW
+    source = Path("src/db.py").read_text(encoding="utf-8")
+    assert 'in {"wait_async", "wait_conn_async"}' in source
+
+
 def test_production_log_strips_messages_except_the_allow_list() -> None:
     from src.sentica.log_policy import ALLOW_LIST, ProductionLogFilter
 

@@ -157,7 +157,9 @@ def _wake_task_events(task: asyncio.Task[Any]) -> None:
         frame = getattr(obj, "cr_frame", None) or getattr(obj, "gr_frame", None)
         if frame is not None and hasattr(frame, "f_locals"):
             wakeup = frame.f_locals.get("wakeup")
-            if frame.f_code.co_name == "wait_conn_async" and callable(wakeup):
+            if frame.f_code.co_name in {"wait_async", "wait_conn_async"} and callable(
+                wakeup
+            ):
                 # A bare event wake reports "not ready", and the driver waits
                 # again. Report the socket ready so it sees the shutdown.
                 wakeup(_DRIVER_READY_RW)
