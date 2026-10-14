@@ -13,7 +13,7 @@ Jose's rulings, recorded in `PROGRESS.md`:
 
 | Item | Fixed where | Test |
 | --- | --- | --- |
-| CI stack job sets `SENTICA_MODE=test` | `.github/workflows/unittest.yml:100` | the job itself |
+| CI stack job sets `SENTICA_MODE=test` | `.github/workflows/unittest.yml:115` | the job itself |
 | Proof image uid is the runner uid, so keys need no root chown | `Dockerfile:47` `SENTICA_UID` | `test_containers_cannot_read_another_tenant_key` |
 | Host log grep runs under `sudo -E` and must return 1 | `tests/sentica/test_m1_stack.py:774` | `test_stopped_stack_leaves_no_memory_on_disk` |
 | Full-suite job skips the proof file | `.github/workflows/unittest.yml:60` | the job itself |

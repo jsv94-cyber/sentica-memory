@@ -96,8 +96,26 @@ jobs:
 
   test-m1-stack:
     runs-on: ubuntu-latest
+    services:
+      database:
+        image: pgvector/pgvector:pg15
+        env:
+          POSTGRES_DB: test_db
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     env:
       SENTICA_MODE: test
+      DB_CONNECTION_URI: postgresql+psycopg://postgres:postgres@localhost:5432/test_db
+      AUTH_USE_AUTH: "false"
+      SENTRY_ENABLED: "false"
     steps:
       - uses: actions/checkout@v4
 

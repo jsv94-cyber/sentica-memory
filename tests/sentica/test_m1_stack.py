@@ -2,9 +2,11 @@
 
 The stack is Docker Compose on this machine: a local test CA, two
 PgBouncers, two APIs, two derivers, two Redis processes, and one Postgres
-whose data directory is tmpfs. The file is collected with the rest of the
-suite. It is not skipped.
+whose data directory is tmpfs. CI runs this file in its own job.
 """
+
+# The embedded scripts are adjacent string literals on purpose.
+# pyright: reportImplicitStringConcatenation=false
 
 from __future__ import annotations
 
@@ -20,6 +22,7 @@ import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any, cast
 
 import httpx
 import jwt
@@ -132,7 +135,7 @@ def _assert_sqlstate(cert_dir: Path, sql: str, sqlstate: str) -> None:
         conn.cursor() as cur,
         pytest.raises(psycopg.Error) as exc,
     ):
-        cur.execute(sql)
+        cur.execute(sql)  # pyright: ignore[reportCallIssue, reportArgumentType]
     assert exc.value.sqlstate == sqlstate
 
 
@@ -959,7 +962,8 @@ def test_reconciler_and_webhook_complete(stack: Path) -> None:
                 "ORDER BY id DESC LIMIT 10"
             )
             for task_type, processed, error, tenant in cur.fetchall():
-                seen[str(task_type)] = (bool(processed), error, str(tenant))
+                message = None if error is None else str(error)
+                seen[str(task_type)] = (bool(processed), message, str(tenant))
         if (
             seen.get("reconciler", (False, "x", ""))[0]
             and seen.get("webhook", (False, "x", ""))[0]
@@ -999,7 +1003,7 @@ def test_representation_rows_for_other_tenant_are_all_errored(stack: Path) -> No
                 )
         conn.commit()
     deadline = time.monotonic() + 40
-    rows: list[tuple[object, object]] = []
+    rows: list[tuple[Any, ...]] = []
     while time.monotonic() < deadline:
         with (
             _connect(PROXY_A, stack, "tenant_a", "tenant_a", "tenant_a") as conn,
@@ -1009,7 +1013,7 @@ def test_representation_rows_for_other_tenant_are_all_errored(stack: Path) -> No
                 "SELECT processed, error FROM memory.queue WHERE work_unit_key = %s",
                 (work_unit,),
             )
-            rows = cur.fetchall()
+            rows = cast(list[tuple[Any, ...]], cur.fetchall())
         if len(rows) >= 2 and all(row[0] and row[1] for row in rows):
             break
         time.sleep(1)
@@ -1059,8 +1063,8 @@ def test_deriver_resumes_a_pending_row_once(stack: Path) -> None:
                 )
                 row = cur.fetchone()
                 assert row is not None
-                count = int(row[0])
-                error = row[1]
+                count = int(str(row[0]))
+                error = "" if row[1] is None else str(row[1])
                 if count == 1 and not error:
                     break
         except psycopg.Error:
