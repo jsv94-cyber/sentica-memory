@@ -138,6 +138,27 @@ def test_cancelled_caller_stops_the_session_connection() -> None:
     asyncio.run(_run())
 
 
+def test_database_receives_scram_verifiers_and_tmpfs() -> None:
+    import yaml
+
+    from tests.sentica.scram import scram_verifier
+
+    password = "tenant-secret-value"
+    verifier = scram_verifier(password)
+    assert verifier.startswith("SCRAM-SHA-256$")
+    assert password not in verifier
+    document = yaml.safe_load(Path("docker-compose.sentica.yml").read_text())
+    services = document["services"]
+    database_tmpfs = services["database"]["tmpfs"]
+    assert "/var/lib/postgresql/secrets" in database_tmpfs
+    assert "/var/lib/postgresql/certs" in database_tmpfs
+    assert services["pgbouncer-a"]["tmpfs"] == ["/tmp"]
+    assert services["pgbouncer-b"]["tmpfs"] == ["/tmp"]
+    fixture = Path("tests/sentica/test_m1_stack.py").read_text(encoding="utf-8")
+    assert "scram_verifier(password_a)" in fixture
+    assert "scram_verifier(password_b)" in fixture
+
+
 def test_production_log_strips_messages_except_the_allow_list() -> None:
     from src.sentica.log_policy import ALLOW_LIST, ProductionLogFilter
 

@@ -62,6 +62,8 @@ services:
       - ${SECRET_DIR}/tenant-b:/secrets/tenant-b:ro
     tmpfs:
       - /var/lib/postgresql/data:size=1g
+      - /var/lib/postgresql/secrets
+      - /var/lib/postgresql/certs
     networks:
       db:
         ipv4_address: 172.28.12.10
@@ -88,6 +90,8 @@ services:
       - ${CERT_DIR}/pgbouncer-a.crt:/in/server.crt:ro
       - ${CERT_DIR}/pgbouncer-a.key:/in/server.key:ro
       - ${CERT_DIR}/client-ca.crt:/certs/client-ca.crt:ro
+    tmpfs:
+      - /tmp
     networks:
       db:
         ipv4_address: 172.28.12.13
@@ -116,6 +120,8 @@ services:
       - ${CERT_DIR}/pgbouncer-b.crt:/in/server.crt:ro
       - ${CERT_DIR}/pgbouncer-b.key:/in/server.key:ro
       - ${CERT_DIR}/client-ca.crt:/certs/client-ca.crt:ro
+    tmpfs:
+      - /tmp
     networks:
       db:
         ipv4_address: 172.28.12.14

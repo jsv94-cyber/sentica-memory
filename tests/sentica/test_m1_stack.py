@@ -34,6 +34,8 @@ from cryptography.hazmat.primitives.asymmetric import ed25519, rsa
 from cryptography.hazmat.primitives.hashes import SHA256
 from cryptography.x509.oid import NameOID
 
+from tests.sentica.scram import scram_verifier
+
 pytestmark = pytest.mark.xdist_group(name="sentica_m1_stack")
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -250,8 +252,12 @@ def stack() -> Iterator[Path]:
         cert_dir_holder.append(str(public))
         password_a = secrets.token_hex(24)
         password_b = secrets.token_hex(24)
-        (secret_dir / "tenant-a").write_text(password_a, encoding="utf-8")
-        (secret_dir / "tenant-b").write_text(password_b, encoding="utf-8")
+        (secret_dir / "tenant-a").write_text(
+            scram_verifier(password_a), encoding="utf-8"
+        )
+        (secret_dir / "tenant-b").write_text(
+            scram_verifier(password_b), encoding="utf-8"
+        )
         (secret_dir / "userlist-a.txt").write_text(
             f'"tenant_a" "{password_a}"\n"sentica_operator" ""\n',
             encoding="utf-8",
@@ -1387,3 +1393,53 @@ def test_migration_exits_when_cert_is_revoked(stack: Path) -> None:
     assert result.returncode != 0, output[-2000:]
     assert time.monotonic() - started < 120
     assert "Starting API server" not in output
+
+
+def test_api_and_deriver_have_no_tenant_password(stack: Path) -> None:
+    secret_dir = stack.parent / "secrets"
+    passwords: list[str] = []
+    for name in ("userlist-a.txt", "userlist-b.txt"):
+        for line in (secret_dir / name).read_text(encoding="utf-8").splitlines():
+            if not line or "sentica_operator" in line:
+                continue
+            passwords.append(line.split('"')[3])
+    assert len(passwords) == 2
+    script = (
+        "import pathlib\n"
+        "env = pathlib.Path('/proc/1/environ').read_bytes().decode("
+        "'utf-8', 'replace')\n"
+        "print('ENV_BEGIN')\n"
+        "print(env.replace('\\x00', '\\n'))\n"
+        "print('ENV_END')\n"
+        "skip = ('/proc', '/sys', '/dev')\n"
+        "print('FILES_BEGIN')\n"
+        "for path in pathlib.Path('/').rglob('*'):\n"
+        "    text = str(path)\n"
+        "    if text.startswith(skip):\n"
+        "        continue\n"
+        "    if (\n"
+        "        text == '/secrets' or text.startswith('/secrets/')\n"
+        "        or text == '/in' or text.startswith('/in/')\n"
+        "        or path.name.startswith('userlist')\n"
+        "    ):\n"
+        "        print('FORBIDDEN', text)\n"
+        "    if not path.is_file():\n"
+        "        continue\n"
+        "    try:\n"
+        "        data = path.read_bytes()\n"
+        "    except OSError:\n"
+        "        continue\n"
+        "    print(data.decode('utf-8', 'ignore'))\n"
+        "print('FILES_END')\n"
+    )
+    for service in ("api-a", "api-b", "deriver-a", "deriver-b"):
+        ran = _compose(
+            ["exec", "-T", service, "/app/.venv/bin/python", "-"],
+            check=False,
+            stdin=script,
+        )
+        assert ran.returncode == 0, ran.stderr[-1500:]
+        combined = ran.stdout + ran.stderr
+        assert "FORBIDDEN" not in combined
+        for password in passwords:
+            assert password not in combined
