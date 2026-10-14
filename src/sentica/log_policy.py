@@ -15,13 +15,29 @@ _WORK_UNIT = re.compile(
     r"\b(?:representation|summary|dream|webhook|deletion|reconciler|"
     + r"scope_backfill|scope_removal):[^\s]+"
 )
+_DETAIL = re.compile(r"(?is)\bDETAIL\b\s*:.*")
+_RESOURCE = re.compile(
+    r"(?i)(?:/v3/\S+"
+    + r"|\b(?:workspace|peer|session)(?:[_\s-]*(?:id|name))?\b\s*[:=]?\s*\S+)"
+)
 _installed = False
+
+
+def _redact_text(rendered: str) -> str:
+    """Remove names, paths, and server DETAIL text from one log line."""
+    cleaned = _DETAIL.sub("DETAIL redacted", rendered)
+    cleaned = _RESOURCE.sub("redacted", cleaned)
+    if "[parameters:" in cleaned or "Payload:" in cleaned or _WORK_UNIT.search(cleaned):
+        return "log redacted"
+    return cleaned
 
 
 class ProductionLogFilter(logging.Filter):
     """Drop content that must not reach a log line."""
 
     def filter(self, record: logging.LogRecord) -> bool:
+        if record.name == "uvicorn.access" or record.name.startswith("uvicorn.access"):
+            return False
         if record.exc_info or record.exc_text:
             exc = record.exc_info[1] if record.exc_info else None
             record.msg = exc.__class__.__name__ if exc is not None else "Exception"
@@ -36,12 +52,9 @@ class ProductionLogFilter(logging.Filter):
             record.msg = "log redacted"
             record.args = ()
             return True
-        if (
-            "[parameters:" in rendered
-            or "Payload:" in rendered
-            or _WORK_UNIT.search(rendered)
-        ):
-            record.msg = "log redacted"
+        cleaned = _redact_text(rendered)
+        if cleaned != rendered:
+            record.msg = cleaned
             record.args = ()
         return True
 
@@ -61,7 +74,8 @@ def install_production_log_filter() -> None:
     original = logging.Handler.handle
 
     def _handle(self: logging.Handler, record: logging.LogRecord) -> bool:
-        redactor.filter(record)
+        if not redactor.filter(record):
+            return True
         return original(self, record)
 
     logging.Handler.handle = _handle

@@ -8,8 +8,10 @@ suite. It is not skipped.
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
+import secrets
 import shutil
 import subprocess
 import threading
@@ -35,6 +37,7 @@ ROOT = Path(__file__).resolve().parents[2]
 COMPOSE_FILE = ROOT / "docker-compose.sentica.yml"
 PROJECT = "sentica-m1"
 cert_dir_holder: list[str] = []
+secret_dir_holder: list[str] = []
 API_A = "http://127.0.0.1:8101"
 API_B = "http://127.0.0.1:8102"
 PROXY_A = 6433
@@ -76,7 +79,12 @@ def _compose(
     return _run(
         ["docker", "compose", "-p", PROJECT, "-f", str(COMPOSE_FILE), *args],
         check=check,
-        env={"CERT_DIR": cert_dir_holder[0]},
+        env={
+            "CERT_DIR": cert_dir_holder[0],
+            "SECRET_DIR": secret_dir_holder[0] if secret_dir_holder else "/tmp",
+            "SENTICA_UID": str(os.getuid()),
+            "SENTICA_GID": str(os.getgid()),
+        },
         stdin=stdin,
         timeout=timeout,
     )
@@ -145,12 +153,21 @@ def _connect(
 
 
 def _rename_into_place(path: Path, data: bytes, mode: int) -> None:
-    temporary = path.with_name(path.name + ".next")
-    temporary.write_bytes(data)
-    os.chmod(temporary, mode)
+    """Replace a per-file bind mount by writing the existing inode.
+
+    A rename would leave the container holding the old file. The unit test
+    of rename-into-place covers the directory-mount case.
+    """
     if path.exists():
-        os.chown(temporary, path.stat().st_uid, path.stat().st_gid)
-    os.rename(temporary, path)
+        descriptor = os.open(path, os.O_WRONLY | os.O_TRUNC)
+        try:
+            os.write(descriptor, data)
+        finally:
+            os.close(descriptor)
+        os.chmod(path, mode)
+        return
+    path.write_bytes(data)
+    os.chmod(path, mode)
 
 
 def _reissue_client(
@@ -197,6 +214,12 @@ def stack() -> Iterator[Path]:
     cert_dir.mkdir(parents=True, exist_ok=False)
     cert_dir_holder.clear()
     cert_dir_holder.append(str(cert_dir))
+    secret_dir = cert_dir / "secrets"
+    secret_dir.mkdir()
+    secret_dir_holder.clear()
+    secret_dir_holder.append(str(secret_dir))
+    for name in ("tenant-a", "tenant-b", "userlist-a.txt", "userlist-b.txt"):
+        (secret_dir / name).write_text("placeholder\n", encoding="utf-8")
     try:
         subprocess.run(
             [
@@ -217,42 +240,33 @@ def stack() -> Iterator[Path]:
         for name in ("ca.key", "tenant-a.token.key", "tenant-b.token.key"):
             (cert_dir / name).rename(private / name)
         for item in list(cert_dir.iterdir()):
-            if item.name in {"private", "public"}:
+            if item.name in {"private", "public", "secrets"}:
                 continue
             item.rename(public / item.name)
         cert_dir_holder.clear()
         cert_dir_holder.append(str(public))
-        built = _compose(["build", "api-a"], check=False)
-        if built.returncode != 0:
-            raise AssertionError(built.stderr[-4000:] + built.stdout[-2000:])
-        image = f"{PROJECT}-api-a"
-        uid_run = _run(
-            ["docker", "run", "--rm", "--entrypoint", "id", image, "-u"],
-            check=False,
+        password_a = secrets.token_hex(24)
+        password_b = secrets.token_hex(24)
+        (secret_dir / "tenant-a").write_text(password_a, encoding="utf-8")
+        (secret_dir / "tenant-b").write_text(password_b, encoding="utf-8")
+        (secret_dir / "userlist-a.txt").write_text(
+            f'"tenant_a" "{password_a}"\n"sentica_operator" ""\n',
+            encoding="utf-8",
         )
-        if uid_run.returncode != 0:
-            raise AssertionError(uid_run.stderr + uid_run.stdout)
-        uid = uid_run.stdout.strip()
-        os.chmod(public / "sentica_operator.key", 0o600)
-        for name in ("tenant_a.key", "tenant_b.key"):
-            path = public / name
-            os.chown(path, int(uid), int(uid))
+        (secret_dir / "userlist-b.txt").write_text(
+            f'"tenant_b" "{password_b}"\n"sentica_operator" ""\n',
+            encoding="utf-8",
+        )
+        for path in secret_dir.iterdir():
             os.chmod(path, 0o600)
-        proxy_uid = _run(
-            [
-                "docker",
-                "run",
-                "--rm",
-                "--entrypoint",
-                "id",
-                "edoburu/pgbouncer:v1.24.1-p1",
-                "-u",
-            ]
-        ).stdout.strip()
-        for name in ("pgbouncer-a.key", "pgbouncer-b.key"):
-            path = public / name
-            os.chown(path, int(proxy_uid), int(proxy_uid))
-            os.chmod(path, 0o600)
+        for name in (
+            "tenant_a.key",
+            "tenant_b.key",
+            "sentica_operator.key",
+            "pgbouncer-a.key",
+            "pgbouncer-b.key",
+        ):
+            os.chmod(public / name, 0o600)
         started = _compose(["up", "-d", "--build"], check=False)
         if started.returncode != 0:
             raise AssertionError(started.stderr[-4000:] + started.stdout[-2000:])
@@ -476,7 +490,7 @@ def test_tokens_and_isolation(stack: Path) -> None:
     with pytest.raises(psycopg.OperationalError) as other_db:
         _connect(PROXY_A, stack, "tenant_a", "tenant_b", "tenant_a")
     other_text = str(other_db.value).lower()
-    assert "pg_hba" in other_text or other_db.value.sqlstate == "28000"
+    assert "no such database" in other_text or "does not exist" in other_text
 
     with (
         _connect(PROXY_B, stack, "tenant_b", "tenant_b", "tenant_b") as conn,
@@ -757,9 +771,10 @@ def test_stopped_stack_leaves_no_memory_on_disk(stack: Path) -> None:
         logs = _run(["docker", "logs", f"{PROJECT}-{service}-1"], check=False)
         assert canary not in logs.stdout + logs.stderr
     scanned = _run(
-        ["grep", "-R", "-l", canary, "/var/lib/docker/containers"], check=False
+        ["sudo", "-E", "grep", "-R", "-l", canary, "/var/lib/docker/containers"],
+        check=False,
     )
-    assert scanned.returncode != 0
+    assert scanned.returncode == 1
     volumes = _run(
         ["docker", "volume", "ls", "-q", "--filter", f"name={PROJECT}"], check=False
     )
@@ -804,6 +819,38 @@ def test_instances_cannot_reach_each_other(stack: Path) -> None:
         ]
     )
     assert database.returncode == 0
+    redis_ip = _compose(
+        [
+            "exec",
+            "-T",
+            "api-b",
+            "/app/.venv/bin/python",
+            "-c",
+            "import socket,sys\n"
+            "try:\n"
+            " socket.create_connection(('172.28.10.12', 6379), 2)\n"
+            "except OSError:\n"
+            " sys.exit(0)\n"
+            "sys.exit(1)\n",
+        ]
+    )
+    assert redis_ip.returncode == 0
+    database_ip = _compose(
+        [
+            "exec",
+            "-T",
+            "api-a",
+            "/app/.venv/bin/python",
+            "-c",
+            "import socket,sys\n"
+            "try:\n"
+            " socket.create_connection(('172.28.12.10', 5432), 2)\n"
+            "except OSError:\n"
+            " sys.exit(0)\n"
+            "sys.exit(1)\n",
+        ]
+    )
+    assert database_ip.returncode == 0
     unauth = _compose(
         [
             "exec",
@@ -819,6 +866,29 @@ def test_instances_cannot_reach_each_other(stack: Path) -> None:
         ]
     )
     assert unauth.returncode == 0, unauth.stdout + unauth.stderr
+    save = _compose(
+        [
+            "exec",
+            "-T",
+            "api-a",
+            "/app/.venv/bin/python",
+            "-c",
+            "import socket\n"
+            "pw=open('/secret/password').read().strip().encode()\n"
+            "s=socket.create_connection(('redis-a',6379),2)\n"
+            "def send(parts):\n"
+            "    body=b'*'+str(len(parts)).encode()+b'\\r\\n'\n"
+            "    for part in parts:\n"
+            "        body += b'$'+str(len(part)).encode()+b'\\r\\n'+part+b'\\r\\n'\n"
+            "    s.sendall(body)\n"
+            "send([b'AUTH', pw])\n"
+            "s.recv(128)\n"
+            "send([b'CONFIG', b'GET', b'save'])\n"
+            "data=s.recv(256)\n"
+            "raise SystemExit(0 if b'save' in data and b'$0\\r\\n' in data else 1)\n",
+        ]
+    )
+    assert save.returncode == 0, save.stdout + save.stderr
 
 
 def test_pool_recycle_is_short(stack: Path) -> None:
@@ -905,6 +975,12 @@ def test_reconciler_and_webhook_complete(stack: Path) -> None:
 
 
 def test_representation_rows_for_other_tenant_are_all_errored(stack: Path) -> None:
+    from src.deriver.queue_manager import QueueManager
+
+    source = inspect.getsource(QueueManager.process_work_unit)
+    assert source.index("await self.reject_foreign_queue_rows") < source.index(
+        "await self.get_queue_item_batch"
+    )
     canary = f"rep-canary-{uuid.uuid4().hex}"
     work_unit = "representation:m1-workspace:m1-session:m1-peer"
     with _connect(PROXY_A, stack, "tenant_a", "tenant_a", "tenant_a") as conn:
@@ -1033,6 +1109,22 @@ def test_database_error_canary_is_absent_from_logs(stack: Path) -> None:
         timeout=20,
     )
     assert first.status_code in (200, 201), first.text
+    session_name = f"sess-{uuid.uuid4().hex[:8]}"
+    peer_name = f"peer-{uuid.uuid4().hex[:8]}"
+    session = httpx.post(
+        f"{API_A}/v3/workspaces/{canary}/sessions",
+        headers=headers,
+        json={"id": session_name},
+        timeout=20,
+    )
+    assert session.status_code in (200, 201), session.text
+    peer = httpx.post(
+        f"{API_A}/v3/workspaces/{canary}/peers",
+        headers=headers,
+        json={"name": peer_name},
+        timeout=20,
+    )
+    assert peer.status_code in (200, 201), peer.text
     script = (
         "import asyncio, logging\n"
         "from sqlalchemy import text\n"
@@ -1045,6 +1137,21 @@ def test_database_error_canary_is_absent_from_logs(stack: Path) -> None:
         "{'canary': " + repr(canary) + "})\n"
         "    except Exception:\n"
         "        log.exception('query failed')\n"
+        "    logging.getLogger('uvicorn.access').info(\n"
+        "        '127.0.0.1 - \"POST /v3/workspaces/%s/sessions/%s HTTP/1.1\" 201',\n"
+        "        " + repr(canary) + ", " + repr(session_name) + ")\n"
+        "    logging.getLogger('sentica.named').error(\n"
+        "        'permission denied for workspace %s peer %s session %s\\n"
+        "DETAIL: key %s',\n"
+        "        "
+        + repr(canary)
+        + ", "
+        + repr(peer_name)
+        + ", "
+        + repr(session_name)
+        + ", "
+        + repr(canary)
+        + ")\n"
         "asyncio.run(main())\n"
     )
     ran = _compose(
@@ -1052,7 +1159,164 @@ def test_database_error_canary_is_absent_from_logs(stack: Path) -> None:
         check=False,
         stdin=script,
     )
+    combined = ran.stdout + ran.stderr
     assert ran.returncode == 0, ran.stderr[-1500:]
-    assert canary not in ran.stdout + ran.stderr
+    for secret in (canary, session_name, peer_name):
+        assert secret not in combined
+    assert "DETAIL:" not in combined
     logs = _run(["docker", "logs", f"{PROJECT}-api-a-1"], check=False)
-    assert canary not in logs.stdout + logs.stderr
+    logged = logs.stdout + logs.stderr
+    for secret in (canary, session_name, peer_name):
+        assert secret not in logged
+
+
+def test_pg_hba_rejects_trust_and_cross_tenant(stack: Path) -> None:
+    del stack
+    shown = _compose(
+        [
+            "exec",
+            "-T",
+            "database",
+            "psql",
+            "-U",
+            "postgres",
+            "-d",
+            "postgres",
+            "-tAc",
+            "SHOW hba_file",
+        ]
+    )
+    assert shown.stdout.strip() == "/etc/sentica/pg_hba.conf"
+    counted = _compose(
+        [
+            "exec",
+            "-T",
+            "database",
+            "psql",
+            "-U",
+            "postgres",
+            "-d",
+            "postgres",
+            "-tAc",
+            "SELECT count(*) FROM pg_hba_file_rules"
+            + " WHERE type LIKE 'host%' AND auth_method = 'trust'",
+        ]
+    )
+    assert counted.stdout.strip() == "0"
+    rejected = _run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            f"container:{PROJECT}-pgbouncer-b-1",
+            "pgvector/pgvector:pg15",
+            "psql",
+            "host=172.28.12.10 port=5432 user=tenant_a dbname=tenant_a"
+            + " sslmode=require connect_timeout=5",
+            "-c",
+            "SELECT 1",
+        ],
+        check=False,
+        timeout=20,
+    )
+    assert rejected.returncode != 0
+    assert "pg_hba" in (rejected.stderr + rejected.stdout).lower()
+
+
+def test_containers_cannot_read_another_tenant_key(stack: Path) -> None:
+    del stack
+    own = _compose(["exec", "-T", "api-a", "sh", "-c", "test -r /certs/tenant_a.key"])
+    assert own.returncode == 0
+    for service, path in (
+        ("api-a", "/certs/tenant_b.key"),
+        ("deriver-a", "/certs/tenant_b.key"),
+        ("api-b", "/certs/tenant_a.key"),
+        ("deriver-b", "/certs/tenant_a.key"),
+        ("pgbouncer-a", "/certs/tenant_a.key"),
+        ("pgbouncer-b", "/in/tenant_b.key"),
+    ):
+        missing = _compose(["exec", "-T", service, "sh", "-c", f"test ! -e {path}"])
+        assert missing.returncode == 0, service
+
+
+def test_migration_exits_when_proxy_is_paused(stack: Path) -> None:
+    del stack
+    _compose(["pause", "pgbouncer-a"])
+    started = time.monotonic()
+    try:
+        result = _compose(
+            ["run", "--no-deps", "--rm", "-T", "api-a"],
+            check=False,
+            timeout=150,
+        )
+    finally:
+        _compose(["unpause", "pgbouncer-a"], check=False)
+    output = result.stdout + result.stderr
+    assert result.returncode != 0, output[-2000:]
+    assert time.monotonic() - started < 140
+    assert "Starting API server" not in output
+
+
+def test_migration_exits_when_cert_is_revoked(stack: Path) -> None:
+    revoked = stack.parent / "revoked"
+    revoked.mkdir()
+    ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    now = datetime.now(UTC)
+    ca_cert = (
+        x509.CertificateBuilder()
+        .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "other")]))
+        .issuer_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "other")]))
+        .public_key(ca_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=1))
+        .not_valid_after(now + timedelta(hours=2))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
+        .sign(ca_key, SHA256())
+    )
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "tenant_a")]))
+        .issuer_name(ca_cert.subject)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=1))
+        .not_valid_after(now + timedelta(hours=2))
+        .sign(ca_key, SHA256())
+    )
+    cert_path = revoked / "tenant_a.crt"
+    key_path = revoked / "tenant_a.key"
+    cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    key_path.write_bytes(
+        key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.TraditionalOpenSSL,
+            serialization.NoEncryption(),
+        )
+    )
+    os.chmod(key_path, 0o600)
+    started = time.monotonic()
+    result = _compose(
+        [
+            "run",
+            "--no-deps",
+            "--rm",
+            "-T",
+            "-v",
+            f"{cert_path}:/certs/revoked.crt:ro",
+            "-v",
+            f"{key_path}:/certs/revoked.key:ro",
+            "-e",
+            "SENTICA_CLIENT_CERT_PATH=/certs/revoked.crt",
+            "-e",
+            "SENTICA_CLIENT_KEY_PATH=/certs/revoked.key",
+            "api-a",
+        ],
+        check=False,
+        timeout=60,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode != 0, output[-2000:]
+    assert time.monotonic() - started < 120
+    assert "Starting API server" not in output

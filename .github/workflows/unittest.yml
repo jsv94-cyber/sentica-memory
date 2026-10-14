@@ -57,7 +57,7 @@ jobs:
         run: uv sync --all-extras --dev
 
       - name: Run Tests
-        run: uv run pytest -x
+        run: uv run pytest -x --ignore=tests/sentica/test_m1_stack.py
         env:
           DB_CONNECTION_URI: postgresql+psycopg://postgres:postgres@localhost:5432/test_db
           AUTH_USE_AUTH: false
@@ -96,6 +96,8 @@ jobs:
 
   test-m1-stack:
     runs-on: ubuntu-latest
+    env:
+      SENTICA_MODE: test
     steps:
       - uses: actions/checkout@v4
 
@@ -122,8 +124,6 @@ jobs:
 
       - name: Run the two-instance proof
         run: uv run pytest tests/sentica/test_m1_stack.py -n0 --tb=short
-        env:
-          SENTICA_MODE: test
 
   # Status check for branch protection rules
   # This job always runs and reports success only if all required jobs pass

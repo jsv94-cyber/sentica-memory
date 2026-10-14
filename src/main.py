@@ -1,4 +1,3 @@
-import asyncio
 import logging
 import os
 import re
@@ -6,7 +5,6 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
-from typing import Any
 
 import sentry_sdk
 from fastapi import FastAPI, Request, Response
@@ -22,6 +20,8 @@ from src.backlog import DeriverMetricsPoller
 from src.cache.client import close_cache, init_cache
 from src.config import settings
 from src.db import (
+    API_DB_CALL_TIMEOUT_SECONDS,
+    db_call_timeout,
     engine,
     register_db_connection_instrumentation,
     register_db_query_instrumentation,
@@ -100,6 +100,8 @@ class MetricsAccessFilter(logging.Filter):
 
 
 logging.getLogger("uvicorn.access").addFilter(MetricsAccessFilter())
+if os.environ.get("SENTICA_MODE", "").strip() == "production":
+    logging.getLogger("uvicorn.access").disabled = True
 
 
 # Sentry Setup
@@ -341,6 +343,7 @@ async def track_request(
     # Store in request state and context var
     request.state.request_id = request_id
     token = request_context.set(f"api:{request_id}")
+    call_bound = db_call_timeout.set(API_DB_CALL_TIMEOUT_SECONDS)
     # Optional client identity headers; the telemetry emitter injects these
     # into every event body emitted during this request.
     client_tokens = set_client_context(
@@ -367,63 +370,5 @@ async def track_request(
         return response
     finally:
         reset_client_context(client_tokens)
+        db_call_timeout.reset(call_bound)
         request_context.reset(token)
-
-
-class _BoundRequest:
-    """Return 503 when a request does not finish within 8 seconds.
-
-    The handler may be blocked in a driver call that does not notice
-    cancellation. This middleware answers the client anyway and shuts
-    the database sockets that call is using.
-    """
-
-    def __init__(self, asgi_app: Callable[..., Awaitable[None]]) -> None:
-        self.asgi_app: Callable[..., Awaitable[None]] = asgi_app
-
-    async def __call__(self, scope: dict[str, object], receive: Any, send: Any) -> None:
-        if scope.get("type") != "http":
-            await self.asgi_app(scope, receive, send)
-            return
-        if os.environ.get("SENTICA_MODE", "").strip() != "production":
-            await self.asgi_app(scope, receive, send)
-            return
-        started = False
-
-        async def send_wrapper(message: dict[str, object]) -> None:
-            nonlocal started
-            if message.get("type") == "http.response.start":
-                started = True
-            await send(message)
-
-        async def _run() -> None:
-            await self.asgi_app(scope, receive, send_wrapper)
-
-        task: asyncio.Task[None] = asyncio.create_task(_run())
-        done, _pending = await asyncio.wait({task}, timeout=8)
-        if task in done:
-            error = task.exception()
-            if error is not None:
-                raise error
-            return
-        from src.sentica.db_connect import abort_checked_out_connections
-
-        abort_checked_out_connections()
-        task.cancel()
-        if started:
-            return
-        body = b'{"detail":"memory unavailable"}'
-        await send(
-            {
-                "type": "http.response.start",
-                "status": 503,
-                "headers": [
-                    (b"content-type", b"application/json"),
-                    (b"content-length", str(len(body)).encode()),
-                ],
-            }
-        )
-        await send({"type": "http.response.body", "body": body})
-
-
-app.add_middleware(_BoundRequest)

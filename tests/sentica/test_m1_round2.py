@@ -194,3 +194,132 @@ def test_production_without_password_files_loads(
     with pytest.raises(SenticaStartupError):
         monkeypatch.setenv("SENTICA_MODE", "nope")
         load_instance()
+
+
+def test_log_filter_hides_names_and_detail() -> None:
+    record = logging.LogRecord(
+        "test",
+        logging.ERROR,
+        __file__,
+        1,
+        "permission denied for workspace %s\nDETAIL: key %s",
+        ("acme-name", "acme-name"),
+        None,
+    )
+    assert ProductionLogFilter().filter(record)
+    message = record.getMessage()
+    assert "acme-name" not in message
+    assert "DETAIL:" not in message
+    access = logging.LogRecord(
+        "uvicorn.access",
+        logging.INFO,
+        __file__,
+        1,
+        "POST /v3/workspaces/%s/sessions/%s",
+        ("acme-name", "sess-name"),
+        None,
+    )
+    assert ProductionLogFilter().filter(access) is False
+
+
+def test_maintenance_timeout_defaults_to_120(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.db import maintenance_db_call_timeout
+
+    monkeypatch.delenv("SENTICA_DB_CALL_TIMEOUT_SECONDS", raising=False)
+    assert maintenance_db_call_timeout() == 120
+    monkeypatch.setenv("SENTICA_DB_CALL_TIMEOUT_SECONDS", "45")
+    assert maintenance_db_call_timeout() == 45
+
+
+def test_production_connect_args_include_connect_timeout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from src.sentica.db_connect import production_connect_args
+
+    _production(monkeypatch, tmp_path)
+    args = production_connect_args()
+    assert args["connect_timeout"]
+    assert args["sslmode"] == "verify-full"
+
+
+def test_install_certificate_reload_drops_the_old_connection(tmp_path: Path) -> None:
+    import asyncio
+    from types import SimpleNamespace
+    from typing import cast
+
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from src.sentica.db_connect import install_certificate_reload
+    from src.sentica.runtime import SenticaInstance
+
+    cert = tmp_path / "client.crt"
+    key = tmp_path / "client.key"
+    cert.write_bytes(b"cert-v1")
+    key.write_bytes(b"key-v1")
+    engine = create_async_engine(
+        os.environ["DB_CONNECTION_URI"], pool_size=1, max_overflow=0
+    )
+    instance = cast(
+        SenticaInstance, cast(object, SimpleNamespace(cert_path=cert, key_path=key))
+    )
+    install_certificate_reload(engine, instance)
+
+    async def _pid() -> int:
+        async with engine.connect() as conn:
+            value = await conn.scalar(text("select pg_backend_pid()"))
+        assert isinstance(value, int)
+        return value
+
+    async def _run() -> None:
+        first = await _pid()
+        cert.write_bytes(b"cert-v2")
+        key.write_bytes(b"key-v2")
+        second = await _pid()
+        assert first != second
+        await engine.dispose()
+
+    asyncio.run(_run())
+
+
+def test_slow_llm_chat_streams_fully(
+    client: object,
+    sample_data: tuple[models.Workspace, models.Peer],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+    from collections.abc import AsyncIterator
+
+    from starlette.testclient import TestClient
+
+    from src.db import BoundedSession, ReadSessionLocal, SessionLocal
+
+    assert isinstance(client, TestClient)
+    workspace, peer = sample_data
+    write_class = SessionLocal.class_
+    read_class = ReadSessionLocal.class_
+    SessionLocal.configure(class_=BoundedSession)
+    ReadSessionLocal.configure(class_=BoundedSession)
+
+    async def slow_stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        await asyncio.sleep(15)
+        yield "slow-llm-token"
+        yield " tail"
+
+    monkeypatch.setattr("src.routers.peers.agentic_chat_stream", slow_stream)
+    started = time.monotonic()
+    try:
+        with client.stream(
+            "POST",
+            f"/v3/workspaces/{workspace.name}/peers/{peer.name}/chat",
+            json={"query": "hello", "stream": True},
+        ) as response:
+            assert response.status_code == 200
+            body = response.read().decode()
+    finally:
+        SessionLocal.configure(class_=write_class)
+        ReadSessionLocal.configure(class_=read_class)
+    assert time.monotonic() - started >= 14
+    assert "slow-llm-token" in body
+    assert " tail" in body

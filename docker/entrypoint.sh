@@ -1,5 +1,6 @@
 #!/bin/sh
 # The image ENTRYPOINT. A CMD cannot skip this script.
+# Mode and the bind address are checked before any command, including the deriver.
 set -eu
 
 case "${SENTICA_MODE-}" in
@@ -23,10 +24,6 @@ if [ -s /secret/password ]; then
     unset redis_password
 fi
 
-if [ "$#" -gt 0 ]; then
-    exec "$@"
-fi
-
 if [ "${SENTICA_MODE}" = "production" ]; then
     if ! /app/.venv/bin/python -c 'import ipaddress, os, sys
 raw = os.environ.get("SENTICA_BIND_HOST", "").strip()
@@ -43,8 +40,12 @@ else
     BIND_HOST="${SENTICA_BIND_HOST:-0.0.0.0}"
 fi
 
+if [ "$#" -gt 0 ]; then
+    exec "$@"
+fi
+
 echo "Running database migrations..."
-/app/.venv/bin/python scripts/provision_db.py
+timeout 120 /app/.venv/bin/python scripts/provision_db.py
 
 echo "Starting API server..."
 exec /app/.venv/bin/fastapi run --host "$BIND_HOST" --workers "${API_WORKERS:-1}" src/main.py

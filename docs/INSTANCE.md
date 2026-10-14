@@ -81,10 +81,12 @@ The acceptance test does this itself:
 SENTICA_MODE=test uv run pytest tests/sentica/test_m1_stack.py -n0
 ```
 
-Postgres on that compose network accepts TCP only from the two PgBouncer
-addresses, and only as the matching tenant role. That allowlist is
-test-only. The instance environment does not contain a password. Do not
-publish the database port.
+Postgres on that compose network accepts TLS connections only from the
+two PgBouncer addresses, and only as the matching tenant role, using
+scram-sha-256. Each proxy's userlist holds that role's password. The
+instance environment does not contain a password. Each container mounts
+only its own certificate files. Do not publish the database port.
+Redis still runs as root, and the networks are not `internal`, until M9.
 
 Nothing in this stack writes memory content to the host disk. Postgres data,
 Redis data, `/tmp`, and the certificate directory are tmpfs. Queue payloads

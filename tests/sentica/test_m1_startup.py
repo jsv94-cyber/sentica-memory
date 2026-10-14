@@ -22,7 +22,6 @@ def _isolated_secret_files(  # pyright: ignore[reportUnusedFunction]
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("PGPASSFILE", raising=False)
-    monkeypatch.delenv("SENTICA_PRODUCTION_IMAGE_MARKER", raising=False)
 
 
 _PASSWORD_KEYS = (
@@ -232,10 +231,19 @@ def test_production_image_refuses_test_mode(
 ) -> None:
     marker = tmp_path / "production-image"
     marker.write_text("production\n", encoding="utf-8")
-    monkeypatch.setenv("SENTICA_PRODUCTION_IMAGE_MARKER", str(marker))
+    monkeypatch.setattr("src.sentica.runtime.PRODUCTION_IMAGE_MARKER", str(marker))
     monkeypatch.setenv("SENTICA_MODE", "test")
     with pytest.raises(SenticaStartupError, match="production image"):
         load_instance()
+
+
+def test_entrypoint_checks_mode_and_bind_before_exec() -> None:
+    text = (ROOT / "docker" / "entrypoint.sh").read_text(encoding="utf-8")
+    exec_at = text.index('exec "$@"')
+    assert text.index("SENTICA_MODE") < exec_at
+    assert text.index("SENTICA_BIND_HOST") < exec_at
+    assert "timeout 120" in text
+    assert text.index("timeout 120") > exec_at
 
 
 def test_config_toml_password_refuses(

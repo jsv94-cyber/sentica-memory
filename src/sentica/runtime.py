@@ -84,14 +84,6 @@ class SenticaInstance:
         return f"postgresql+psycopg://{user}@{host}:{self.proxy_port}/{self.db_name}"
 
 
-def production_image_marker() -> Path:
-    """Path of the file baked into the production image."""
-    override = os.environ.get("SENTICA_PRODUCTION_IMAGE_MARKER", "").strip()
-    if override:
-        return Path(override)
-    return Path(PRODUCTION_IMAGE_MARKER)
-
-
 def mode() -> str:
     """Return ``production`` or ``test``. Anything else refuses to start."""
     raw = os.environ.get("SENTICA_MODE")
@@ -106,7 +98,7 @@ def mode() -> str:
             + f"{selected!r} must be 'production' or 'test'"
         )
         raise SenticaStartupError(message)
-    if selected == TEST_MODE and production_image_marker().is_file():
+    if selected == TEST_MODE and Path(PRODUCTION_IMAGE_MARKER).is_file():
         raise SenticaStartupError(
             "Refusing to start: production image cannot run with SENTICA_MODE=test"
         )
@@ -121,7 +113,6 @@ def production_enabled() -> bool:
 def _fingerprint() -> tuple[tuple[str, str | None], ...]:
     names = (
         "SENTICA_MODE",
-        "SENTICA_PRODUCTION_IMAGE_MARKER",
         "PGPASSFILE",
         "HOME",
         "DB_SQL_DEBUG",
@@ -131,7 +122,13 @@ def _fingerprint() -> tuple[tuple[str, str | None], ...]:
         *REQUIRED_SETTINGS,
         *_PASSWORD_ENV,
     )
-    return tuple((name, os.environ.get(name)) for name in names)
+    marker = Path(PRODUCTION_IMAGE_MARKER)
+    try:
+        marker_state = str(marker.stat().st_mtime_ns)
+    except OSError:
+        marker_state = None
+    env = tuple((name, os.environ.get(name)) for name in names)
+    return (*env, ("production_image_marker", f"{marker}:{marker_state}"))
 
 
 def load_instance() -> SenticaInstance | None:

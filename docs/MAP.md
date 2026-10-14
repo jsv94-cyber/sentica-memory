@@ -2,25 +2,25 @@
 
 This map describes the tree pinned to upstream Honcho v3.3.0. Citations are
 `path:line` and name the line where the symbol is defined or the call is made.
-Public API routes are mounted under `/v3` at `src/main.py:213`.
+Public API routes are mounted under `/v3` at `src/main.py:218`.
 
 ## Database engine and sessions
 
-`src/db.py:74` builds one async SQLAlchemy engine from
+`src/db.py:75` builds one async SQLAlchemy engine from
 `settings.DB.CONNECTION_URI` (default in `src/config.py`, class `DBSettings`).
 The driver is psycopg. Pool size, overflow, recycle, and pre-ping come from
 `DBSettings`. `POOL_CLASS=null` selects `NullPool`.
 
 Two session factories share that engine:
 
-- `src/db.py:125` `SessionLocal` is the write session. It is lazy: the pool
+- `src/db.py:306` `SessionLocal` is the write session. It is lazy: the pool
   connection is checked out on the first statement, not at construction.
-- `src/db.py:137` sets a read engine with isolation level `AUTOCOMMIT`.
-  `src/db.py:143` `ReadSessionLocal` is for SELECT-only work. Writes through it
+- `src/db.py:318` sets a read engine with isolation level `AUTOCOMMIT`.
+  `src/db.py:324` `ReadSessionLocal` is for SELECT-only work. Writes through it
   commit immediately. Callers must not use it to mutate.
 
-`src/db.py:371` reads `settings.DB.SCHEMA` (default `public`) and
-`src/db.py:376` binds it to the declarative `Base`. Every ORM table lives in
+`src/db.py:552` reads `settings.DB.SCHEMA` (default `public`) and
+`src/db.py:557` binds it to the declarative `Base`. Every ORM table lives in
 that schema.
 
 Request and worker code opens sessions in `src/dependencies.py`:
@@ -30,7 +30,7 @@ Request and worker code opens sessions in `src/dependencies.py`:
 - `src/dependencies.py:57` `tracked_db` is the context manager for background
   work. `read_only=True` binds `ReadSessionLocal`.
 
-Migrations: `docker/entrypoint.sh:4` runs `scripts/provision_db.py:14`, which
+Migrations: `docker/entrypoint.sh:48` runs `scripts/provision_db.py:14`, which
 calls `src/migrate.py:1` (`python -m src.migrate`). Alembic's script location
 is `alembic.ini:6` (`migrations`). `migrations/env.py:14` imports `Base` so
 autogenerate sees the models. `database/init.sql:1` creates the `vector`
@@ -271,7 +271,7 @@ dream prompt builders. They are not separate files.
 ## Process split
 
 `src/main.py` is the API. It serves HTTP, enqueues work, and runs the
-dialectic tool loop inside the request. `src/main.py:227` `/health` returns
+dialectic tool loop inside the request. `src/main.py:260` `/health` returns
 `{"status": "ok"}`. Metrics are `/metrics`.
 
 `src/deriver/__main__.py` is the worker. It consumes the queue, summarizes,

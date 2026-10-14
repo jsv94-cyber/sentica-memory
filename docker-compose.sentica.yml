@@ -21,6 +21,8 @@ x-api-build: &api-build
   dockerfile: Dockerfile
   args:
     INSTALL_LANCEDB: "false"
+    SENTICA_UID: ${SENTICA_UID:-100}
+    SENTICA_GID: ${SENTICA_GID:-100}
 
 x-no-disk-logs: &no-disk-logs
   driver: none
@@ -43,24 +45,21 @@ services:
   database:
     image: pgvector/pgvector:pg15
     logging: *no-disk-logs
-    command:
-      [
-        "postgres",
-        "-c",
-        "max_connections=200",
-        "-c",
-        "hba_file=/etc/sentica/pg_hba.conf",
-      ]
+    entrypoint: ["/bin/bash", "/postgres-entry.sh"]
     environment:
       POSTGRES_DB: postgres
       POSTGRES_USER: postgres
       # The image refuses to boot without this. The mounted pg_hba.conf is
-      # what Postgres actually uses, and it is not trust-for-all.
+      # what Postgres actually uses. TCP is hostssl with scram-sha-256.
       POSTGRES_HOST_AUTH_METHOD: trust
     volumes:
       - ./database/init.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
       - ./docker/sentica/init-tenants.sql:/docker-entrypoint-initdb.d/10-tenants.sql:ro
+      - ./docker/sentica/20-passwords.sh:/docker-entrypoint-initdb.d/20-passwords.sh:ro
       - ./docker/sentica/pg_hba.conf:/etc/sentica/pg_hba.conf:ro
+      - ./docker/sentica/postgres-entry.sh:/postgres-entry.sh:ro
+      - ${SECRET_DIR}/tenant-a:/secrets/tenant-a:ro
+      - ${SECRET_DIR}/tenant-b:/secrets/tenant-b:ro
     tmpfs:
       - /var/lib/postgresql/data:size=1g
     networks:
@@ -75,17 +74,20 @@ services:
   pgbouncer-a:
     image: edoburu/pgbouncer:v1.24.1-p1
     logging: *no-disk-logs
-    entrypoint: ["/usr/bin/pgbouncer"]
-    command: ["/etc/pgbouncer/pgbouncer.ini"]
+    user: "0:0"
+    entrypoint: ["/bin/sh", "/pgbouncer-entry.sh"]
     depends_on:
       database:
         condition: service_healthy
     ports:
       - "127.0.0.1:${SENTICA_PROXY_A_PORT:-6433}:6432"
     volumes:
+      - ./docker/sentica/pgbouncer-entry.sh:/pgbouncer-entry.sh:ro
       - ./docker/sentica/pgbouncer-a.ini:/etc/pgbouncer/pgbouncer.ini:ro
-      - ./docker/sentica/userlist-a.txt:/etc/pgbouncer/userlist-a.txt:ro
-      - ${CERT_DIR}:/certs:ro
+      - ${SECRET_DIR}/userlist-a.txt:/in/userlist:ro
+      - ${CERT_DIR}/pgbouncer-a.crt:/in/server.crt:ro
+      - ${CERT_DIR}/pgbouncer-a.key:/in/server.key:ro
+      - ${CERT_DIR}/client-ca.crt:/certs/client-ca.crt:ro
     networks:
       db:
         ipv4_address: 172.28.12.13
@@ -100,17 +102,20 @@ services:
   pgbouncer-b:
     image: edoburu/pgbouncer:v1.24.1-p1
     logging: *no-disk-logs
-    entrypoint: ["/usr/bin/pgbouncer"]
-    command: ["/etc/pgbouncer/pgbouncer.ini"]
+    user: "0:0"
+    entrypoint: ["/bin/sh", "/pgbouncer-entry.sh"]
     depends_on:
       database:
         condition: service_healthy
     ports:
       - "127.0.0.1:${SENTICA_PROXY_B_PORT:-6434}:6432"
     volumes:
+      - ./docker/sentica/pgbouncer-entry.sh:/pgbouncer-entry.sh:ro
       - ./docker/sentica/pgbouncer-b.ini:/etc/pgbouncer/pgbouncer.ini:ro
-      - ./docker/sentica/userlist-b.txt:/etc/pgbouncer/userlist-b.txt:ro
-      - ${CERT_DIR}:/certs:ro
+      - ${SECRET_DIR}/userlist-b.txt:/in/userlist:ro
+      - ${CERT_DIR}/pgbouncer-b.crt:/in/server.crt:ro
+      - ${CERT_DIR}/pgbouncer-b.key:/in/server.key:ro
+      - ${CERT_DIR}/client-ca.crt:/certs/client-ca.crt:ro
     networks:
       db:
         ipv4_address: 172.28.12.14
@@ -194,7 +199,10 @@ services:
       SENTICA_REDIS_HOST: redis-a
     volumes:
       - redis-secret-a:/secret:ro
-      - ${CERT_DIR}:/certs:ro
+      - ${CERT_DIR}/ca.crt:/certs/ca.crt:ro
+      - ${CERT_DIR}/tenant_a.crt:/certs/tenant_a.crt:ro
+      - ${CERT_DIR}/tenant_a.key:/certs/tenant_a.key:ro
+      - ${CERT_DIR}/tenant-a.token.pub:/certs/tenant-a.token.pub:ro
     networks:
       net-a:
         ipv4_address: 172.28.10.10
@@ -237,7 +245,10 @@ services:
       SENTICA_REDIS_HOST: redis-b
     volumes:
       - redis-secret-b:/secret:ro
-      - ${CERT_DIR}:/certs:ro
+      - ${CERT_DIR}/ca.crt:/certs/ca.crt:ro
+      - ${CERT_DIR}/tenant_b.crt:/certs/tenant_b.crt:ro
+      - ${CERT_DIR}/tenant_b.key:/certs/tenant_b.key:ro
+      - ${CERT_DIR}/tenant-b.token.pub:/certs/tenant-b.token.pub:ro
     networks:
       net-b:
         ipv4_address: 172.28.11.10
@@ -284,7 +295,10 @@ services:
     restart: unless-stopped
     volumes:
       - redis-secret-a:/secret:ro
-      - ${CERT_DIR}:/certs:ro
+      - ${CERT_DIR}/ca.crt:/certs/ca.crt:ro
+      - ${CERT_DIR}/tenant_a.crt:/certs/tenant_a.crt:ro
+      - ${CERT_DIR}/tenant_a.key:/certs/tenant_a.key:ro
+      - ${CERT_DIR}/tenant-a.token.pub:/certs/tenant-a.token.pub:ro
     networks:
       - net-a
 
@@ -318,7 +332,10 @@ services:
     restart: unless-stopped
     volumes:
       - redis-secret-b:/secret:ro
-      - ${CERT_DIR}:/certs:ro
+      - ${CERT_DIR}/ca.crt:/certs/ca.crt:ro
+      - ${CERT_DIR}/tenant_b.crt:/certs/tenant_b.crt:ro
+      - ${CERT_DIR}/tenant_b.key:/certs/tenant_b.key:ro
+      - ${CERT_DIR}/tenant-b.token.pub:/certs/tenant-b.token.pub:ro
     networks:
       - net-b
 

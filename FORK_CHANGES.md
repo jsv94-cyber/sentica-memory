@@ -11,7 +11,7 @@ release v3.3.0 (`608aec8a928da13c540262ed980c569448fb53ab`).
 | `docs/MAP.md` | Map of the pinned runtime: database, auth, storage, queue, model calls, prompts. | M0 |
 | `docker-compose.yml` | Tracked local stack so `docker compose up` starts the API, deriver, Postgres with pgvector, and Redis. Redis persistence is off and its data directory is tmpfs. API and deriver `/tmp` are tmpfs. No LanceDB volume. Host ports default to 8000, 5432, and 6379 and can be moved with `SENTICA_API_PORT`, `SENTICA_POSTGRES_PORT`, and `SENTICA_REDIS_PORT`. `SENTICA_MODE=test` because the image defaults to production. Postgres `trust` auth on this file is test-only. | M0, M1, ground rule 5 |
 | `.gitignore` | Stop ignoring `/docker-compose.yml` and `/compose.yml` so the local stack can be committed. | M0 |
-| `.github/workflows/unittest.yml` | Run the upstream test suite on every pull request and every push to `main`. Removed path filters and the changes gate. The job sets `SENTICA_MODE=test`. A second job runs the two-instance proof and fails if that file collects zero tests. | M0, M1 |
+| `.github/workflows/unittest.yml` | Run the upstream test suite on every pull request and every push to `main`. Removed path filters and the changes gate. Both jobs set `SENTICA_MODE=test`. The suite job ignores the two-instance proof. A second job runs that proof and fails if it collects zero tests. | M0, M1 |
 | `.github/workflows/push-gcp-registry-prod.yml` | Manual dispatch only, and both jobs are `if: false`. Do not push to Plastic Labs GCP or call its production webhook. | Ground rule 2 |
 | `.github/workflows/push-gcp-registry-staging.yml` | Same as production, for the staging registry and webhook. | Ground rule 2 |
 | `.github/workflows/unified-tests.yml` | Manual dispatch only. Fly and AWS jobs are `if: false`. | Ground rule 2 |
@@ -29,7 +29,7 @@ release v3.3.0 (`608aec8a928da13c540262ed980c569448fb53ab`).
 | `migrations/env.py` | Pass the proxy TLS arguments into Alembic's own engine. Treat a privilege error creating `vector` as "already installed" so a non-superuser tenant role can migrate. | M1 |
 | `docker/entrypoint.sh` | Image entrypoint. Production requires an explicit bind address. A baked marker refuses `SENTICA_MODE=test`. | M1 |
 | `Dockerfile` | The runtime image sets `SENTICA_MODE=production`, bakes a production marker, and uses `ENTRYPOINT` with no `CMD`. | M1 |
-| `docker-compose.sentica.yml` | Local two-instance proof. Separate networks, pg_hba limited to the PgBouncers, per-instance Redis passwords on tmpfs, and a log driver that does not write to disk. | M1 |
+| `docker-compose.sentica.yml` | Local two-instance proof. Separate networks, hostssl scram from the PgBouncers only, per-file certificates, per-instance Redis passwords on tmpfs, and a log driver that does not write to disk. | M1 |
 | `.github/workflows/staticanalysis.yml` | The OpenAPI drift job sets `SENTICA_MODE=test` because it imports the app. | M1 |
 | `docker/sentica/` | PgBouncer config, pg_hba, Redis password entrypoint, and the SQL that confines each tenant role to `memory`. | M1 |
 | `scripts/sentica_test_ca.py` | Local test CA, 48-hour client certificates, and Ed25519 token keys. No real certificates. | M1 |

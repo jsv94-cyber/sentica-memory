@@ -1,7 +1,9 @@
 import asyncio
 import contextvars
 import logging
-from typing import Any
+import os
+import socket
+from typing import Any, cast
 
 from sqlalchemy import MetaData, event
 from sqlalchemy.ext.asyncio import (
@@ -15,7 +17,6 @@ from sqlalchemy.pool import NullPool, QueuePool
 from src.config import settings
 from src.sentica.db_connect import (
     apply_production_engine_args,
-    install_call_timeout,
     install_certificate_reload,
 )
 from src.sentica.log_policy import install_production_log_filter
@@ -80,41 +81,221 @@ engine = create_async_engine(
 
 if _sentica_instance is not None:
     install_certificate_reload(engine, _sentica_instance)
-    install_call_timeout(engine.sync_engine)
     install_production_log_filter()
+
+# API requests set this to 8 seconds. Deriver and maintenance leave it unset
+# and use SENTICA_DB_CALL_TIMEOUT_SECONDS, which defaults to 120.
+API_DB_CALL_TIMEOUT_SECONDS = 8.0
+db_call_timeout: contextvars.ContextVar[float | None] = contextvars.ContextVar(
+    "sentica_db_call_timeout", default=None
+)
+
+
+def maintenance_db_call_timeout() -> float:
+    """Bound for deriver and maintenance sessions. Defaults to 120 seconds."""
+    raw = os.environ.get("SENTICA_DB_CALL_TIMEOUT_SECONDS", "120").strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        return 120.0
+    if value <= 0:
+        return 120.0
+    return value
+
+
+def _session_call_timeout() -> float:
+    selected = db_call_timeout.get()
+    if selected is None:
+        return maintenance_db_call_timeout()
+    return selected
+
+
+def _fileno(dbapi_connection: Any) -> int | None:
+    current: Any = dbapi_connection
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        pgconn = getattr(current, "pgconn", None)
+        fileno = getattr(pgconn, "socket", None) if pgconn is not None else None
+        if isinstance(fileno, int) and fileno >= 0:
+            return fileno
+        nxt = getattr(current, "_connection", None)
+        if nxt is None:
+            nxt = getattr(current, "driver_connection", None)
+        current = nxt
+    return None
+
+
+# psycopg Ready.RW. The driver wait records this before it reads the socket.
+_DRIVER_READY_RW = 3
+
+
+def _wake_task_events(task: asyncio.Task[Any]) -> None:
+    seen: set[int] = set()
+
+    def visit(obj: Any, depth: int) -> None:
+        if obj is None or depth > 20 or id(obj) in seen:
+            return
+        seen.add(id(obj))
+        frame = getattr(obj, "cr_frame", None) or getattr(obj, "gr_frame", None)
+        if frame is not None and hasattr(frame, "f_locals"):
+            wakeup = frame.f_locals.get("wakeup")
+            if frame.f_code.co_name == "wait_conn_async" and callable(wakeup):
+                # A bare event wake reports "not ready", and the driver waits
+                # again. Report the socket ready so it sees the shutdown.
+                wakeup(_DRIVER_READY_RW)
+            for value in frame.f_locals.values():
+                if isinstance(value, asyncio.Event):
+                    value.set()
+            context = frame.f_locals.get("context")
+            if context is not None and context is not obj:
+                visit(context, depth + 1)
+        nxt = getattr(obj, "cr_await", None)
+        if nxt is not None and nxt is not obj:
+            visit(nxt, depth + 1)
+
+    visit(task.get_coro(), 0)
+
+
+def _shutdown_fileno(fileno: int) -> None:
+    try:
+        held = socket.socket(fileno=fileno)
+    except OSError:
+        return
+    try:
+        held.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        return
+    finally:
+        held.detach()
+
+
+def _filenos_in_task(task: asyncio.Task[Any]) -> list[int]:
+    """Sockets this call is blocked on, including a connect still in progress.
+
+    A paused proxy accepts TCP and then never answers. The session has no
+    connection yet, so the socket only exists in the driver wait frames.
+    """
+    found: list[int] = []
+    seen: set[int] = set()
+
+    def visit(obj: Any, depth: int) -> None:
+        if obj is None or depth > 20 or id(obj) in seen:
+            return
+        seen.add(id(obj))
+        frame = getattr(obj, "cr_frame", None) or getattr(obj, "gr_frame", None)
+        if frame is not None and hasattr(frame, "f_locals"):
+            filename = frame.f_code.co_filename
+            for key, value in frame.f_locals.items():
+                pgconn = getattr(value, "pgconn", None)
+                sock = getattr(pgconn, "socket", None) if pgconn is not None else None
+                if isinstance(sock, int) and sock >= 0:
+                    found.append(sock)
+                if (
+                    key == "fileno"
+                    and isinstance(value, int)
+                    and value >= 0
+                    and filename.endswith("waiting.py")
+                ):
+                    found.append(value)
+            context = frame.f_locals.get("context")
+            if context is not None and context is not obj:
+                visit(context, depth + 1)
+        nxt = getattr(obj, "cr_await", None)
+        if nxt is not None and nxt is not obj:
+            visit(nxt, depth + 1)
+
+    visit(task.get_coro(), 0)
+    return found
+
+
+def _stop_session_connection(session: AsyncSession) -> None:
+    """Close the socket for this session so a timed-out call cannot commit."""
+    sync = session.sync_session
+    try:
+        transaction = sync.get_transaction()
+    except Exception:
+        return
+    if transaction is None:
+        return
+    # ``SessionTransaction.connection`` is a method. The checked-out
+    # connections live on ``_connections``.
+    records = getattr(transaction, "_connections", None)
+    if not records:
+        return
+    seen: set[int] = set()
+    for record in records.values():
+        if not isinstance(record, tuple) or not record:
+            continue
+        connection = cast(Any, record[0])
+        if connection is None or id(connection) in seen:
+            continue
+        seen.add(id(connection))
+        fairy = getattr(connection, "_dbapi_connection", None)
+        if fairy is None:
+            continue
+        driver = getattr(fairy, "driver_connection", None)
+        fileno = _fileno(driver if driver is not None else fairy)
+        if fileno is None:
+            fileno = _fileno(fairy)
+        if fileno is None:
+            continue
+        _shutdown_fileno(fileno)
 
 
 class _BoundedSession(AsyncSession):
-    """Fail a database call that stays silent for 8 seconds.
+    """Bound one database call without bounding the whole request.
 
-    A paused proxy still acknowledges TCP, so keepalives and
-    tcp_user_timeout do not fire while the client waits to read. The
-    bound is inside this process and becomes "memory unavailable".
+    API requests use 8 seconds. A paused proxy still acknowledges TCP, so
+    the bound lives in this process. Deriver and maintenance sessions use
+    the longer configurable bound. The call returns even if the driver
+    does not notice cancellation, and the socket is closed so the
+    statement cannot commit later.
     """
 
+    async def _bounded(self, awaitable: Any) -> Any:
+        task: asyncio.Task[Any] = asyncio.create_task(awaitable)
+        done, _pending = await asyncio.wait({task}, timeout=_session_call_timeout())
+        if task in done:
+            return task.result()
+        # Close the socket, then let the driver call finish. Teardown
+        # rollback must not overlap a connection that is still opening.
+        _stop_session_connection(self)
+        # Do not cancel. Cancellation writes a cancel message the paused
+        # proxy never reads. Shut the socket down and tell the driver it is
+        # ready so the handshake observes the error instead of waiting again.
+        for _ in range(3):
+            for fileno in _filenos_in_task(task):
+                _shutdown_fileno(fileno)
+            _wake_task_events(task)
+            await asyncio.wait({task}, timeout=0.2)
+            if task.done():
+                break
+        if task.done() and not task.cancelled():
+            error = task.exception()
+            if error is not None:
+                raise TimeoutError from error
+        raise TimeoutError
+
     async def execute(self, statement: Any, *args: Any, **kwargs: Any) -> Any:
-        return await asyncio.wait_for(
-            super().execute(statement, *args, **kwargs), timeout=8
-        )
+        return await self._bounded(super().execute(statement, *args, **kwargs))
 
     async def scalar(self, statement: Any, *args: Any, **kwargs: Any) -> Any:
-        return await asyncio.wait_for(
-            super().scalar(statement, *args, **kwargs), timeout=8
-        )
+        return await self._bounded(super().scalar(statement, *args, **kwargs))
 
     async def scalars(self, statement: Any, *args: Any, **kwargs: Any) -> Any:
-        return await asyncio.wait_for(
-            super().scalars(statement, *args, **kwargs), timeout=8
-        )
+        return await self._bounded(super().scalars(statement, *args, **kwargs))
 
     async def commit(self) -> None:
-        await asyncio.wait_for(super().commit(), timeout=8)
+        await self._bounded(super().commit())
 
     async def flush(self, objects: Any = None) -> None:
-        await asyncio.wait_for(super().flush(objects), timeout=8)
+        await self._bounded(super().flush(objects))
 
 
 _session_class = _BoundedSession if _sentica_instance is not None else AsyncSession
+# Public name so tests can install the same bound the API uses.
+BoundedSession = _BoundedSession
 
 # A vanilla AsyncSession is lazy: it checks out a pooled connection on the first
 # DB-touching call (not at construction) and couples the checkout to the

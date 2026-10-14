@@ -1,7 +1,6 @@
 # M1 review summary
 
-PR #2, branch `m1-single-tenant`. The reviews below are of `987c6f2a`.
-Commit `46746649` closed the fail-open mode gap. This round closes the rest.
+PR #2, branch `m1-single-tenant`. Round 3 closes the list below. Do not merge.
 
 Jose's rulings, recorded in `PROGRESS.md`:
 
@@ -10,58 +9,45 @@ Jose's rulings, recorded in `PROGRESS.md`:
 - The M9 network sentence stays. The M1 proof stack isolates the database
   and Redis now. It does not wait for M9.
 
-## Already fixed in 46746649
+## Round 3
 
-| Finding | Fixed where | Test |
+| Item | Fixed where | Test |
 | --- | --- | --- |
-| B1, unset, empty, misspelled, and wrong-case `SENTICA_MODE` | `src/sentica/runtime.py:95` `mode()` | `test_rejected_modes_refuse` |
-| Image default `SENTICA_MODE=production` | `Dockerfile:43` | `test_dockerfile_defaults_to_production` |
-| CI and Compose set `test` explicitly | `.github/workflows/unittest.yml`, `docker-compose.yml` | `test_rejected_modes_refuse` |
-| Queue text stays in Postgres (Jose, this round) | `GOALS.md` ground rule 5 | no code change |
-| M9 network sentence | `GOALS.md` M9 | left in place |
+| CI stack job sets `SENTICA_MODE=test` | `.github/workflows/unittest.yml:100` | the job itself |
+| Proof image uid is the runner uid, so keys need no root chown | `Dockerfile:47` `SENTICA_UID` | `test_containers_cannot_read_another_tenant_key` |
+| Host log grep runs under `sudo -E` and must return 1 | `tests/sentica/test_m1_stack.py:774` | `test_stopped_stack_leaves_no_memory_on_disk` |
+| Full-suite job skips the proof file | `.github/workflows/unittest.yml:60` | the job itself |
+| `hostssl` scram-sha-256, password only in that proxy's userlist | `docker/sentica/pg_hba.conf:5`, `docker/sentica/pgbouncer-a.ini:2` | `test_pg_hba_rejects_trust_and_cross_tenant` |
+| `connect_timeout` on production connections | `src/sentica/db_connect.py:30` | `test_production_connect_args_include_connect_timeout` |
+| Provision wrapped in `timeout 120` after the mode and bind checks | `docker/entrypoint.sh:44` then `:48` | `test_entrypoint_checks_mode_and_bind_before_exec`, `test_migration_exits_when_proxy_is_paused`, `test_migration_exits_when_cert_is_revoked` |
+| Production access log disabled; names and `DETAIL` stripped | `src/main.py:104`, `src/sentica/log_policy.py:39` | `test_log_filter_hides_names_and_detail`, `test_database_error_canary_is_absent_from_logs` |
+| API database calls bound at 8s; deriver and maintenance default to 120s | `src/db.py:88`, `src/db.py:94`, `src/db.py:246` `_BoundedSession` | `test_revocation_rolls_back_and_reports_unavailable`, `test_maintenance_timeout_defaults_to_120`, `test_slow_llm_chat_streams_fully` |
+| Certificates mounted per file | `docker-compose.sentica.yml` api and deriver volumes | `test_containers_cannot_read_another_tenant_key` |
+| Each PgBouncer lists only its own database | `docker/sentica/pgbouncer-a.ini:2`, `docker/sentica/pgbouncer-b.ini:2` | `test_pg_hba_rejects_trust_and_cross_tenant` |
+| Cross-network probes by raw IP, and Redis `save` is empty | `tests/sentica/test_m1_stack.py:831`, `:847`, `:886` | `test_instances_cannot_reach_each_other` |
+| Representation rejection is in the work-unit source | `src/deriver/queue_manager.py:665` | `test_representation_rows_for_other_tenant_are_all_errored` |
+| No `SENTICA_PRODUCTION_IMAGE_MARKER` override; tests patch the constant | `src/sentica/runtime.py:20` | `test_production_image_refuses_test_mode` |
+| Certificate reload drops the old connection | `src/sentica/db_connect.py:85` | `test_install_certificate_reload_drops_the_old_connection` |
 
-## This round
+## Deferred to M9
 
-| Finding | Fixed where | Test |
-| --- | --- | --- |
-| B1, image `CMD` can skip the entrypoint | `Dockerfile:86` `ENTRYPOINT`, no `CMD` | `test_dockerfile_defaults_to_production` |
-| B1, production image accepts `SENTICA_MODE=test` | `Dockerfile:76` marker, `src/sentica/runtime.py:20`, `docker/entrypoint.sh` | `test_production_image_refuses_test_mode` |
-| B2, stack tests hidden or skipped | `tests/sentica/conftest.py` removed; `unittest.yml` job `test-m1-stack` fails on zero tests | the job itself |
-| B2, image publish before M9 | `docker-build.yml` and the other publish workflows `if: false` | workflow files |
-| B3, shared network, trust-for-all, open Redis | `docker-compose.sentica.yml` networks `db`, `net-a`, `net-b`; `docker/sentica/pg_hba.conf`; `docker/sentica/redis-entry.sh` | `test_instances_cannot_reach_each_other` |
-| Review 1 M3, peer cards in Redis | Redis requires a per-instance password on tmpfs and is not reachable from the other instance. The cache stays on. | `test_instances_cannot_reach_each_other` |
-| Major, tenant role owns the database | `docker/sentica/init-tenants.sql` | `test_tokens_and_isolation` (SQLSTATE `42501`) |
-| Major, tenant is PgBouncer admin | `docker/sentica/pgbouncer-a.ini` `sentica_operator` | `test_tenant_is_not_pgbouncer_admin` |
-| Major, reconciler and webhook inserts unstamped | `src/sentica/queue.py` `install_queue_stamp`, called from `src/models.py` | `test_reconciler_and_webhook_complete`, `test_orm_and_core_inserts_stamp_tenant` |
-| Major, representation check after message load, only first row errored | `src/deriver/queue_manager.py` `reject_foreign_queue_rows` | `test_representation_rows_for_other_tenant_are_all_errored` |
-| Major, certificate swap does not prove the new cert | `src/sentica/db_connect.py` fingerprint of cert and key | `test_certificate_swap_has_no_failed_requests` |
-| Major, pool recycle untested | `src/db.py` `capped_pool_recycle`, compose `DB_POOL_RECYCLE=2` | `test_pool_recycle_is_short`, `test_short_pool_recycle_opens_a_new_connection` |
-| Major, cross-tenant auth accepts any error | `docker/sentica/pg_hba.conf` | `test_tokens_and_isolation` |
-| Major, token walk uses the wrong key and skips hidden routes | `tests/sentica/test_m1_stack.py` | `test_tokens_and_isolation` |
-| Major, revocation is a raw transaction | API batch write during `docker pause` | `test_revocation_rolls_back_and_reports_unavailable` |
-| Major, deriver resume untested | queue row processed once after the proxy returns | `test_deriver_resumes_a_pending_row_once` |
-| Major, disk check ignores logs | compose logging driver `none` | `test_stopped_stack_leaves_no_memory_on_disk`, `test_database_error_canary_is_absent_from_logs` |
-| Major, hang when the proxy is paused | `src/main.py` `_BoundRequest` (8s), `src/sentica/db_connect.py` socket shutdown, TCP keepalives, role `statement_timeout` | `test_revocation_rolls_back_and_reports_unavailable` |
-| Major, SQL parameters and exception text in logs | `src/db.py` `hide_parameters=True`, `src/sentica/log_policy.py` | `test_log_filter_hides_parameters_and_work_unit_keys`, `test_database_error_canary_is_absent_from_logs` |
-| Major, traces, SQL debug, local metrics, workspace labels | `src/sentica/runtime.py:232` `_refuse_unsafe_runtime` | `test_unsafe_production_settings_refuse` |
-| Major, deriver metrics on `0.0.0.0` | `src/deriver/__main__.py` binds `SENTICA_BIND_HOST` | startup refusal covers metrics; bind is the deriver entry |
-| Minor, algorithm from the header, no `aud` | `src/sentica/tokens.py` | `test_none_hs256_and_algorithm_mismatch_are_forged` |
-| Minor, key parsed per request | `src/sentica/runtime.py:137` caches the instance and the key | `test_malformed_token_key_refuses`, `test_production_without_password_files_loads` |
-| Minor, startup tests skip some settings | `REQUIRED_SETTINGS` | `test_each_required_setting_refuses` |
-| Minor, bind host `private` | `src/sentica/runtime.py:209` | `test_bind_host_must_be_an_address` |
-| Minor, password check is env only | `src/sentica/runtime.py:266`, `.dockerignore` excludes `config.toml` | `test_config_toml_password_refuses`, `test_pgpass_file_refuses`, `test_home_pgpass_refuses` |
-| Minor, cert and key rotated apart | `certificate_fingerprint` hashes both; rename-into-place in `docs/INSTANCE.md` | `test_rename_into_place_changes_the_fingerprint` |
+- Redis still runs as root (`user: "0:0"` in `docker-compose.sentica.yml`).
+- The compose networks are not `internal: true`.
+
+Database isolation is not deferred. `pg_hba` and the three networks are in
+force in this proof.
 
 ## Test counts
 
-`uv run pytest` on 2026-10-12, `SENTICA_MODE=test`, local Postgres on
-port 5433: **3207 passed, 53 skipped, 1 failed** (188.28s). The failure
-was a stale `docs/MAP.md` line for `create_async_engine`. That citation
-now points at `src/db.py:74`, and `test_map_citations_resolve` passed on
-its own. The 53 skips are the same upstream files as M0. The stack file
-is collected, not skipped. It contributed 14 passes inside that run.
+`uv run pytest --ignore=tests/sentica/test_m1_stack.py` on 2026-10-14,
+`SENTICA_MODE=test`, local Postgres on port 5433: **3200 passed, 53 skipped,
+0 failed** (133.55s).
 
-`uv run pytest tests/sentica/test_m1_stack.py -n0`: **14 passed** (102.66s).
+`uv run pytest tests/sentica/test_m1_stack.py -n0`: **18 passed, 0 skipped,
+0 failed** (104.34s).
+
+The 53 skips in the full suite are the same upstream files as M0. The fork
+adds no skip.
 
 ## Not changed
 
@@ -70,3 +56,5 @@ is collected, not skipped. It contributed 14 passes inside that run.
 - Refusal counts stay in process until M9.
 - `docker-compose.yml` still uses the development password with
   `SENTICA_MODE=test`. The production image refuses that mode.
+- `POSTGRES_HOST_AUTH_METHOD=trust` stays because the official image will
+  not boot without it. The mounted `hba_file` is the rule Postgres uses.
