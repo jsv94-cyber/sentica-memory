@@ -19,7 +19,9 @@ behavior is removed.
    refresh, get, merge, connection, and run_sync, plus execute, scalar,
    scalars, commit, and flush. The embedding validator uses the maintenance
    bound and closes the connection on timeout. Test:
-   `test_stalled_rollback_connection_and_run_sync_time_out`.
+   `tests/sentica/test_m2_carryover.py:64`
+   `test_bounded_session_method_times_out`, one case for each of the eight
+   methods.
 4. Cancellation. `src/db.py:286` `_stop_and_wake` stops the session
    connection, wakes the inner wait, and the caller re-raises. Test:
    `test_cancelled_caller_stops_the_session_connection`.
@@ -67,9 +69,16 @@ behavior is removed.
   the proxy, including `42501` on `ALTER`, `DROP POLICY`, and `CREATE TABLE`.
 - Transaction. `src/db.py:358` opens reads with `BEGIN READ ONLY`.
   `src/sentica/workspace_scope.py:147` always uses transaction-local
-  `set_config`. A workspace change inside an open transaction is refused.
-  The cached value is cleared on commit, rollback, checkin, and savepoint
-  rollback. Test: `test_workspace_setting_is_not_inherited`.
+  `set_config`. A workspace change inside an open transaction is refused
+  (`tests/sentica/test_m2_fix.py:557`
+  `test_workspace_change_inside_an_open_transaction_is_refused`).
+  Savepoint rollback clears the cache
+  (`tests/sentica/test_m2_fix.py:583`
+  `test_savepoint_rollback_clears_the_workspace_cache`).
+  Rollback clears the setting, not only commit
+  (`tests/sentica/test_m2_fix.py:610`
+  `test_workspace_setting_is_cleared_on_rollback`).
+  `test_workspace_setting_is_not_inherited` covers the committed case.
 - Startup. `docker/entrypoint.sh:50` does not migrate. In production it
   compares the stored revision to the code's head and refuses to start when
   the schema is behind. `docker/migrate-entrypoint.sh:41` is the only
@@ -91,7 +100,10 @@ behavior is removed.
 - Merge. Search, session context, peer context, peer chat, workspace chat,
   representation, and peer cards loop the allowed workspaces, query each,
   and set `workspace_id` on the returned item. Messages already serialize
-  `workspace_name` as `workspace_id`.
+  `workspace_name` as `workspace_id`. Scope sessions are resolved inside
+  each workspace (`tests/sentica/test_m2_partitions.py:1227`
+  `test_search_scope_is_resolved_per_workspace`). Workspace A's scope
+  membership would hide B's canary if that membership were reused for B.
 - Cache. `src/crud/peer.py:39` includes `workspace_name` in the peer cache
   key. The card is stored on that peer row. Test:
   `test_cached_card_for_r_is_not_served_without_r`.
@@ -101,13 +113,24 @@ behavior is removed.
 - Vectors. `src/sentica/runtime.py:272` allows only `pgvector` in
   production. Test: `test_production_refuses_external_vector_stores`,
   including `turbopuffer`.
-- Leak. `test_canary_written_only_to_r_stays_out_of_other_workspaces` writes
-  a canary only in R. The mock sits under `honcho_llm_call`, on
-  `execute_completion` and `execute_stream`, and the real tool loop searches
-  for the canary and for R's names. The canary is absent from A's responses.
-  `test_harness_flags_the_canary_when_the_request_includes_its_workspace`
+- Leak. `tests/sentica/test_m2_partitions.py:742`
+  `test_canary_written_only_to_r_stays_out_of_other_workspaces` writes a
+  canary only in R. The harness records `execute_completion`,
+  `execute_stream` (`capture:stream:`), the deriver's `honcho_llm_call`
+  (`capture:deriver:`), `simple_batch_embed`
+  (`capture:simple_batch_embed:`), `batch_embed` (`capture:batch_embed:`),
+  and the induction specialist (`capture:induction:`). The conclusions list
+  is posted and recorded (`capture:conclusions:`). The assertion is
+  `tests/sentica/test_m2_partitions.py:1102`. The canary is absent from A's
+  responses. `test_harness_flags_the_canary_when_the_request_includes_its_workspace`
   is the positive control. `test_membership_noop_lets_the_canary_through`
   shows a no-op membership check returns the canary.
+  `tests/sentica/test_m2_partitions.py:1339`
+  `test_disabled_rls_reaches_the_leak_harness` has the migration role
+  disable row-level security on `documents`. The harness then selects
+  document text with the token's workspace set and no workspace predicate,
+  sees the canary, and restores the policy. The token does not include the
+  canary's workspace. `test_runtime_role_lockdown` does not cover this.
 
 ## Tables without a workspace column
 
@@ -123,6 +146,41 @@ behavior is removed.
 
 `test_runtime_role_cannot_cross_workspaces` fails if a table with
 `workspace_name` is missing from the policy.
+
+## Runtime-role job
+
+`test-m2-rls` runs every test in `tests/sentica/test_m2_*.py` against the
+schema built by alembic. The app engine connects as `tenant_rls`. That
+role is not a superuser and has no `BYPASSRLS`. `SENTICA_MODE=production`.
+Tokens are signed with the job's Ed25519 key.
+
+`tests/conftest.py:157` `pytest_collection_finish` fails the job when the
+collected count is below the number of `test_` functions in those files.
+`tests/conftest.py:395` `app_engine_is_runtime_role` checks `current_user`
+on the app engine for the session. `tests/sentica/test_m2_rls.py:68`
+`test_rls_job_collects_every_m2_file` and `tests/sentica/test_m2_rls.py:94`
+`test_app_engine_is_the_runtime_role` fail if either check regresses.
+
+Local run on 2026-10-14: **47 passed, 0 skipped, 0 failed** (11.20s).
+That includes the leak test, the positive control, the membership test,
+workspace-setting inheritance, `WITH CHECK` inside
+`test_runtime_role_lockdown`, multi-workspace auth, metrics scoping, dream
+binding, and the eight `test_bounded_session_method_times_out` cases.
+
+The unit suite does not collect `test_runtime_role_lockdown` or
+`test_app_engine_is_the_runtime_role` (`tests/conftest.py:130`). They need
+the migrated role, so they are omitted from collection rather than skipped.
+On `d2f22e8e`, `tests/sentica/test_m2_rls.py:80` was
+`pytest.skip("runs in the test-m2-rls job")` inside
+`test_runtime_role_lockdown`. That skip is removed. The unit suite is back
+to 53 skips: the upstream live-llm tests and two pagination cases.
+
+No isolation test requires a superuser. The create_all branch of
+`test_runtime_role_cannot_cross_workspaces`
+(`tests/sentica/test_m2_partitions.py:51`) skips only when that database's
+`current_user` is not a superuser, and only after the runtime-role branch
+has returned. CI's unit database user is the postgres superuser, so that
+skip does not fire. The job runs the same proof as `tenant_rls`.
 
 ## Deferred to M9
 

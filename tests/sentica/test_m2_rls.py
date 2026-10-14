@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import os
 import uuid
+from pathlib import Path
 
 import psycopg
 import pytest
@@ -11,18 +11,9 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from src.sentica.tokens import verify_sentica_token
+from tests.sentica.rls_job import ddl_dsn, defined_m2_tests, rls_job, runtime_dsn
 
-
-def _runtime_dsn() -> str | None:
-    if os.environ.get("SENTICA_RLS_JOB") != "1":
-        return None
-    user = os.environ.get("SENTICA_DB_USER", "")
-    host = os.environ.get("SENTICA_DB_PROXY_HOST", "")
-    port = os.environ.get("SENTICA_DB_PROXY_PORT", "")
-    name = os.environ.get("SENTICA_DB_NAME", "")
-    if not all((user, host, port, name)):
-        return None
-    return f"postgresql://{user}@{host}:{port}/{name}"
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_signed_token_names_its_workspaces(tmp_path: object) -> None:
@@ -74,10 +65,54 @@ def test_signed_token_names_its_workspaces(tmp_path: object) -> None:
     assert params.workspaces == ["left", "right"]
 
 
+def test_rls_job_collects_every_m2_file(request: pytest.FixtureRequest) -> None:
+    """The job's collected count covers every test function in test_m2_*.py."""
+    if rls_job():
+        collected = [
+            item.nodeid
+            for item in request.session.items
+            if "tests/sentica/test_m2_" in item.nodeid
+        ]
+        assert len(collected) >= defined_m2_tests()
+        return
+    workflow = (ROOT / ".github" / "workflows" / "unittest.yml").read_text(
+        encoding="utf-8"
+    )
+    proof = workflow.split("Run the runtime-role proof", 1)[1]
+    for name in (
+        "test_m2_rls.py",
+        "test_m2_fix.py",
+        "test_m2_partitions.py",
+        "test_m2_carryover.py",
+    ):
+        assert name in proof
+    assert "test-m2-rls collected" in (ROOT / "tests" / "conftest.py").read_text(
+        encoding="utf-8"
+    )
+
+
+async def test_app_engine_is_the_runtime_role() -> None:
+    """current_user on the app engine is the runtime role, not a superuser."""
+    from sqlalchemy import text
+
+    from src.db import engine
+
+    async with engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT current_user, rolsuper, rolbypassrls "
+                    + "FROM pg_roles WHERE rolname = current_user"
+                )
+            )
+        ).one()
+    assert row[0] == "tenant_rls"
+    assert row[1] is False
+    assert row[2] is False
+
+
 def test_runtime_role_lockdown() -> None:
-    dsn = _runtime_dsn()
-    if dsn is None:
-        pytest.skip("runs in the test-m2-rls job")
+    dsn = runtime_dsn()
     with psycopg.connect(dsn, autocommit=True) as conn:
         who = conn.execute(
             "SELECT current_user, rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user"
@@ -146,7 +181,7 @@ def test_runtime_role_lockdown() -> None:
         visible = conn.execute("SELECT workspace_name FROM memory.peers").fetchall()
         conn.execute("COMMIT")
         assert visible == [(left,)]
-        ddl = dsn.replace("tenant_rls@", "tenant_rls_ddl@", 1)
+        ddl = ddl_dsn()
         with psycopg.connect(ddl, autocommit=True) as owner:
             owner.execute("ALTER TABLE memory.peers DISABLE ROW LEVEL SECURITY")
         leaked = conn.execute(

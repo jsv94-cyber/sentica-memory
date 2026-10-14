@@ -203,6 +203,8 @@ jobs:
           REVOKE INSERT, UPDATE, DELETE ON memory.alembic_version FROM tenant_rls;
           GRANT SELECT ON memory.alembic_version TO tenant_rls;
           GRANT EXECUTE ON FUNCTION memory.sentica_pending_counts() TO tenant_rls;
+          ALTER ROLE tenant_rls SET search_path TO memory, public;
+          ALTER ROLE tenant_rls_ddl SET search_path TO memory, public;
           SQL
 
       - name: Run the runtime-role proof
@@ -218,17 +220,59 @@ jobs:
           SENTICA_DB_PROXY_PORT: "5432"
           SENTICA_DB_USER: tenant_rls
           SENTICA_DB_NAME: tenant_rls
-          SENTICA_CLIENT_CERT_PATH: /tmp/rls-certs/client.crt
-          SENTICA_CLIENT_KEY_PATH: /tmp/rls-certs/client.key
+          SENTICA_CLIENT_CERT_PATH: /tmp/rls-certs/tenant_rls.crt
+          SENTICA_CLIENT_KEY_PATH: /tmp/rls-certs/tenant_rls.key
           SENTICA_PROXY_CA_PATH: /tmp/rls-certs/ca.crt
-          SENTICA_TOKEN_PUBLIC_KEY_PATH: /tmp/rls-certs/token.pub
+          SENTICA_TOKEN_PUBLIC_KEY_PATH: /tmp/rls-certs/tenant-rls.token.pub
+          SENTICA_TOKEN_SIGNING_KEY: /tmp/rls-certs/tenant-rls.token.key
           SENTICA_TOKEN_ISSUER: sentica-rls-issuer
           SENTICA_BIND_HOST: 127.0.0.1
+          SENTICA_RLS_ADMIN_DSN: postgresql+psycopg://postgres@localhost:5432/tenant_rls
+          HOME: /tmp/rls-home
         run: |
           set -eu
-          mkdir -p /tmp/rls-certs
-          uv run python -c 'from cryptography.hazmat.primitives import serialization; from cryptography.hazmat.primitives.asymmetric import ed25519; from pathlib import Path; key = ed25519.Ed25519PrivateKey.generate(); Path("/tmp/rls-certs/token.pub").write_bytes(key.public_key().public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)); Path("/tmp/rls-certs/client.crt").write_text("placeholder\n"); Path("/tmp/rls-certs/client.key").write_text("placeholder\n"); Path("/tmp/rls-certs/ca.crt").write_text("placeholder\n")'
-          uv run pytest tests/sentica/test_m2_rls.py -n0 --tb=short
+          mkdir -p /tmp/rls-certs /tmp/rls-home
+          uv run python - <<'PY'
+          import importlib.util
+          from pathlib import Path
+          spec = importlib.util.spec_from_file_location(
+              "sentica_test_ca", "scripts/sentica_test_ca.py"
+          )
+          if spec is None or spec.loader is None:
+              raise SystemExit("cannot load scripts/sentica_test_ca.py")
+          mod = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(mod)
+          out = Path("/tmp/rls-certs")
+          ca_key = mod.rsa.generate_private_key(public_exponent=65537, key_size=2048)
+          ca_name = mod._name("sentica-rls-ca")
+          ca_cert = mod._signed(ca_name, ca_name, ca_key, ca_key, is_ca=True, san=None)
+          mod._write_key(out / "ca.key", ca_key)
+          mod._write_cert(out / "ca.crt", ca_cert)
+          mod._client(out, ca_key, ca_name, "tenant_rls")
+          mod._server(out, ca_key, ca_name, "localhost")
+          mod._token_key(out, "tenant-rls")
+          PY
+          chmod 600 /tmp/rls-certs/tenant_rls.key /tmp/rls-certs/tenant-rls.token.key \
+            /tmp/rls-certs/localhost.key
+          cid=$(docker ps -q --filter publish=5432 | head -n 1)
+          test -n "$cid"
+          docker cp /tmp/rls-certs/localhost.crt "$cid":/tmp/server.crt
+          docker cp /tmp/rls-certs/localhost.key "$cid":/tmp/server.key
+          docker exec "$cid" bash -c 'cp /tmp/server.crt /var/lib/postgresql/data/server.crt && cp /tmp/server.key /var/lib/postgresql/data/server.key && chown postgres:postgres /var/lib/postgresql/data/server.crt /var/lib/postgresql/data/server.key && chmod 600 /var/lib/postgresql/data/server.key /var/lib/postgresql/data/server.crt'
+          docker exec -u postgres "$cid" psql -c "ALTER SYSTEM SET ssl=on"
+          docker restart "$cid"
+          ready=0
+          for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
+            if docker exec "$cid" pg_isready -q; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          test "$ready" = 1
+          uv run pytest tests/sentica/test_m2_rls.py tests/sentica/test_m2_fix.py \
+            tests/sentica/test_m2_partitions.py tests/sentica/test_m2_carryover.py \
+            -n0 -v --tb=short
 
   # Status check for branch protection rules
   # This job always runs and reports success only if all required jobs pass

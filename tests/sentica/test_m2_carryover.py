@@ -48,7 +48,21 @@ def test_workflows_pin_ubuntu_2404_and_node24_actions() -> None:
     assert all(seen.values())
 
 
-def test_stalled_rollback_connection_and_run_sync_time_out() -> None:
+_BOUNDED_METHODS = (
+    "rollback",
+    "close",
+    "delete",
+    "refresh",
+    "get",
+    "merge",
+    "connection",
+    "run_sync",
+)
+
+
+@pytest.mark.parametrize("method_name", _BOUNDED_METHODS)
+def test_bounded_session_method_times_out(method_name: str) -> None:
+    """Each bounded session method times out on its own."""
     import asyncio
     import time
 
@@ -60,23 +74,23 @@ def test_stalled_rollback_connection_and_run_sync_time_out() -> None:
         del self
         await asyncio.sleep(30)
 
-    async def _check(name: str) -> None:
+    async def _check() -> None:
         session = BoundedSession()
         started = time.monotonic()
         with pytest.raises(TimeoutError):
-            if name == "rollback":
+            if method_name == "rollback":
                 await session.rollback()
-            elif name == "close":
+            elif method_name == "close":
                 await session.close()
-            elif name == "delete":
+            elif method_name == "delete":
                 await session.delete(object())
-            elif name == "refresh":
+            elif method_name == "refresh":
                 await session.refresh(object())
-            elif name == "get":
+            elif method_name == "get":
                 await session.get(object, 1)
-            elif name == "merge":
+            elif method_name == "merge":
                 await session.merge(object())
-            elif name == "connection":
+            elif method_name == "connection":
                 await session.connection()
             else:
 
@@ -88,27 +102,12 @@ def test_stalled_rollback_connection_and_run_sync_time_out() -> None:
 
     async def _run() -> None:
         token = db_call_timeout.set(0.25)
-        originals = {
-            name: getattr(AsyncSession, name)
-            for name in (
-                "rollback",
-                "close",
-                "delete",
-                "refresh",
-                "get",
-                "merge",
-                "connection",
-                "run_sync",
-            )
-        }
+        original = getattr(AsyncSession, method_name)
+        setattr(AsyncSession, method_name, stall)
         try:
-            for name, original in originals.items():
-                setattr(AsyncSession, name, stall)
-                await _check(name)
-                setattr(AsyncSession, name, original)
+            await _check()
         finally:
-            for name, original in originals.items():
-                setattr(AsyncSession, name, original)
+            setattr(AsyncSession, method_name, original)
             db_call_timeout.reset(token)
 
     asyncio.run(_run())

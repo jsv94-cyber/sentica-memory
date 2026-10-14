@@ -125,10 +125,26 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     )
 
 
+# These talk to the migrated runtime role. Collecting them in the unit suite
+# would skip or fail. The test-m2-rls job is the only place they run.
+_RLS_JOB_ONLY = frozenset(
+    {
+        "test_runtime_role_lockdown",
+        "test_app_engine_is_the_runtime_role",
+    }
+)
+
+
 def pytest_collection_modifyitems(
     config: pytest.Config,
     items: list[pytest.Item],
 ) -> None:
+    if os.environ.get("SENTICA_RLS_JOB") != "1":
+        items[:] = [
+            item
+            for item in items
+            if getattr(item, "originalname", item.name) not in _RLS_JOB_ONLY
+        ]
     if config.getoption("--live-llm"):
         return
 
@@ -136,6 +152,26 @@ def pytest_collection_modifyitems(
     for item in items:
         if _LIVE_LLM_MARKER in item.keywords:
             item.add_marker(skip_live)
+
+
+def pytest_collection_finish(session: pytest.Session) -> None:
+    """Fail the runtime-role job when it collects fewer tests than the files define."""
+    if os.environ.get("SENTICA_RLS_JOB") != "1":
+        return
+    from tests.sentica.rls_job import defined_m2_tests
+
+    expected = defined_m2_tests()
+    collected = sum(
+        1 for item in session.items if "tests/sentica/test_m2_" in item.nodeid
+    )
+    if collected < expected:
+        pytest.exit(
+            "test-m2-rls collected "
+            + str(collected)
+            + " tests from tests/sentica/test_m2_*.py; those files define "
+            + str(expected),
+            returncode=1,
+        )
 
 
 _RUN_ID_ENV_VAR = "HONCHO_TEST_RUN_ID"
@@ -339,12 +375,55 @@ async def _clear_all_tables(engine: AsyncEngine) -> None:
         return
 
     statement = "; ".join(f"DELETE FROM {name}" for name in table_names)
+    admin = os.environ.get("SENTICA_RLS_ADMIN_DSN", "")
+    if admin and os.environ.get("SENTICA_RLS_JOB") == "1":
+        # The runtime role cannot see another workspace's rows. Cleanup uses
+        # the superuser so the next test starts empty. Tests themselves use
+        # the app engine.
+        sync = create_engine(admin)
+        try:
+            with sync.begin() as conn:
+                conn.exec_driver_sql(statement)
+        finally:
+            sync.dispose()
+        return
     async with engine.begin() as conn:
         await conn.exec_driver_sql(statement)
 
 
+@pytest_asyncio.fixture(scope="session", autouse=True)
+async def app_engine_is_runtime_role():
+    """The production app engine is the runtime role for the whole RLS job."""
+    if os.environ.get("SENTICA_RLS_JOB") != "1":
+        yield
+        return
+    from src.db import engine as app_engine
+
+    async with app_engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT current_user, rolsuper, rolbypassrls "
+                    + "FROM pg_roles WHERE rolname = current_user"
+                )
+            )
+        ).one()
+    user = os.environ.get("SENTICA_DB_USER", "")
+    if row[0] != user or bool(row[1]) or bool(row[2]):
+        raise RuntimeError(
+            "app engine current_user must be the runtime role "
+            + "without superuser or BYPASSRLS"
+        )
+    yield
+
+
 @pytest_asyncio.fixture(scope="session")
 async def db_engine(worker_id: str):
+    if os.environ.get("SENTICA_RLS_JOB") == "1":
+        from src.db import engine as app_engine
+
+        yield app_engine
+        return
     test_db_url = _get_test_db_url(worker_id)
     create_test_database(test_db_url)
     engine = await setup_test_database(test_db_url)
@@ -456,7 +535,17 @@ async def client(
         )
 
     async def override_get_db():
-        yield db_session
+        if os.environ.get("SENTICA_RLS_JOB") == "1":
+            from src.db import SessionLocal
+
+            session = SessionLocal()
+            try:
+                yield session
+            finally:
+                await session.rollback()
+                await session.close()
+        else:
+            yield db_session
 
     app.dependency_overrides[get_db] = override_get_db
     # Read-only routes use get_read_db (AUTOCOMMIT engine) in production; in

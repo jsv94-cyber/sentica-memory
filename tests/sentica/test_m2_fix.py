@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import math
-import os
 import uuid
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 import psycopg
 import pytest
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from src.exceptions import AuthenticationException
 from src.sentica.runtime import SenticaStartupError, db_call_timeout_seconds
@@ -30,15 +31,9 @@ def _exec(conn: Any, query: str, params: tuple[Any, ...] = ()) -> Any:
 
 
 def _sync_dsn(worker_id: str) -> str:
-    from sqlalchemy.engine.url import make_url
+    from tests.sentica.rls_job import sync_dsn
 
-    run_id = os.environ.get("HONCHO_TEST_RUN_ID", "local")
-    suffix = "" if worker_id == "master" else f"_{worker_id}"
-    url = make_url(os.environ["DB_CONNECTION_URI"]).set(
-        drivername="postgresql",
-        database=f"test_db_{run_id}{suffix}",
-    )
-    return url.render_as_string(hide_password=False)
+    return sync_dsn(worker_id)
 
 
 def test_ambiguous_workspace_claims_are_refused() -> None:
@@ -95,7 +90,7 @@ def test_data_migration_updates_each_workspace(worker_id: str) -> None:
     right = "b" + uuid.uuid4().hex[:20]
     sync = _sync_dsn(worker_id)
     url = sync.replace("postgresql://", "postgresql+psycopg://", 1)
-    with psycopg.connect(sync, autocommit=True) as conn:
+    with psycopg.connect(sync) as conn:
         for name, public_id in (
             (left, "l" + uuid.uuid4().hex[:20]),
             (right, "r" + uuid.uuid4().hex[:20]),
@@ -105,9 +100,14 @@ def test_data_migration_updates_each_workspace(worker_id: str) -> None:
                 (public_id, name),
             )
             conn.execute(
+                "SELECT set_config('sentica.workspace', %s, true)",
+                (name,),
+            )
+            conn.execute(
                 "INSERT INTO peers (id, name, workspace_name) VALUES (%s, %s, %s)",
                 ("p" + uuid.uuid4().hex[:20], "peer", name),
             )
+            conn.commit()
         schema = conn.execute("SELECT current_schema()").fetchone()
         assert schema is not None
     engine = create_engine(url)
@@ -120,17 +120,30 @@ def test_data_migration_updates_each_workspace(worker_id: str) -> None:
             + "WHERE name = 'peer' AND workspace_name = "
             + "current_setting('sentica.workspace', true)",
         )
-    with psycopg.connect(sync, autocommit=True) as conn:
-        rows = conn.execute(
-            "SELECT workspace_name, internal_metadata->>'seen' FROM peers "
-            + "WHERE workspace_name IN (%s, %s) ORDER BY workspace_name",
-            (left, right),
-        ).fetchall()
+    with psycopg.connect(sync) as conn:
+        rows: list[Any] = []
+        for name in (left, right):
+            conn.execute(
+                "SELECT set_config('sentica.workspace', %s, true)",
+                (name,),
+            )
+            row = conn.execute(
+                "SELECT workspace_name, internal_metadata->>'seen' FROM peers "
+                + "WHERE workspace_name = %s",
+                (name,),
+            ).fetchone()
+            rows.append(row)
+            conn.commit()
         assert rows == [(left, left), (right, right)]
-        conn.execute(
-            "DELETE FROM peers WHERE workspace_name IN (%s, %s)", (left, right)
-        )
+        for name in (left, right):
+            conn.execute(
+                "SELECT set_config('sentica.workspace', %s, true)",
+                (name,),
+            )
+            conn.execute("DELETE FROM peers WHERE workspace_name = %s", (name,))
+            conn.commit()
         conn.execute("DELETE FROM workspaces WHERE name IN (%s, %s)", (left, right))
+        conn.commit()
 
 
 def test_queue_workspace_name_is_required(worker_id: str) -> None:
@@ -144,10 +157,46 @@ def test_queue_workspace_name_is_required(worker_id: str) -> None:
         )
 
 
+def _revision_check_on_migrated_schema() -> None:
+    """The runtime role can read the revision. The ddl role writes it."""
+    from sqlalchemy import create_engine
+
+    from src.sentica.schema_revision import assert_revision, head_revision
+    from tests.sentica.rls_job import ddl_dsn, runtime_sqlalchemy_url
+
+    head = head_revision()
+    url = runtime_sqlalchemy_url()
+    with psycopg.connect(ddl_dsn(), autocommit=True) as owner:
+        owner.execute("UPDATE memory.alembic_version SET version_num = 'not-the-head'")
+    engine = create_engine(url)
+    try:
+        with (
+            engine.connect() as conn,
+            pytest.raises(SenticaStartupError, match="schema revision is behind"),
+        ):
+            assert_revision(conn, "memory")
+    finally:
+        engine.dispose()
+        with psycopg.connect(ddl_dsn(), autocommit=True) as owner:
+            owner.execute(
+                "UPDATE memory.alembic_version SET version_num = %s",
+                (head,),
+            )
+    engine = create_engine(url)
+    with engine.connect() as conn:
+        assert_revision(conn, "memory")
+    engine.dispose()
+
+
 async def test_workspace_setting_is_not_inherited(
     worker_id: str, db_session: object
 ) -> None:
     """After a transaction bound to A commits, the next one sees no rows."""
+    from tests.sentica.rls_job import rls_job
+
+    if rls_job():
+        await _setting_not_inherited_as_runtime()
+        return
     del db_session
     import src.sentica.workspace_scope as scope
     from src.sentica.workspace_scope import reset_workspace, workspace_policy_sql
@@ -217,6 +266,11 @@ async def test_workspace_setting_is_not_inherited(
 
 
 def test_revision_check_refuses_a_stale_schema(worker_id: str) -> None:
+    from tests.sentica.rls_job import rls_job
+
+    if rls_job():
+        _revision_check_on_migrated_schema()
+        return
     from sqlalchemy import create_engine
 
     from src.sentica.schema_revision import assert_revision, head_revision
@@ -347,3 +401,226 @@ async def test_execute_dream_and_delayed_dream_bind_the_workspace(
     )
     assert seen[0] == "left-ws"
     assert "right-ws" in seen
+
+
+class _Peers:
+    """Two peers and an engine whose listener installs sentica.workspace."""
+
+    def __init__(
+        self,
+        engine: AsyncEngine,
+        left: str,
+        right: str,
+        role: str | None,
+    ) -> None:
+        self.engine: AsyncEngine = engine
+        self.left: str = left
+        self.right: str = right
+        self.role: str | None = role
+
+
+@asynccontextmanager
+async def _isolated_peers(worker_id: str) -> AsyncGenerator[_Peers]:
+    """Peers in two workspaces, visible only through the workspace setting."""
+    import src.sentica.workspace_scope as scope
+    from src.sentica.workspace_scope import workspace_policy_sql
+    from tests.sentica.rls_job import rls_job, runtime_dsn
+
+    left = "a" + uuid.uuid4().hex[:20]
+    right = "b" + uuid.uuid4().hex[:20]
+    if rls_job():
+        from src.db import engine as app_engine
+
+        with psycopg.connect(runtime_dsn()) as conn:
+            for name in (left, right):
+                conn.execute(
+                    "INSERT INTO workspaces (id, name) VALUES (%s, %s)",
+                    ("w" + uuid.uuid4().hex[:20], name),
+                )
+                conn.execute(
+                    "SELECT set_config('sentica.workspace', %s, true)",
+                    (name,),
+                )
+                conn.execute(
+                    "INSERT INTO peers (id, name, workspace_name) "
+                    + "VALUES (%s, %s, %s)",
+                    ("p" + uuid.uuid4().hex[:20], name, name),
+                )
+                conn.commit()
+        try:
+            yield _Peers(app_engine, left, right, None)
+        finally:
+            with psycopg.connect(runtime_dsn()) as conn:
+                for name in (left, right):
+                    conn.execute(
+                        "SELECT set_config('sentica.workspace', %s, true)",
+                        (name,),
+                    )
+                    conn.execute(
+                        "DELETE FROM peers WHERE workspace_name = %s",
+                        (name,),
+                    )
+                    conn.commit()
+                conn.execute(
+                    "DELETE FROM workspaces WHERE name IN (%s, %s)",
+                    (left, right),
+                )
+                conn.commit()
+        return
+
+    runtime = "inh" + uuid.uuid4().hex[:8]
+    sync = _sync_dsn(worker_id)
+    schema = "public"
+    with psycopg.connect(sync, autocommit=True) as conn:
+        _exec(conn, "CREATE ROLE " + runtime + " NOLOGIN NOBYPASSRLS")
+        current = conn.execute("SELECT current_schema()").fetchone()
+        assert current is not None
+        schema = str(current[0])
+        for name in (left, right):
+            conn.execute(
+                "INSERT INTO workspaces (id, name) VALUES (%s, %s)",
+                ("w" + uuid.uuid4().hex[:20], name),
+            )
+            conn.execute(
+                "INSERT INTO peers (id, name, workspace_name) VALUES (%s, %s, %s)",
+                ("p" + uuid.uuid4().hex[:20], name, name),
+            )
+        _exec(conn, workspace_policy_sql(schema, "peers"))
+        _exec(conn, 'GRANT SELECT ON "' + schema + '"."peers" TO ' + runtime)
+    url = sync.replace("postgresql://", "postgresql+psycopg://", 1)
+    engine = create_async_engine(url)
+    scope._installed = False  # pyright: ignore[reportPrivateUsage]
+    scope.install_workspace_scope(engine)
+    try:
+        yield _Peers(engine, left, right, runtime)
+    finally:
+        await engine.dispose()
+        with psycopg.connect(sync, autocommit=True) as conn:
+            _exec(
+                conn,
+                'DROP POLICY IF EXISTS sentica_workspace ON "' + schema + '"."peers"',
+            )
+            _exec(
+                conn, 'ALTER TABLE "' + schema + '"."peers" DISABLE ROW LEVEL SECURITY'
+            )
+            conn.execute(
+                "DELETE FROM peers WHERE workspace_name IN (%s, %s)",
+                (left, right),
+            )
+            conn.execute(
+                "DELETE FROM workspaces WHERE name IN (%s, %s)",
+                (left, right),
+            )
+            _exec(conn, "DROP OWNED BY " + runtime)
+            _exec(conn, "DROP ROLE " + runtime)
+
+
+async def _use_runtime(conn: Any, role: str | None) -> None:
+    if role is not None:
+        await conn.execute(text("SET ROLE " + role))
+
+
+async def _setting_not_inherited_as_runtime() -> None:
+    from src.sentica.workspace_scope import reset_workspace, set_workspace
+
+    async with _isolated_peers("master") as peers, peers.engine.connect() as conn:
+        held = set_workspace(peers.left)
+        await _use_runtime(conn, peers.role)
+        count = await conn.scalar(text("SELECT count(*) FROM peers"))
+        await conn.commit()
+        reset_workspace(held)
+        later = await conn.scalar(text("SELECT count(*) FROM peers"))
+        await conn.commit()
+        assert count == 1
+        assert later == 0
+        held = set_workspace(peers.left)
+        await conn.execute(text("SELECT 1"))
+        reset_workspace(held)
+        with pytest.raises(RuntimeError, match="open transaction"):
+            changed = set_workspace(peers.right)
+            try:
+                await conn.execute(text("SELECT 1"))
+            finally:
+                reset_workspace(changed)
+        await conn.rollback()
+        again = set_workspace(peers.left)
+        await conn.execute(text("SELECT 1"))
+        nested = await conn.begin_nested()
+        await nested.rollback()
+        reset_workspace(again)
+        switched = set_workspace(peers.right)
+        await conn.execute(text("SELECT 1"))
+        reset_workspace(switched)
+        await conn.rollback()
+
+
+async def test_workspace_change_inside_an_open_transaction_is_refused(
+    worker_id: str,
+) -> None:
+    """Item 6: a second workspace cannot be installed mid-transaction."""
+    from src.sentica.workspace_scope import reset_workspace, set_workspace
+
+    async with _isolated_peers(worker_id) as peers:
+        held = set_workspace(peers.left)
+        try:
+            async with peers.engine.connect() as conn:
+                await _use_runtime(conn, peers.role)
+                await conn.execute(text("SELECT 1"))
+                reset_workspace(held)
+                held = None
+                with pytest.raises(RuntimeError, match="open transaction"):
+                    changed = set_workspace(peers.right)
+                    try:
+                        await conn.execute(text("SELECT 1"))
+                    finally:
+                        reset_workspace(changed)
+                await conn.rollback()
+        finally:
+            if held is not None:
+                reset_workspace(held)
+
+
+async def test_savepoint_rollback_clears_the_workspace_cache(
+    worker_id: str,
+) -> None:
+    """Item 6: rolling back a savepoint lets the next statement change workspace."""
+    from src.sentica.workspace_scope import reset_workspace, set_workspace
+
+    async with _isolated_peers(worker_id) as peers:
+        held = set_workspace(peers.left)
+        switched = None
+        try:
+            async with peers.engine.connect() as conn:
+                await _use_runtime(conn, peers.role)
+                await conn.execute(text("SELECT 1"))
+                nested = await conn.begin_nested()
+                await nested.rollback()
+                reset_workspace(held)
+                held = None
+                switched = set_workspace(peers.right)
+                await conn.execute(text("SELECT 1"))
+                await conn.rollback()
+        finally:
+            if switched is not None:
+                reset_workspace(switched)
+            if held is not None:
+                reset_workspace(held)
+
+
+async def test_workspace_setting_is_cleared_on_rollback(worker_id: str) -> None:
+    """Item 19: rollback drops the cached workspace, not only commit."""
+    from src.sentica.workspace_scope import reset_workspace, set_workspace
+
+    async with _isolated_peers(worker_id) as peers:
+        held = set_workspace(peers.left)
+        try:
+            async with peers.engine.connect() as conn:
+                await _use_runtime(conn, peers.role)
+                count = await conn.scalar(text("SELECT count(*) FROM peers"))
+                assert count == 1
+                await conn.rollback()
+                await _use_runtime(conn, peers.role)
+                again = await conn.scalar(text("SELECT count(*) FROM peers"))
+                assert again == 1
+        finally:
+            reset_workspace(held)
