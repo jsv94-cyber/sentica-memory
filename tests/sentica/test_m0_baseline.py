@@ -97,6 +97,7 @@ def test_new_docs_have_no_em_dash() -> None:
         "NOTICE",
         "FORK_CHANGES.md",
         "PROGRESS.md",
+        "docs/CONFIG.md",
         "docker-compose.yml",
         "docker-compose.sentica.yml",
         ".review/M1-summary.md",

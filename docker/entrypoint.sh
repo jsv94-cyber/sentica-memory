@@ -40,12 +40,31 @@ else
     BIND_HOST="${SENTICA_BIND_HOST:-0.0.0.0}"
 fi
 
+migration_timeout="${SENTICA_MIGRATION_TIMEOUT_SECONDS:-360}"
+lock_wait="${DB_MIGRATION_LOCK_WAIT_SECONDS:-300}"
+case "$migration_timeout" in
+    ''|*[!0-9]*)
+        echo "Refusing to start: SENTICA_MIGRATION_TIMEOUT_SECONDS must be an integer" >&2
+        exit 1
+        ;;
+esac
+case "$lock_wait" in
+    ''|*[!0-9]*)
+        echo "Refusing to start: DB_MIGRATION_LOCK_WAIT_SECONDS must be an integer" >&2
+        exit 1
+        ;;
+esac
+if [ "$migration_timeout" -le "$lock_wait" ]; then
+    echo "Refusing to start: SENTICA_MIGRATION_TIMEOUT_SECONDS must be greater than MIGRATION_LOCK_WAIT_SECONDS" >&2
+    exit 1
+fi
+
 if [ "$#" -gt 0 ]; then
     exec "$@"
 fi
 
 echo "Running database migrations..."
-timeout 120 /app/.venv/bin/python scripts/provision_db.py
+timeout "$migration_timeout" /app/.venv/bin/python scripts/provision_db.py
 
 echo "Starting API server..."
 exec /app/.venv/bin/fastapi run --host "$BIND_HOST" --workers "${API_WORKERS:-1}" src/main.py

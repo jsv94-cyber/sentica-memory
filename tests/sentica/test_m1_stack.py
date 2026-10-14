@@ -1319,15 +1319,25 @@ def test_migration_exits_when_proxy_is_paused(stack: Path) -> None:
     started = time.monotonic()
     try:
         result = _compose(
-            ["run", "--no-deps", "--rm", "-T", "api-a"],
+            [
+                "run",
+                "--no-deps",
+                "--rm",
+                "-T",
+                "-e",
+                "DB_MIGRATION_LOCK_WAIT_SECONDS=2",
+                "-e",
+                "SENTICA_MIGRATION_TIMEOUT_SECONDS=8",
+                "api-a",
+            ],
             check=False,
-            timeout=150,
+            timeout=40,
         )
     finally:
         _compose(["unpause", "pgbouncer-a"], check=False)
     output = result.stdout + result.stderr
     assert result.returncode != 0, output[-2000:]
-    assert time.monotonic() - started < 140
+    assert time.monotonic() - started < 25
     assert "Starting API server" not in output
 
 

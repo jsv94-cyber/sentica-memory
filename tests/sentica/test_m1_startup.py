@@ -242,8 +242,36 @@ def test_entrypoint_checks_mode_and_bind_before_exec() -> None:
     exec_at = text.index('exec "$@"')
     assert text.index("SENTICA_MODE") < exec_at
     assert text.index("SENTICA_BIND_HOST") < exec_at
-    assert "timeout 120" in text
-    assert text.index("timeout 120") > exec_at
+    assert text.index("SENTICA_MIGRATION_TIMEOUT_SECONDS") < exec_at
+    assert text.index("MIGRATION_LOCK_WAIT_SECONDS") < exec_at
+    assert "timeout 120" not in text
+    assert text.index("provision_db.py") > exec_at
+    assert 'timeout "$migration_timeout"' in text
+    env = os.environ.copy()
+    env["SENTICA_MODE"] = "test"
+    env["SENTICA_MIGRATION_TIMEOUT_SECONDS"] = "300"
+    env["DB_MIGRATION_LOCK_WAIT_SECONDS"] = "300"
+    refused = subprocess.run(
+        ["sh", str(ROOT / "docker" / "entrypoint.sh"), "true"],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert refused.returncode != 0
+    assert "MIGRATION_LOCK_WAIT_SECONDS" in refused.stderr
+    env["SENTICA_MIGRATION_TIMEOUT_SECONDS"] = "8"
+    env["DB_MIGRATION_LOCK_WAIT_SECONDS"] = "2"
+    allowed = subprocess.run(
+        ["sh", str(ROOT / "docker" / "entrypoint.sh"), "true"],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert allowed.returncode == 0, allowed.stderr
 
 
 def test_config_toml_password_refuses(
