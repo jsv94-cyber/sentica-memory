@@ -272,15 +272,23 @@ class _BoundedSession(AsyncSession):
 
     async def _bounded(self, awaitable: Any) -> Any:
         task: asyncio.Task[Any] = asyncio.create_task(awaitable)
-        done, _pending = await asyncio.wait({task}, timeout=_session_call_timeout())
+        try:
+            done, _pending = await asyncio.wait({task}, timeout=_session_call_timeout())
+        except asyncio.CancelledError:
+            await self._stop_and_wake(task)
+            raise
         if task in done:
             return task.result()
-        # Close the socket, then let the driver call finish. Teardown
-        # rollback must not overlap a connection that is still opening.
+        await self._stop_and_wake(task)
+        if task.done() and not task.cancelled():
+            error = task.exception()
+            if error is not None:
+                raise TimeoutError from error
+        raise TimeoutError
+
+    async def _stop_and_wake(self, task: asyncio.Task[Any]) -> None:
+        """Stop this session's socket and let the inner call finish."""
         _stop_session_connection(self)
-        # Do not cancel. Cancellation writes a cancel message the paused
-        # proxy never reads. Shut the socket down and tell the driver it is
-        # ready so the handshake observes the error instead of waiting again.
         for _ in range(3):
             for fileno in _filenos_in_task(task):
                 _shutdown_fileno(fileno)
@@ -288,11 +296,6 @@ class _BoundedSession(AsyncSession):
             await asyncio.wait({task}, timeout=0.2)
             if task.done():
                 break
-        if task.done() and not task.cancelled():
-            error = task.exception()
-            if error is not None:
-                raise TimeoutError from error
-        raise TimeoutError
 
     async def execute(self, statement: Any, *args: Any, **kwargs: Any) -> Any:
         return await self._bounded(super().execute(statement, *args, **kwargs))

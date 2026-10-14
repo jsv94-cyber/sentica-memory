@@ -59,7 +59,11 @@ def test_stalled_rollback_connection_and_run_sync_time_out() -> None:
             elif name == "connection":
                 await session.connection()
             else:
-                await session.run_sync(lambda _sync: None)
+
+                def _sync_fn(_sync: object) -> None:
+                    return None
+
+                await session.run_sync(_sync_fn)
         assert time.monotonic() - started < 2
 
     async def _run() -> None:
@@ -77,6 +81,59 @@ def test_stalled_rollback_connection_and_run_sync_time_out() -> None:
             for name, original in originals.items():
                 setattr(AsyncSession, name, original)
             db_call_timeout.reset(token)
+
+    asyncio.run(_run())
+
+
+def test_cancelled_caller_stops_the_session_connection() -> None:
+    import asyncio
+    import time
+    from typing import Any
+
+    from src import db as db_module
+
+    stopped: list[object] = []
+    original_stop = db_module._stop_session_connection  # pyright: ignore[reportPrivateUsage]
+
+    def _spy(session: Any) -> None:
+        stopped.append(session)
+        original_stop(session)
+
+    async def _never() -> None:
+        gate = asyncio.Event()
+        await gate.wait()
+
+    async def _outer(session: Any) -> None:
+        await session._bounded(_never())
+
+    async def _run() -> None:
+        created: list[asyncio.Task[Any]] = []
+        original_create = asyncio.create_task
+
+        def _wrap(coro: Any, *args: Any, **kwargs: Any) -> asyncio.Task[Any]:
+            task: asyncio.Task[Any] = original_create(coro, *args, **kwargs)
+            created.append(task)
+            return task
+
+        db_module._stop_session_connection = _spy  # pyright: ignore[reportPrivateUsage]
+        asyncio.create_task = _wrap  # type: ignore[method-assign, assignment]
+        try:
+            session = db_module.BoundedSession()
+            outer = asyncio.create_task(_outer(session))
+            await asyncio.sleep(0.05)
+            inner = next(task for task in created if task is not outer)
+            outer.cancel()
+            started = time.monotonic()
+            with pytest.raises(asyncio.CancelledError):
+                await outer
+            assert time.monotonic() - started < 0.5
+            assert inner.done()
+            assert stopped == [session]
+        finally:
+            asyncio.create_task = original_create  # type: ignore[method-assign]
+            db_module._stop_session_connection = (  # pyright: ignore[reportPrivateUsage]
+                original_stop
+            )
 
     asyncio.run(_run())
 
