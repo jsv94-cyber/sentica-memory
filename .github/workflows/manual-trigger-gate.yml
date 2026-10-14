@@ -35,7 +35,7 @@ jobs:
     if: >-
       (inputs.allow-workflow-dispatch && github.event_name == 'workflow_dispatch') ||
       (github.event_name == 'pull_request' && github.event.label.name == inputs.label)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     outputs:
@@ -67,7 +67,7 @@ jobs:
   remove-label:
     name: Remove trigger label
     if: github.event_name == 'pull_request' && github.event.label.name == inputs.label
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       pull-requests: write
     steps:

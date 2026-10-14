@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   test-python:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     services:
       database:
@@ -33,16 +33,16 @@ jobs:
           --health-retries 5
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v2
+        uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
 
       - name: "Set up Python"
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version-file: ".python-version"
 
@@ -95,7 +95,7 @@ jobs:
           SUMMARY_MODEL: test
 
   test-m1-stack:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     services:
       database:
         image: pgvector/pgvector:pg15
@@ -117,16 +117,16 @@ jobs:
       AUTH_USE_AUTH: "false"
       SENTRY_ENABLED: "false"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v2
+        uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
 
       - name: "Set up Python"
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version-file: ".python-version"
 
@@ -146,7 +146,7 @@ jobs:
   # Status check for branch protection rules
   # This job always runs and reports success only if all required jobs pass
   test-status:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [test-python, test-m1-stack]
     if: always()
     steps:

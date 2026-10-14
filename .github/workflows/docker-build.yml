@@ -16,7 +16,7 @@ jobs:
     # Nothing is published until M9. The workflow stays in the tree so the
     # upstream file is still recognizable.
     if: false
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       id-token: write
       packages: write
@@ -24,7 +24,7 @@ jobs:
       attestations: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3.3.0
         with:
