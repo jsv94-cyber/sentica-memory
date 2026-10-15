@@ -1118,14 +1118,18 @@ async def test_canary_written_only_to_r_stays_out_of_other_workspaces(
         )
 
     mock_llm_call_functions["short_summary"].side_effect = _short_summary
-    await summarize_if_needed(
-        left,
-        "s1",
-        message_id=left_message.id,
-        message_seq_in_session=20,
-        message_public_id=left_message.public_id,
-        configuration=configuration,
-    )
+    bound = set_workspace(left)
+    try:
+        await summarize_if_needed(
+            left,
+            "s1",
+            message_id=left_message.id,
+            message_seq_in_session=20,
+            message_public_id=left_message.public_id,
+            configuration=configuration,
+        )
+    finally:
+        reset_workspace(bound)
     streamed = client.post(
         f"/v3/workspaces/{left}/peers/p1/chat",
         json={"query": "stream the canary", "stream": True},

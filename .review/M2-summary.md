@@ -110,7 +110,7 @@ behavior is removed.
   representation, and peer cards loop the allowed workspaces, query each,
   and set `workspace_id` on the returned item. Messages already serialize
   `workspace_name` as `workspace_id`. Scope sessions are resolved inside
-  each workspace (`tests/sentica/test_m2_partitions.py:1296`
+  each workspace (`tests/sentica/test_m2_partitions.py:1350`
   `test_search_scope_is_resolved_per_workspace`). Workspace A's scope
   membership would hide B's canary if that membership were reused for B.
 - Cache. `src/crud/peer.py:39` includes `workspace_name` in the peer cache
@@ -129,29 +129,29 @@ behavior is removed.
   Each captured path has its own counter, incremented only inside that
   path's mock: deriver, `simple_batch_embed`, induction, deduction, stream,
   conclusions, dialectic, and summarizer. `batch_embed` is recorded if it
-  is called. `tests/sentica/test_m2_partitions.py:1212` asserts the other
+  is called. `tests/sentica/test_m2_partitions.py:1216` asserts the other
   counters are greater than zero, and `:1216` requires at least two
   deduction calls and two induction calls. The deriver capture contains
   the posted text `local hello` (`:1219`). The scripted model issues
   search tool calls for the canary and R's names on the first round of
-  every chat. `tests/sentica/test_m2_partitions.py:1209` asserts the
+  every chat. `tests/sentica/test_m2_partitions.py:1213` asserts the
   tool-round count equals the number of chats, and that each tool result
   reached the next model call. Deduction and induction are mocked at
   `src.llm.executor.execute_completion`
   (`tests/sentica/test_m2_partitions.py:1023`), below their tool loops, so
-  those tool calls run (`tests/sentica/test_m2_partitions.py:1181` and
-  `:1188`). Deriver exceptions are not swallowed. The canary is absent
+  those tool calls run (`tests/sentica/test_m2_partitions.py:1185` and
+  `:1192`). Deriver exceptions are not swallowed. The canary is absent
   from A's responses.
   `test_harness_flags_the_canary_when_the_request_includes_its_workspace`
   is the positive control. `test_membership_noop_lets_the_canary_through`
   shows a no-op membership check returns the canary. Two API proofs:
-  `tests/sentica/test_m2_partitions.py:1792`
+  `tests/sentica/test_m2_partitions.py:1847`
   `test_crud_filter_removed_rls_still_hides_the_canary` removes the CRUD
   workspace filter on messages while row-level security stays on, and the
-  leak test stays clean. `tests/sentica/test_m2_partitions.py:1802`
+  leak test stays clean. `tests/sentica/test_m2_partitions.py:1857`
   `test_crud_filter_removed_disabled_rls_shows_the_canary` does the same
   after the migration role disables that table's row-level security, and
-  the harness sees the canary. `tests/sentica/test_m2_partitions.py:1522`
+  the harness sees the canary. `tests/sentica/test_m2_partitions.py:1576`
   `test_body_workspaces_outside_the_token_are_refused` returns 401 for
   search, chat, representation, card, and context when the body names a
   workspace the token does not allow, including a peer-scoped member of
@@ -210,15 +210,15 @@ restores row-level security on `peers` in `finally` after
 ## Round 2
 
 - Peer cards open one read transaction per target workspace
-  (`src/routers/peers.py:693`). `tests/sentica/test_m2_partitions.py:1353`
+  (`src/routers/peers.py:693`). `tests/sentica/test_m2_partitions.py:1407`
   `test_cold_cache_returns_each_peer_card` returns both cards from a cold
   cache.
 - Due dreams are listed and enqueued per workspace
   (`src/backlog.py:155`, `src/backlog.py:210`).
-  `tests/sentica/test_m2_rls.py:526`
+  `tests/sentica/test_m2_rls.py:529`
   `test_due_dream_is_reported_and_triggered` runs as the runtime role.
 - The reconciler gate enqueues one row per workspace that needs the task.
-  `tests/sentica/test_m2_rls.py:370`
+  `tests/sentica/test_m2_rls.py:373`
   `test_reconciler_gate_enqueues_one_row_per_workspace` covers
   `sync_vectors`, a backfill, and cleanup.
 - A representation read error on the read-only engine rolls the transaction
@@ -260,7 +260,7 @@ restores row-level security on `peers` in `finally` after
   `simple_batch_embed` is spied (`tests/sentica/test_m2_partitions.py:1006`)
   and does not call `batch_embed`. A scrub of a tool argument named `text`
   still leaves a content block visible
-  (`tests/sentica/test_m2_partitions.py:1227`).
+  (`tests/sentica/test_m2_partitions.py:1231`).
 - Production startup refuses the local dummy OpenAI key
   (`src/sentica/runtime.py:282`). The stack embedding service is
   `docker/sentica/fake_embeddings.py`.
@@ -268,22 +268,22 @@ restores row-level security on `peers` in `finally` after
   `tests/sentica/test_m1_startup.py:356` cover the refusal and the
   deterministic non-zero vectors.
 - `src/sentica/workspace_scope.py:203` `remove_workspace_scope` drops the
-  per-test listeners. `tests/sentica/test_m2_rls.py:690`
+  per-test listeners. `tests/sentica/test_m2_rls.py:693`
   `test_later_test_has_no_workspace_guard` changes the workspace inside
   one transaction after those listeners are gone.
 - One workspace is processed and the other stays pending:
-  `tests/sentica/test_m2_rls.py:721`
+  `tests/sentica/test_m2_rls.py:724`
   `test_sync_vectors_leaves_the_other_workspace`,
-  `tests/sentica/test_m2_rls.py:797`
+  `tests/sentica/test_m2_rls.py:800`
   `test_cleanup_leaves_the_other_workspace`, and
-  `tests/sentica/test_m2_rls.py:865`
+  `tests/sentica/test_m2_rls.py:868`
   `test_backfill_leaves_the_other_workspace`.
 - `tests/sentica/test_m2_fix.py:825`
   `test_claim_loop_uses_the_queue_counts_function` reads only the queue
   counts function. `tests/sentica/test_m2_fix.py:850`
   `test_migration_refuses_a_role_that_does_not_end_in_ddl` fails the
   migration when the role name does not end in `_ddl`.
-  `tests/sentica/test_m2_rls.py:252` checks `has_function_privilege` for
+  `tests/sentica/test_m2_rls.py:255` checks `has_function_privilege` for
   both functions. `src/reconciler/backfill.py:156` sets the backfill gauge
   from `pending_backfills`. `src/routers/deriver_metrics.py:49` scopes
   dreams due to the token's workspaces.

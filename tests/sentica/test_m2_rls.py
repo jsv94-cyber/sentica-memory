@@ -239,7 +239,10 @@ def test_runtime_role_lockdown() -> None:
         import os
 
         runtime_role = os.environ["SENTICA_DB_USER"]
-        with psycopg.connect(ddl, autocommit=True) as owner:
+        admin = os.environ["SENTICA_RLS_ADMIN_DSN"].replace(
+            "postgresql+psycopg://", "postgresql://", 1
+        )
+        with psycopg.connect(admin, autocommit=True) as owner:
             owner.execute("DROP ROLE IF EXISTS m2_no_execute")
             owner.execute("CREATE ROLE m2_no_execute NOLOGIN NOSUPERUSER")
             try:
@@ -655,8 +658,8 @@ def _two_workspaces(client: Any) -> tuple[str, str]:
 
     left = "x" + uuid.uuid4().hex[:8]
     right = "y" + uuid.uuid4().hex[:8]
-    authorize(client, [left, right])
     for name in (left, right):
+        authorize(client, [left, right], primary=name)
         assert client.post("/v3/workspaces", json={"name": name}).status_code in (
             200,
             201,
