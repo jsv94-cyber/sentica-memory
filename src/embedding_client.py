@@ -775,6 +775,11 @@ class EmbeddingClient:
 
     async def embed(self, query: str) -> list[float]:
         """Embed a single query string."""
+        from src.sentica.gateway import embed_texts, gateway_enabled
+
+        if gateway_enabled():
+            vectors = await embed_texts([query])
+            return vectors[0]
         return await self._get_client().embed(query)
 
     async def simple_batch_embed(
@@ -784,6 +789,10 @@ class EmbeddingClient:
         on_oversize: Literal["raise", "truncate"] = "raise",
     ) -> list[list[float]]:
         """Batch embed a list of text strings (each must fit token limit)."""
+        from src.sentica.gateway import embed_texts, gateway_enabled
+
+        if gateway_enabled():
+            return await embed_texts(texts)
         return await self._get_client().simple_batch_embed(
             texts, on_oversize=on_oversize
         )
@@ -800,6 +809,12 @@ class EmbeddingClient:
         self, id_resource_dict: dict[str, str]
     ) -> dict[str, list[list[float]]]:
         """Embed multiple texts, chunking long ones and batching API calls."""
+        from src.sentica.gateway import embed_texts, gateway_enabled
+
+        if gateway_enabled():
+            ordered = list(id_resource_dict)
+            vectors = await embed_texts([id_resource_dict[key] for key in ordered])
+            return {key: [vector] for key, vector in zip(ordered, vectors, strict=True)}
         return await self._get_client().batch_embed(id_resource_dict)
 
     @property

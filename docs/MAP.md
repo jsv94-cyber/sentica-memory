@@ -210,8 +210,11 @@ run inside the API process unless `DERIVER.SCHEDULER` is set to `api`.
 
 ## Where every model call is made
 
-Chat completions go through `src/llm/api.py:147` `honcho_llm_call`. That
-function resolves a model config, retries, and either calls
+Chat completions go through `src/llm/api.py:147` `honcho_llm_call`. When
+`SENTICA_GATEWAY_MODE` is on, `src/llm/api.py:201` returns before any
+provider is chosen. `src/sentica/gateway.py:282` `complete_llm` posts to
+that function's OpenAI-compatible URL and keeps the same model on every
+retry. Gateway mode off resolves a model config, retries, and either calls
 `src/llm/executor.py` `honcho_llm_call_inner` or the tool loop in
 `src/llm/tool_loop.py`. `src/llm/registry.py:254` `get_backend` picks one
 provider client:
@@ -240,7 +243,10 @@ and then loops on tools until it can answer.
 
 Embeddings do not use `honcho_llm_call`. `src/embedding_client.py:710`
 `EmbeddingClient` wraps `src/embedding_client.py:196` `_EmbeddingClient`.
-`src/embedding_client.py:308` `embed` calls the provider.
+With gateway mode on, `src/embedding_client.py:776` `embed` calls
+`src/sentica/gateway.py:386` `embed_texts` and does not construct a
+provider client. With gateway mode off, `src/embedding_client.py:308`
+`embed` calls the provider.
 The default transport is OpenAI `text-embedding-3-small`
 (`src/config.py` `EmbeddingSettings`). The OpenAI request is
 `src/embedding_client.py:351` `embeddings.create`. Gemini uses

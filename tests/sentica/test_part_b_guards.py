@@ -35,31 +35,34 @@ TABLES_WITHOUT_WORKSPACE_RLS: dict[str, str] = {
     "alembic_version": "The only value is the migration revision id.",
 }
 
-# M3 shrinks this map to the gateway module. A new provider SDK import fails
-# until that file is added here with a reason.
+# Gateway mode on does not use these modules. tests/sentica/test_m3_gateway.py
+# is that proof. Gateway mode off still speaks the provider SDKs, so the
+# local stack and the upstream suite keep working. A new file that imports a
+# provider SDK fails until it is added here with a reason.
 ALLOWED_PROVIDER_MODULES: dict[str, str] = {
     "src/embedding_client.py": (
-        "Embedding calls use the OpenAI and Gemini SDKs until M3 routes them "
-        "through the gateway."
+        "Gateway mode off embeds with the OpenAI and Gemini SDKs."
     ),
     "src/llm/backends/anthropic.py": (
-        "The Anthropic backend speaks the Anthropic SDK until M3."
+        "Gateway mode off uses the Anthropic SDK in this backend."
     ),
     "src/llm/backends/gemini.py": (
-        "The Gemini backend speaks the Google GenAI SDK until M3."
+        "Gateway mode off uses the Google GenAI SDK in this backend."
     ),
     "src/llm/backends/openai.py": (
-        "The OpenAI backend speaks the OpenAI SDK until M3."
+        "Gateway mode off uses the OpenAI SDK in this backend."
     ),
     "src/llm/errors.py": (
         "Provider exceptions are translated here, including httpx errors the "
         "SDKs raise."
     ),
-    "src/llm/registry.py": "The registry constructs provider clients until M3.",
+    "src/llm/registry.py": (
+        "Gateway mode off constructs provider clients in the registry."
+    ),
     "src/llm/types.py": "Provider client types are imported for type checking.",
     "src/config.py": (
-        "Embedding setup treats api.openai.com as base64-capable until M3 "
-        "sends every embedding through the gateway."
+        "Embedding setup treats api.openai.com as base64-capable for the "
+        "gateway-off OpenAI transport."
     ),
 }
 
