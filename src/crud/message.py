@@ -457,6 +457,7 @@ async def create_messages(
             workspace_name=workspace_name,
             public_id=generate_nanoid(),
             token_count=len(message.encoded_message),
+            source_trust=message.source_trust,
             created_at=message.created_at,  # Use provided created_at if available
             seq_in_session=message_seq_in_session,
         )

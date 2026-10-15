@@ -19,7 +19,11 @@ from src import crud, schemas
 from src.config import settings
 from src.dependencies import db, read_db
 from src.deriver import enqueue
-from src.exceptions import FileTooLargeError, ResourceNotFoundException
+from src.exceptions import (
+    FileTooLargeError,
+    ResourceNotFoundException,
+    ValidationException,
+)
 from src.reconciler.embed_now import embed_task_gate
 from src.security import require_auth
 from src.telemetry import prometheus_metrics
@@ -55,6 +59,7 @@ require_session_write = require_auth(
 
 async def parse_upload_form(
     peer_id: str = Form(...),
+    source_trust: str | None = Form(None),
     metadata: str | None = Form(None),
     configuration: str | None = Form(None),
     created_at: str | None = Form(None),
@@ -89,8 +94,12 @@ async def parse_upload_form(
             logger.warning(f"Failed to parse created_at: {created_at}")
             parsed_created_at = None
 
+    allowed_trust = {"owner", "staff", "external", "system"}
+    if source_trust is not None and source_trust not in allowed_trust:
+        raise ValidationException("source_trust is not a known value")
     return schemas.MessageUploadCreate(
         peer_id=peer_id,
+        source_trust=source_trust,  # pyright: ignore[reportArgumentType]
         metadata=parsed_metadata,
         configuration=parsed_configuration,
         created_at=parsed_created_at,

@@ -544,6 +544,70 @@ class CreateDocumentsResult:
     semantic_dup_replaced_count: int = 0
 
 
+def _without_banned(
+    documents: list[schemas.DocumentCreate],
+) -> list[schemas.DocumentCreate]:
+    from src.sentica.safety import banned_category, note_drop
+
+    kept: list[schemas.DocumentCreate] = []
+    for doc in documents:
+        category = banned_category(doc.content)
+        if category is not None:
+            logger.info("Dropped a conclusion category=%s", category)
+            note_drop()
+            continue
+        kept.append(doc)
+    return kept
+
+
+async def _stamp_message_provenance(
+    db: AsyncSession, documents: list[schemas.DocumentCreate]
+) -> list[schemas.DocumentCreate]:
+    """Attach public message ids and the external-only flag."""
+    message_ids = [
+        message_id
+        for doc in documents
+        for message_id in doc.metadata.message_ids
+    ]
+    if not message_ids:
+        return documents
+    rows = (
+        await db.execute(
+            select(
+                models.Message.id,
+                models.Message.public_id,
+                models.Message.source_trust,
+            ).where(models.Message.id.in_(sorted(set(message_ids))))
+        )
+    ).all()
+    found: dict[int, tuple[str, str | None]] = {
+        int(row.id): (str(row.public_id), row.source_trust) for row in rows
+    }
+    stamped: list[schemas.DocumentCreate] = []
+    for doc in documents:
+        ids = list(doc.metadata.message_ids)
+        public_ids = [found[mid][0] for mid in ids if mid in found]
+        trusts = [found[mid][1] for mid in ids if mid in found]
+        updates: dict[str, Any] = {}
+        if public_ids:
+            updates["message_public_ids"] = public_ids
+        if (
+            ids
+            and len(trusts) == len(ids)
+            and all(trust == "external" for trust in trusts)
+        ):
+            updates["source_trust"] = "external"
+        if updates:
+            stamped.append(
+                doc.model_copy(
+                    update={"metadata": doc.metadata.model_copy(update=updates)}
+                )
+            )
+        else:
+            stamped.append(doc)
+    return stamped
+
+
 async def create_documents(
     db: AsyncSession,
     documents: list[schemas.DocumentCreate],
@@ -572,6 +636,9 @@ async def create_documents(
         List of DocumentCreate schemas that were actually inserted (excludes
         duplicates and failures).
     """
+    documents = _without_banned(documents)
+    if not documents:
+        return CreateDocumentsResult()
     honcho_documents: list[models.Document] = []
     accepted_documents: list[schemas.DocumentCreate] = []
     # Store (document_model, embedding) pairs - IDs aren't available until after commit
@@ -644,6 +711,10 @@ async def create_documents(
         except SQLAlchemyError:
             await db.rollback()
             raise
+
+    # Provenance reads messages after any external vector call, so that call
+    # is not held open on this session.
+    documents = await _stamp_message_provenance(db, documents)
 
     # exact-content dedup (independent of `deduplicate`): pre-fetch
     # existing live documents whose normalized content matches anything in this
@@ -1090,6 +1161,16 @@ async def create_observations(
         ResourceNotFoundException: If any session or peer is not found
         ValidationException: If embedding generation fails or integrity constraint is violated
     """
+    if not observations:
+        return []
+
+    from src.sentica.safety import keep_conclusion
+
+    retained: list[schemas.ConclusionCreate] = []
+    for obs in observations:
+        if await keep_conclusion(obs.content, workspace_name=workspace_name):
+            retained.append(obs)
+    observations = retained
     if not observations:
         return []
 

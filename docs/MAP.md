@@ -89,8 +89,8 @@ cannot point at another workspace.
   `configuration`, `internal_metadata`, `joined_at`, `left_at`.
 - `src/models.py:213` `messages`: integer `id`, public nanoid `public_id`,
   `content`, `token_count`, `seq_in_session`. Composite foreign keys to the
-  session and the peer. Full-text GIN index at `src/models.py:272`. Trigram
-  GIN index at `src/models.py:281` (added in v3.3.0).
+  session and the peer. Full-text GIN index at `src/models.py:276`. Trigram
+  GIN index at `src/models.py:285` (added in v3.3.0).
 
 CRUD lives under `src/crud/` (`workspace.py`, `peer.py`, `session.py`,
 `message.py`). Routers: `src/routers/workspaces.py`, `src/routers/peers.py`,
@@ -114,26 +114,26 @@ that observer. See `src/deriver/scope_backfill.py`.
 A conclusion is a `documents` row. The API name is conclusion. The code name
 is observation or document.
 
-- `src/models.py:352` `collections`: one row per `(observer, observed,
+- `src/models.py:357` `collections`: one row per `(observer, observed,
   workspace_name)`. Both observer and observed are peers in that workspace.
-- `src/models.py:400` `documents`: `content`, `level`, `embedding` (pgvector
+- `src/models.py:405` `documents`: `content`, `level`, `embedding` (pgvector
   HNSW), `session_name`, `deleted_at`, and vector sync columns. `level` is
   `explicit`, `deductive`, `inductive`, or `contradiction`
   (`src/utils/types.py:294`).
-- `src/models.py:562` `document_sources`: reasoning-tree edges
+- `src/models.py:584` `document_sources`: reasoning-tree edges
   `(derived_id, source_id, position)`.
 
 `src/crud/collection.py:134` `get_or_create_collection` opens the pair's
 collection. `src/crud/representation.py:84` `RepresentationManager` writes
 derived observations (`save_representation` at `src/crud/representation.py:98`)
 and reads them back (`get_working_representation` at
-`src/crud/representation.py:255`). Semantic search is
+`src/crud/representation.py:268`). Semantic search is
 `src/crud/document.py:380` `query_documents`.
 
 `src/routers/conclusions.py:22` is `/v3/workspaces/{workspace_id}/conclusions`.
-Creating conclusions calls `src/crud/document.py:1070` `create_observations`.
+Creating conclusions calls `src/crud/document.py:1141` `create_observations`.
 
-`src/models.py:294` `message_embeddings` stores a chunk of message text and its
+`src/models.py:299` `message_embeddings` stores a chunk of message text and its
 vector, separate from `messages`, with `sync_state` so embedding can lag
 message insert. The reconciler fills `pending` rows
 (`src/reconciler/sync_vectors.py`).
@@ -149,11 +149,11 @@ observe, but a card is never about a scope.
 
 ## Summaries
 
-Summaries are not a table. `src/utils/summarizer.py:94` uses the key
+Summaries are not a table. `src/utils/summarizer.py:95` uses the key
 `summaries` inside `sessions.internal_metadata`. Each value is a short or long
 summary object (content, message id, token count, timestamps).
-`src/utils/summarizer.py:760` `_save_summary` merges that JSONB.
-`src/utils/summarizer.py:331` `summarize_if_needed` runs from the queue when
+`src/utils/summarizer.py:769` `_save_summary` merges that JSONB.
+`src/utils/summarizer.py:340` `summarize_if_needed` runs from the queue when
 the message sequence hits the short or long interval.
 
 ## Dreams
@@ -172,10 +172,10 @@ calls. Surprisal sampling, when enabled, is `src/dreamer/surprisal.py`.
 
 ## Deriver queue
 
-The queue is the Postgres table `queue` (`src/models.py:589` `QueueItem`):
+The queue is the Postgres table `queue` (`src/models.py:611` `QueueItem`):
 `task_type`, JSONB `payload`, `work_unit_key`, `workspace_name`, optional
 `session_id` and `message_id`, `processed`, `error`.
-`src/models.py:648` `active_queue_sessions` is the claim lock, one row per
+`src/models.py:670` `active_queue_sessions` is the claim lock, one row per
 work unit key.
 
 `src/deriver/enqueue.py:27` `enqueue` inserts representation and summary rows
@@ -190,7 +190,7 @@ Payload shapes are `src/utils/queue_payload.py`. Task types: `representation`,
 The representation payload includes the message text
 (`src/utils/queue_payload.py:28` `content: str`). Summary, dream, scope, and
 deletion payloads do not. Every payload is written only to the Postgres
-`queue.payload` column (`src/models.py:600`) by the inserts in
+`queue.payload` column (`src/models.py:622`) by the inserts in
 `src/deriver/enqueue.py`. Redis is the cache (`src/cache/client.py`), not a
 copy of the queue. The message text in that column is in the database, which
 is the store.
@@ -209,6 +209,9 @@ reconciler embeds pending vectors and deletes stale queue rows. It does not
 run inside the API process unless `DERIVER.SCHEDULER` is set to `api`.
 
 ## Where every model call is made
+
+New conclusions pass `src/sentica/safety.py:73` `banned_category` before
+they are stored. The deriver, summary, and dream prompts include that rule.
 
 Chat completions go through `src/llm/api.py:147` `honcho_llm_call`. When
 `SENTICA_GATEWAY_MODE` is on, `src/llm/api.py:201` returns before any
@@ -232,9 +235,9 @@ Call sites of `honcho_llm_call`:
 | Deriver batch | `src/deriver/deriver.py:162` |
 | Dialectic answer | `src/dialectic/core.py:589` |
 | Dialectic stream | `src/dialectic/core.py:682` |
-| Short summary | `src/utils/summarizer.py:279` |
-| Long summary | `src/utils/summarizer.py:315` |
-| Dream specialists | `src/dreamer/specialists.py:402` |
+| Short summary | `src/utils/summarizer.py:288` |
+| Long summary | `src/utils/summarizer.py:324` |
+| Dream specialists | `src/dreamer/specialists.py:403` |
 
 Dialectic is reached from `POST /v3/.../peers/{peer_id}/chat`
 (`src/routers/peers.py:244`), which calls `src/dialectic/chat.py:50`
@@ -259,15 +262,15 @@ Callers are message create (fast path), the reconciler
 
 | Prompt | Definition |
 | --- | --- |
-| Deriver observation extraction | `src/deriver/prompts.py:46` `minimal_deriver_prompt` |
+| Deriver observation extraction | `src/deriver/prompts.py:47` `minimal_deriver_prompt` |
 | Dialectic pair recall | `src/dialectic/prompts.py:119` `agent_system_prompt` |
 | Dialectic workspace recall | `src/dialectic/prompts.py:350` `workspace_agent_system_prompt` |
-| Short session summary | `src/utils/summarizer.py:147` `short_summary_prompt` |
-| Long session summary | `src/utils/summarizer.py:183` `long_summary_prompt` |
-| Dream peer-card rules | `src/dreamer/specialists.py:78` `PEER_CARD_SYSTEM_SECTION` |
-| Deduction specialist | `src/dreamer/specialists.py:620` |
-| Induction specialist | `src/dreamer/specialists.py:750` |
-| Peer-card maintenance dream | `src/dreamer/specialists.py:909` |
+| Short session summary | `src/utils/summarizer.py:148` `short_summary_prompt` |
+| Long session summary | `src/utils/summarizer.py:188` `long_summary_prompt` |
+| Dream peer-card rules | `src/dreamer/specialists.py:79` `PEER_CARD_SYSTEM_SECTION` |
+| Deduction specialist | `src/dreamer/specialists.py:622` |
+| Induction specialist | `src/dreamer/specialists.py:756` |
+| Peer-card maintenance dream | `src/dreamer/specialists.py:905` |
 
 Dream user prompts are the `build_user_prompt` methods on those specialist
 classes, next to the system prompts above. Custom instructions from workspace

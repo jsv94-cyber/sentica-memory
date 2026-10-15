@@ -10,6 +10,7 @@ from datetime import datetime
 from functools import cache
 from inspect import cleandoc as c
 
+from src.sentica.safety import PROMPT_RULES
 from src.utils.formatting import custom_instructions_section
 from src.utils.tokens import estimate_tokens
 
@@ -62,8 +63,9 @@ def minimal_deriver_prompt(
         custom_instructions,
         note="These instructions apply to the target peer identified below.",
     )
-    return c(
-        f"""
+    return (
+        c(
+            f"""
 Analyze messages to extract **explicit atomic facts** about the target peer.
 
 [EXPLICIT] DEFINITION: Facts about the target peer that can be derived directly from their messages.
@@ -97,6 +99,9 @@ Messages to analyze:
 {messages}
 </messages>
 """
+        )
+        + "\n"
+        + PROMPT_RULES
     )
 
 

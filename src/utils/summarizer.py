@@ -20,6 +20,7 @@ from src.exceptions import ResourceNotFoundException
 from src.llm import HonchoLLMCallResponse, honcho_llm_call
 from src.llm.types import LLMTelemetryContext
 from src.models import Message
+from src.sentica.safety import PROMPT_RULES
 from src.telemetry import prometheus_metrics
 from src.telemetry.events import AgentToolSummaryCreatedEvent, emit
 from src.telemetry.events.llm import CallPurpose
@@ -152,7 +153,8 @@ def short_summary_prompt(
 ) -> str:
     """Generate the short summary prompt."""
     instructions_section = custom_instructions_section(custom_instructions)
-    return c(f"""
+    return (
+        c(f"""
 You are a system that summarizes parts of a conversation to create a concise and accurate summary. Focus on capturing:
 
 1. Key facts and information shared (**Capture as many explicit facts as possible**)
@@ -178,6 +180,9 @@ Return only the summary without any explanation or meta-commentary.
 
 Aim for about {target_tokens} tokens. If needed, drop lower-priority detail to stay near that length.
 """)
+        + "\n"
+        + PROMPT_RULES
+    )
 
 
 def long_summary_prompt(
@@ -188,7 +193,8 @@ def long_summary_prompt(
 ) -> str:
     """Generate the long summary prompt."""
     instructions_section = custom_instructions_section(custom_instructions)
-    return c(f"""
+    return (
+        c(f"""
 You are a system that creates thorough, comprehensive summaries of conversations. Focus on capturing:
 
 1. Key facts and information shared (**Capture as many explicit facts as possible**)
@@ -216,6 +222,9 @@ Return only the summary without any explanation or meta-commentary.
 
 Aim for about {target_tokens} tokens. If needed, drop lower-priority detail to stay near that length.
 """)
+        + "\n"
+        + PROMPT_RULES
+    )
 
 
 @cache

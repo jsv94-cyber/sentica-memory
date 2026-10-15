@@ -343,6 +343,7 @@ class MessageBase(BaseModel):
 class MessageCreate(MessageBase):
     content: Annotated[str, Field(min_length=0, max_length=settings.MAX_MESSAGE_SIZE)]
     peer_name: str = Field(alias="peer_id")
+    source_trust: Literal["owner", "staff", "external", "system"] | None = None
     metadata: _SanitizedMetadata | None = None
     configuration: MessageConfiguration | None = None
     created_at: datetime.datetime | None = None
@@ -383,6 +384,7 @@ class Message(MessageBase):
     h_metadata: dict[str, Any] = Field(
         default_factory=dict, serialization_alias="metadata"
     )
+    source_trust: Literal["owner", "staff", "external", "system"] | None = None
     created_at: datetime.datetime
     workspace_name: str = Field(serialization_alias="workspace_id")
     token_count: int
@@ -402,6 +404,7 @@ class MessageUploadCreate(BaseModel):
     """Schema for message creation from file uploads"""
 
     peer_id: str = Field(..., description="ID of the peer creating the message")
+    source_trust: Literal["owner", "staff", "external", "system"] | None = None
     metadata: _SanitizedMetadata | None = None
     configuration: MessageConfiguration | None = None
     created_at: datetime.datetime | None = None
@@ -661,6 +664,14 @@ class Conclusion(BaseModel):
     times_derived: int = Field(
         default=1,
         description="Number of times this conclusion has been independently derived.",
+    )
+    message_ids: list[str] = Field(
+        default_factory=list,
+        description="Public ids of the messages this conclusion was derived from.",
+    )
+    source_trust: Literal["owner", "staff", "external", "system"] | None = Field(
+        default=None,
+        description="external when every source message was external. Empty when the conclusion is not external-only.",
     )
     created_at: datetime.datetime
 

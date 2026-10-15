@@ -4674,6 +4674,17 @@
             "type": "string",
             "title": "Peer Id"
           },
+          "source_trust": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Trust"
+          },
           "metadata": {
             "anyOf": [
               {
@@ -4771,6 +4782,32 @@
             "title": "Times Derived",
             "description": "Number of times this conclusion has been independently derived.",
             "default": 1
+          },
+          "message_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Message Ids",
+            "description": "Public ids of the messages this conclusion was derived from."
+          },
+          "source_trust": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "owner",
+                  "staff",
+                  "external",
+                  "system"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Trust",
+            "description": "external when every source message was external. Empty when the conclusion is not external-only."
           },
           "created_at": {
             "type": "string",
@@ -5675,6 +5712,23 @@
             "type": "object",
             "title": "Metadata"
           },
+          "source_trust": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "owner",
+                  "staff",
+                  "external",
+                  "system"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Trust"
+          },
           "created_at": {
             "type": "string",
             "format": "date-time",
@@ -5749,6 +5803,23 @@
           "peer_id": {
             "type": "string",
             "title": "Peer Id"
+          },
+          "source_trust": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "owner",
+                  "staff",
+                  "external",
+                  "system"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Trust"
           },
           "metadata": {
             "anyOf": [
