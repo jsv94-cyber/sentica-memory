@@ -315,3 +315,26 @@ Decisions:
   No `tests/sentica/test_m2_*` file, `tests/sentica/rls_job.py`, or the
   `test-m2-rls` job changed.
 
+## M6. Retrieval
+
+Built:
+
+- Conclusions are retrieved by keyword and by vector, then merged with
+  reciprocal rank. Filters cover the workspace, the peer, `subject_ref`,
+  and recency. Superseded rows stay out. Stale rows sort after current
+  ones. Vector neighbors farther than cosine distance 0.65 are dropped
+  from that half. A keyword match is kept.
+- `POST /peers/{peer_id}/brief` returns the card, the top conclusions, the
+  latest summary, and open stale flags, trimmed to `token_budget`. A
+  workspace list is read one workspace at a time.
+- On 10,000 conclusions the brief was 191 ms cold and 211 ms warm p95,
+  under the 300 ms warm target.
+
+Decisions:
+
+- The vector cutoff is 0.65 so an unrelated neighbor does not fill the
+  brief. Exact wording still matches through keyword search.
+- Local unit tests: 3312 passed, 53 skipped. The runtime-role pin stays 59.
+  No `tests/sentica/test_m2_*` file, `tests/sentica/rls_job.py`, or the
+  `test-m2-rls` job changed.
+

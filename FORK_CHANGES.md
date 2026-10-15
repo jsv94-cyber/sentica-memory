@@ -65,5 +65,9 @@ release v3.3.0 (`608aec8a928da13c540262ed980c569448fb53ab`).
 | `migrations/versions/a7d4e2c91b08_conclusion_freshness.py` | Subject, stale, superseded, and weight columns on conclusions. | M5 |
 | `src/routers/subjects.py` | `POST /subjects/{ref}/changed` and `POST /deletions`. | M5 |
 | `tests/sentica/test_m5_freshness.py` | Changed subjects, supersede, decay, purge, and deletion. | M5 |
+| `src/sentica/retrieval.py` | Keyword plus vector retrieval, and the bounded call brief. | M6 |
+| `migrations/versions/b8e3c1a94d20_conclusion_keyword_index.py` | Full-text index on conclusion content. | M6 |
+| `src/routers/peers.py` | `POST /peers/{peer_id}/brief`. | M6 |
+| `tests/sentica/test_m6_retrieval.py` | Synonym retrieval, filters, the token budget, and latency. | M6 |
 | `.review/M2-summary.md` | Review notes for M2, including the M9 deferrals. | M2 |
 

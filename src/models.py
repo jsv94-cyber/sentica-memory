@@ -603,6 +603,11 @@ class Document(Base):
             "workspace_name",
             "subject_ref",
         ),
+        Index(
+            "ix_documents_content_gin",
+            text("to_tsvector('english', content)"),
+            postgresql_using="gin",
+        ),
         CheckConstraint("weight >= 0", name="documents_weight_non_negative"),
     )
 

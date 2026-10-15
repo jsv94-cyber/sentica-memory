@@ -44,6 +44,13 @@ A message may set `source_trust` to `owner`, `staff`, `external`, or
 `owner`. A conclusion whose source messages are all `external` is returned
 with `source_trust` `external`, and that text is left out of the peer card.
 
+## Retrieval
+
+`POST /v3/workspaces/{workspace_id}/peers/{peer_id}/brief` takes
+`token_budget` on the request. There is no environment setting for it.
+Vector neighbors farther than cosine distance 0.65 are left out of that
+half of the search. A keyword match is still returned.
+
 ## Freshness
 
 `SENTICA_DECAY_INTERVAL_DAYS` defaults to 30. An unused conclusion halves
