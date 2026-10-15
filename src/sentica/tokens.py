@@ -103,6 +103,9 @@ def verify_sentica_token(
     params.p = peer or None
     params.s = session or None
     params.ad = False
+    from src.sentica.workspace_scope import allowed_from_claims
+
+    params.workspaces = sorted(allowed_from_claims(params.w, decoded.get("workspaces")))
     return params
 
 

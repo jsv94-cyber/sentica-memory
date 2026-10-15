@@ -163,7 +163,11 @@ async def _paginate_offset_via_keyset(
     position it uses.
     """
     try:
-        prefix = f"{cache_key_namespace()}:v1:pagination:{_statement_digest(stmt)}"
+        from src.sentica.workspace_scope import current_workspace
+
+        workspace = current_workspace() or ""
+        digest = _statement_digest(stmt)
+        prefix = f"{cache_key_namespace()}:v1:pagination:{workspace}:{digest}"
     except Exception:
         logger.warning("Pagination shim could not key a statement", exc_info=True)
         return await apaginate(

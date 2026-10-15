@@ -40,12 +40,22 @@ else
     BIND_HOST="${SENTICA_BIND_HOST:-0.0.0.0}"
 fi
 
+if [ "${SENTICA_MODE}" = "production" ]; then
+    if [ -x /app/.venv/bin/python ]; then
+        python_bin=/app/.venv/bin/python
+    else
+        python_bin="uv run python"
+    fi
+    # shellcheck disable=SC2086
+    if ! $python_bin -c 'from src.sentica.schema_revision import assert_schema_at_head; assert_schema_at_head()'; then
+        echo "Refusing to start: schema revision is behind" >&2
+        exit 1
+    fi
+fi
+
 if [ "$#" -gt 0 ]; then
     exec "$@"
 fi
-
-echo "Running database migrations..."
-timeout 120 /app/.venv/bin/python scripts/provision_db.py
 
 echo "Starting API server..."
 exec /app/.venv/bin/fastapi run --host "$BIND_HOST" --workers "${API_WORKERS:-1}" src/main.py

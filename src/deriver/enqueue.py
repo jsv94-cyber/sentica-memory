@@ -481,108 +481,142 @@ async def enqueue_dream(
         session_name: Name of the session to scope the dream to if specified
         rebuild: card_refresh only — rebuild the card without the prior card
     """
+    from src.sentica.workspace_scope import reset_workspace, set_workspace
+
     async with tracked_db("dream_enqueue") as db_session:
-        # Authoritative scope check, in the same transaction as the queue insert.
-        # A route-level precheck cannot be relied on: it runs in its own session,
-        # and a *missing* reserved name passes it (nothing has flagged that peer
-        # yet) — so the dream would be enqueued and the scope created before the
-        # worker picked it up, letting the Dreamer run with a real scope as
-        # observed. A scope as `observer` stays allowed: consolidating scoped
-        # collections is exactly what the Dreamer does.
-        await crud.reject_scope_observed(
-            db_session,
-            workspace_name,
-            [observed],
-            action=(
-                "No representation is formed of a scope, so a scope cannot be the"
-                " observed peer of a dream."
-            ),
-        )
+        token = set_workspace(workspace_name)
         try:
-            dream_record = create_dream_record(
-                workspace_name,
-                observer=observer,
-                observed=observed,
-                dream_type=dream_type,
-                session_name=session_name,
-                trigger_reason=trigger_reason,
-                delay_reason=delay_reason,
-                documents_since_last_dream_at_schedule=documents_since_last_dream_at_schedule,
-                document_threshold=document_threshold,
-                rebuild=rebuild,
-            )
-
-            work_unit_key = dream_record["work_unit_key"]
-
-            in_progress_check = select(
-                exists(
-                    select(models.ActiveQueueSession.id).where(
-                        models.ActiveQueueSession.work_unit_key == work_unit_key
-                    )
-                )
-            )
-            is_in_progress = await db_session.scalar(in_progress_check)
-
-            if is_in_progress:
-                logger.debug(
-                    "Skipping dream enqueue - already in progress: %s/%s/%s (type: %s)",
-                    workspace_name,
-                    observer,
-                    observed,
-                    dream_type.value,
-                )
-                return
-
-            pending_check = select(
-                exists(
-                    select(QueueItem.id).where(
-                        QueueItem.work_unit_key == work_unit_key,
-                        QueueItem.processed == False,  # noqa: E712
-                    )
-                )
-            )
-            is_pending = await db_session.scalar(pending_check)
-
-            if is_pending:
-                logger.debug(
-                    "Dream already pending in queue: %s/%s/%s (type: %s)",
-                    workspace_name,
-                    observer,
-                    observed,
-                    dream_type.value,
-                )
-                return
-
-            from src.sentica.queue import stamp_queue_records
-
-            stamp_queue_records([dream_record])
-            stmt = insert(QueueItem).returning(QueueItem)
-            await db_session.execute(stmt, [dream_record])
-            await db_session.commit()
-
-            logger.info(
-                "Enqueued dream task for %s/%s/%s (type: %s)",
+            await _enqueue_dream_in_session(
+                db_session,
                 workspace_name,
                 observer,
                 observed,
-                dream_type.value,
+                dream_type,
+                session_name,
+                trigger_reason,
+                delay_reason,
+                documents_since_last_dream_at_schedule,
+                document_threshold,
+                rebuild,
             )
+        finally:
+            reset_workspace(token)
 
-        except IntegrityError:
+
+async def _enqueue_dream_in_session(
+    db_session: AsyncSession,
+    workspace_name: str,
+    observer: str,
+    observed: str,
+    dream_type: schemas.DreamType,
+    session_name: str | None,
+    trigger_reason: str | None,
+    delay_reason: str | None,
+    documents_since_last_dream_at_schedule: int | None,
+    document_threshold: int | None,
+    rebuild: bool,
+) -> None:
+    # Authoritative scope check, in the same transaction as the queue insert.
+    # A route-level precheck cannot be relied on: it runs in its own session,
+    # and a *missing* reserved name passes it (nothing has flagged that peer
+    # yet) — so the dream would be enqueued and the scope created before the
+    # worker picked it up, letting the Dreamer run with a real scope as
+    # observed. A scope as `observer` stays allowed: consolidating scoped
+    # collections is exactly what the Dreamer does.
+    await crud.reject_scope_observed(
+        db_session,
+        workspace_name,
+        [observed],
+        action=(
+            "No representation is formed of a scope, so a scope cannot be the"
+            " observed peer of a dream."
+        ),
+    )
+    try:
+        dream_record = create_dream_record(
+            workspace_name,
+            observer=observer,
+            observed=observed,
+            dream_type=dream_type,
+            session_name=session_name,
+            trigger_reason=trigger_reason,
+            delay_reason=delay_reason,
+            documents_since_last_dream_at_schedule=documents_since_last_dream_at_schedule,
+            document_threshold=document_threshold,
+            rebuild=rebuild,
+        )
+
+        work_unit_key = dream_record["work_unit_key"]
+
+        in_progress_check = select(
+            exists(
+                select(models.ActiveQueueSession.id).where(
+                    models.ActiveQueueSession.work_unit_key == work_unit_key
+                )
+            )
+        )
+        is_in_progress = await db_session.scalar(in_progress_check)
+
+        if is_in_progress:
             logger.debug(
-                "Dream already enqueued by another process: %s/%s/%s (type: %s)",
+                "Skipping dream enqueue - already in progress: %s/%s/%s (type: %s)",
                 workspace_name,
                 observer,
                 observed,
                 dream_type.value,
             )
-        except Exception as e:
-            logger.exception("Failed to enqueue dream task!")
-            if settings.SENTRY.ENABLED:
-                import sentry_sdk
+            return
 
-                sentry_sdk.capture_exception(e)
-            raise
+        pending_check = select(
+            exists(
+                select(QueueItem.id).where(
+                    QueueItem.work_unit_key == work_unit_key,
+                    QueueItem.processed == False,  # noqa: E712
+                )
+            )
+        )
+        is_pending = await db_session.scalar(pending_check)
+
+        if is_pending:
+            logger.debug(
+                "Dream already pending in queue: %s/%s/%s (type: %s)",
+                workspace_name,
+                observer,
+                observed,
+                dream_type.value,
+            )
+            return
+
+        from src.sentica.queue import stamp_queue_records
+
+        stamp_queue_records([dream_record])
+        stmt = insert(QueueItem).returning(QueueItem)
+        await db_session.execute(stmt, [dream_record])
+        await db_session.commit()
+
+        logger.info(
+            "Enqueued dream task for %s/%s/%s (type: %s)",
+            workspace_name,
+            observer,
+            observed,
+            dream_type.value,
+        )
+
+    except IntegrityError:
+        logger.debug(
+            "Dream already enqueued by another process: %s/%s/%s (type: %s)",
+            workspace_name,
+            observer,
+            observed,
+            dream_type.value,
+        )
+    except Exception as e:
+        logger.exception("Failed to enqueue dream task!")
+        if settings.SENTRY.ENABLED:
+            import sentry_sdk
+
+            sentry_sdk.capture_exception(e)
+        raise
 
 
 def create_scope_task_record(

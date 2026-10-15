@@ -39,9 +39,10 @@ def _qualified(table: str) -> str:
     return f'"{schema}"."{table}"' if schema else f'"{table}"'
 
 
-def _drain_batch_sql() -> str:
+def _drain_batch_sql(*, bound: bool) -> str:
     documents = _qualified("documents")
     document_sources = _qualified("document_sources")
+    workspace = " AND workspace_name = :workspace_name" if bound else ""
     # Locking the batch in id order first (SKIP LOCKED, so never waiting)
     # keeps the UPDATE from cycling with id-ordered document writers.
     # Interpolates only the schema-qualified table names and a constant
@@ -50,7 +51,7 @@ def _drain_batch_sql() -> str:
         WITH batch AS (
             SELECT id
             FROM {documents}
-            WHERE {_PENDING_PREDICATE}
+            WHERE ({_PENDING_PREDICATE}){workspace}
             ORDER BY id
             LIMIT :batch_size
             FOR UPDATE SKIP LOCKED
@@ -108,9 +109,18 @@ async def count_pending_document_sources(db: AsyncSession) -> int:
 async def drain_document_sources_batch(
     db: AsyncSession, batch_size: int = BACKFILL_BATCH_SIZE
 ) -> int:
-    """Drain one id-ordered batch. Returns the number of documents cleared."""
+    """Drain one id-ordered batch. Returns the number of documents cleared.
+
+    When a workspace is bound, only that workspace's rows are cleared.
+    """
+    from src.sentica.workspace_scope import current_workspace
+
+    bound = current_workspace()
+    params: dict[str, Any] = {"batch_size": batch_size}
+    if bound is not None:
+        params["workspace_name"] = bound
     result = cast(
         CursorResult[Any],
-        await db.execute(text(_drain_batch_sql()), {"batch_size": batch_size}),
+        await db.execute(text(_drain_batch_sql(bound=bound is not None)), params),
     )
     return result.rowcount

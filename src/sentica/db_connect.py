@@ -78,7 +78,7 @@ def apply_production_engine_args(
 
     connect_args.update(production_connect_args())
 
-    logger.info("Database connections use the proxy with verify-full")
+    logger.info("proxy tenant=%s connections=%s", instance.tenant_id, 1)
     return instance
 
 

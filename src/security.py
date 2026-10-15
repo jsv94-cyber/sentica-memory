@@ -61,6 +61,7 @@ class JWTParams(BaseModel):
     w: str | None = None
     p: str | None = None
     s: str | None = None
+    workspaces: list[str] | None = None
 
 
 def create_admin_jwt() -> str:
@@ -220,6 +221,29 @@ async def auth(
             raise AuthenticationException("No access token provided")
         jwt_params = verify_jwt(credentials.credentials)
 
+    return await enforce_scope(
+        jwt_params,
+        admin=admin,
+        workspace_name=workspace_name,
+        peer_name=peer_name,
+        session_name=session_name,
+        allow_member_read=allow_member_read,
+    )
+
+
+async def enforce_scope(
+    jwt_params: JWTParams,
+    *,
+    admin: bool | None = None,
+    workspace_name: str | None = None,
+    peer_name: str | None = None,
+    session_name: str | None = None,
+    allow_member_read: bool = False,
+) -> JWTParams:
+    """Re-check one workspace, including member-read, peer, and session scope."""
+    from src.sentica.runtime import production_enabled
+    from src.sentica.workspace_scope import require_workspace
+
     # Authorize by the token's narrowest scope, not by the route's. A
     # narrower-than-workspace token must NOT fall back to workspace access:
     # `{w: ws, p: alice}` may only act on `alice`, never on a sibling peer.
@@ -234,11 +258,12 @@ async def auth(
         # whose resource identifier is not available to require_auth().
         return jwt_params
 
-    # Every scoped, non-admin path requires the token's workspace to match the
-    # route's. Check it once here so no individual branch below can forget it
-    # and silently re-open cross-workspace access (the bug this module fixes).
-    if workspace_name and jwt_params.w != workspace_name:
-        raise AuthenticationException("JWT not permissioned for this resource")
+    auth_on = production_enabled() or settings.AUTH.USE_AUTH
+    if workspace_name and (auth_on or jwt_params.workspaces is not None):
+        allowed = list(jwt_params.workspaces or [])
+        if not allowed and jwt_params.w:
+            allowed = [jwt_params.w]
+        require_workspace(workspace_name, allowed)
 
     if jwt_params.s is not None:
         # Session-scoped token: confined to its own session. It gets no

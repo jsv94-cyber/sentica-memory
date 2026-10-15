@@ -56,6 +56,7 @@ async def list_due_dreams(db: AsyncSession) -> list[DueDream]:
             )[1].label("newest_session_name"),
         )
         .where(models.Document.level == "explicit")
+        .where(models.Document.deleted_at.is_(None))
         .group_by(
             models.Document.workspace_name,
             models.Document.observer,

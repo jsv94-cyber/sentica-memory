@@ -99,6 +99,49 @@ async def cleanup_stale_work_units(db: AsyncSession) -> None:
     await db.commit()
 
 
+def zero_deriver_metrics() -> schemas.DeriverMetrics:
+    return schemas.DeriverMetrics(
+        eligible_work_units=0,
+        claimed_work_units=0,
+        pending_items=0,
+        oldest_pending_age_seconds=0.0,
+        embeddings_pending=0,
+        embeddings_pending_due=0,
+    )
+
+
+def _add_deriver_metrics(
+    left: schemas.DeriverMetrics, right: schemas.DeriverMetrics
+) -> schemas.DeriverMetrics:
+    return schemas.DeriverMetrics(
+        eligible_work_units=left.eligible_work_units + right.eligible_work_units,
+        claimed_work_units=left.claimed_work_units + right.claimed_work_units,
+        pending_items=left.pending_items + right.pending_items,
+        oldest_pending_age_seconds=max(
+            left.oldest_pending_age_seconds, right.oldest_pending_age_seconds
+        ),
+        embeddings_pending=left.embeddings_pending + right.embeddings_pending,
+        embeddings_pending_due=left.embeddings_pending_due
+        + right.embeddings_pending_due,
+    )
+
+
+async def metrics_for_workspaces(names: list[str]) -> schemas.DeriverMetrics:
+    """Sum deriver counts, one read-only transaction per workspace."""
+    from src.dependencies import tracked_db
+    from src.sentica.workspace_scope import reset_workspace, set_workspace
+
+    combined = zero_deriver_metrics()
+    for name in names:
+        token = set_workspace(name)
+        try:
+            async with tracked_db("deriver_metrics.workspace", read_only=True) as db:
+                combined = _add_deriver_metrics(combined, await get_deriver_metrics(db))
+        finally:
+            reset_workspace(token)
+    return combined
+
+
 async def get_deriver_metrics(db: AsyncSession) -> schemas.DeriverMetrics:
     """Count the outstanding deriver work in the whole database, read-only."""
     from src.reconciler.sync_vectors import backoff_eligible  # noqa: PLC0415

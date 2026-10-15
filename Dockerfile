@@ -77,7 +77,7 @@ RUN if [ "$SENTICA_BAKE_PRODUCTION_MARKER" = "true" ]; then \
         printf '%s\n' production > /app/.sentica-production-image; \
     fi \
     && chown "${SENTICA_UID}:${SENTICA_GID}" /app/.sentica-production-image 2>/dev/null || true \
-    && chmod 755 /app/docker/entrypoint.sh \
+    && chmod 755 /app/docker/entrypoint.sh /app/docker/migrate-entrypoint.sh \
     && chmod 755 /app/docker/sentica/postgres-entry.sh /app/docker/sentica/20-passwords.sh
 
 USER ${SENTICA_UID}:${SENTICA_GID}

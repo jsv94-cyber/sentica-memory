@@ -141,8 +141,21 @@ async def run_backfill_cycle(backfill: Backfill) -> BackfillCycleResult:
 
 
 async def record_backfill_pending() -> None:
-    """Set ``backfill_pending`` for every registered backfill."""
+    """Set ``backfill_pending`` from the reconciler counts function."""
     if not settings.METRICS.ENABLED:
+        return
+    from src.sentica.workspace_scope import fetch_pending_counts
+
+    try:
+        async with tracked_db("backfill_pending_count", read_only=True) as db:
+            counts = await fetch_pending_counts(db)
+    except Exception:
+        logger.warning("Failed to read pending backfill counts", exc_info=True)
+        return
+    if counts is not None:
+        total = sum(row.pending_backfills for row in counts)
+        for backfill in BACKFILLS.values():
+            prometheus_metrics.set_backfill_pending(task=backfill.name, count=total)
         return
     for backfill in BACKFILLS.values():
         try:

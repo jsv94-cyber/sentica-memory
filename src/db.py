@@ -1,7 +1,6 @@
 import asyncio
 import contextvars
 import logging
-import os
 import socket
 from typing import Any, cast
 
@@ -21,6 +20,7 @@ from src.sentica.db_connect import (
 )
 from src.sentica.log_policy import install_production_log_filter
 from src.sentica.runtime import capped_pool_recycle
+from src.sentica.workspace_scope import install_workspace_scope
 from src.telemetry.prometheus.metrics import (
     db_connections_established_counter,
     db_connections_open_gauge,
@@ -93,14 +93,26 @@ db_call_timeout: contextvars.ContextVar[float | None] = contextvars.ContextVar(
 
 def maintenance_db_call_timeout() -> float:
     """Bound for deriver and maintenance sessions. Defaults to 120 seconds."""
-    raw = os.environ.get("SENTICA_DB_CALL_TIMEOUT_SECONDS", "120").strip()
-    try:
-        value = float(raw)
-    except ValueError:
-        return 120.0
-    if value <= 0:
-        return 120.0
-    return value
+    from src.sentica.runtime import db_call_timeout_seconds
+
+    return db_call_timeout_seconds()
+
+
+async def run_maintenance_bounded(awaitable: Any, *, close: Any | None = None) -> Any:
+    """Run one maintenance call and close its connection if the bound expires."""
+    task: asyncio.Task[Any] = asyncio.create_task(awaitable)
+    done, _pending = await asyncio.wait({task}, timeout=maintenance_db_call_timeout())
+    if task in done:
+        return task.result()
+    if close is not None:
+        closing: asyncio.Task[Any] = asyncio.create_task(close())
+        await asyncio.wait({closing}, timeout=1)
+    await asyncio.wait({task}, timeout=0.2)
+    if task.done() and not task.cancelled():
+        error = task.exception()
+        if error is not None:
+            raise TimeoutError from error
+    raise TimeoutError
 
 
 def _session_call_timeout() -> float:
@@ -140,7 +152,9 @@ def _wake_task_events(task: asyncio.Task[Any]) -> None:
         frame = getattr(obj, "cr_frame", None) or getattr(obj, "gr_frame", None)
         if frame is not None and hasattr(frame, "f_locals"):
             wakeup = frame.f_locals.get("wakeup")
-            if frame.f_code.co_name == "wait_conn_async" and callable(wakeup):
+            if frame.f_code.co_name in {"wait_async", "wait_conn_async"} and callable(
+                wakeup
+            ):
                 # A bare event wake reports "not ready", and the driver waits
                 # again. Report the socket ready so it sees the shutdown.
                 wakeup(_DRIVER_READY_RW)
@@ -255,15 +269,23 @@ class _BoundedSession(AsyncSession):
 
     async def _bounded(self, awaitable: Any) -> Any:
         task: asyncio.Task[Any] = asyncio.create_task(awaitable)
-        done, _pending = await asyncio.wait({task}, timeout=_session_call_timeout())
+        try:
+            done, _pending = await asyncio.wait({task}, timeout=_session_call_timeout())
+        except asyncio.CancelledError:
+            await self._stop_and_wake(task)
+            raise
         if task in done:
             return task.result()
-        # Close the socket, then let the driver call finish. Teardown
-        # rollback must not overlap a connection that is still opening.
+        await self._stop_and_wake(task)
+        if task.done() and not task.cancelled():
+            error = task.exception()
+            if error is not None:
+                raise TimeoutError from error
+        raise TimeoutError
+
+    async def _stop_and_wake(self, task: asyncio.Task[Any]) -> None:
+        """Stop this session's socket and let the inner call finish."""
         _stop_session_connection(self)
-        # Do not cancel. Cancellation writes a cancel message the paused
-        # proxy never reads. Shut the socket down and tell the driver it is
-        # ready so the handshake observes the error instead of waiting again.
         for _ in range(3):
             for fileno in _filenos_in_task(task):
                 _shutdown_fileno(fileno)
@@ -271,11 +293,6 @@ class _BoundedSession(AsyncSession):
             await asyncio.wait({task}, timeout=0.2)
             if task.done():
                 break
-        if task.done() and not task.cancelled():
-            error = task.exception()
-            if error is not None:
-                raise TimeoutError from error
-        raise TimeoutError
 
     async def execute(self, statement: Any, *args: Any, **kwargs: Any) -> Any:
         return await self._bounded(super().execute(statement, *args, **kwargs))
@@ -291,6 +308,30 @@ class _BoundedSession(AsyncSession):
 
     async def flush(self, objects: Any = None) -> None:
         await self._bounded(super().flush(objects))
+
+    async def rollback(self) -> None:
+        await self._bounded(super().rollback())
+
+    async def close(self) -> None:
+        await self._bounded(super().close())
+
+    async def delete(self, instance: Any) -> None:
+        await self._bounded(super().delete(instance))
+
+    async def refresh(self, instance: Any, *args: Any, **kwargs: Any) -> None:
+        await self._bounded(super().refresh(instance, *args, **kwargs))
+
+    async def get(self, entity: Any, ident: Any, **kwargs: Any) -> Any:
+        return await self._bounded(super().get(entity, ident, **kwargs))
+
+    async def merge(self, instance: Any, **kwargs: Any) -> Any:
+        return await self._bounded(super().merge(instance, **kwargs))
+
+    async def connection(self, *args: Any, **kwargs: Any) -> Any:
+        return await self._bounded(super().connection(*args, **kwargs))
+
+    async def run_sync(self, fn: Any, *args: Any, **kwargs: Any) -> Any:
+        return await self._bounded(super().run_sync(fn, *args, **kwargs))
 
 
 _session_class = _BoundedSession if _sentica_instance is not None else AsyncSession
@@ -311,11 +352,15 @@ SessionLocal = async_sessionmaker(
     class_=_session_class,
 )
 
-# Read-only engine: shares `engine`'s pool, but checks connections out in DBAPI
-# AUTOCOMMIT mode, so psycopg emits NO BEGIN — a SELECT never autobegins a
-# transaction. The backend therefore returns to state 'idle' (not 'idle in
-# transaction') the moment a statement completes.
-read_engine = engine.execution_options(isolation_level="AUTOCOMMIT")
+# Read-only engine: shares `engine`'s pool. Every checkout runs inside
+# BEGIN READ ONLY, so sentica.workspace is SET LOCAL and dies at commit or
+# rollback. The next checkout on the same pooled connection does not keep it.
+read_engine = engine.execution_options(
+    isolation_level="READ COMMITTED",
+    postgresql_readonly=True,
+)
+
+install_workspace_scope(engine, read_engine)
 
 # Sessions for SELECT-only work (same lazy-checkout semantics as SessionLocal).
 # MUST NOT be used for writes: with no enclosing transaction, begin_nested()

@@ -10,15 +10,15 @@ permissions:
 
 jobs:
   basedpyright:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: "Set up Python"
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version-file: ".python-version"
       - name: Install uv
-        uses: astral-sh/setup-uv@v2
+        uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
@@ -28,11 +28,11 @@ jobs:
         run: uv run basedpyright
 
   ruff:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install uv
-        uses: astral-sh/setup-uv@v2
+        uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
@@ -42,27 +42,27 @@ jobs:
         run: uv run --only-group dev ruff format --check src tests scripts migrations sdks/python sandbox
 
   issue-gate:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # The gate runs from `pull_request_target`, where a crash is invisible until
       # a contributor's PR is silently ungated. Check it here instead.
       - run: node .github/scripts/issue-gate.test.js
 
   openapi-drift:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Advisory, not a merge gate: `main` requires pull requests but declares no
     # required status checks, so a red run here reports drift without blocking.
     # Deliberately not `continue-on-error` -- that reports neutral-green, which
     # is exactly the outcome this job exists to avoid.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: "Set up Python"
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version-file: ".python-version"
       - name: Install uv
-        uses: astral-sh/setup-uv@v2
+        uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
@@ -76,17 +76,17 @@ jobs:
           SENTICA_MODE: test
 
   alembic-heads:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # On pull_request the default checkout is refs/pull/N/merge, so this checks
     # the PR merged into main, not the PR head. Don't set `ref`.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: "Set up Python"
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version-file: ".python-version"
       - name: Install uv
-        uses: astral-sh/setup-uv@v2
+        uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
           cache-dependency-glob: "uv.lock"

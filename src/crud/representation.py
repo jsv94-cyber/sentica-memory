@@ -33,12 +33,26 @@ logger = logging.getLogger(__name__)
 
 
 def _is_autocommit(db: AsyncSession) -> bool:
-    """True when the session is bound to an AUTOCOMMIT (read-only) engine."""
+    """True when the session is bound to an AUTOCOMMIT engine."""
     bind = db.bind
     return (
         isinstance(bind, AsyncEngine)
         and bind.get_execution_options().get("isolation_level") == "AUTOCOMMIT"
     )
+
+
+def _rollback_is_safe(db: AsyncSession) -> bool:
+    """True when rollback cannot discard a caller's uncommitted writes.
+
+    AUTOCOMMIT has nothing to discard. A READ ONLY transaction has no writes
+    either, and it must be rolled back or the next query in the request fails.
+    """
+    if _is_autocommit(db):
+        return True
+    bind = db.bind
+    if not isinstance(bind, AsyncEngine):
+        return False
+    return bool(bind.get_execution_options().get("postgresql_readonly"))
 
 
 def _observation_text(obs: ExplicitObservation | DeductiveObservation) -> str:
@@ -433,14 +447,11 @@ class RepresentationManager:
         """Query documents by semantic similarity.
 
         Failures degrade to no semantic observations so the representation can
-        still be built from the other sources. Callers pass read-only
-        (AUTOCOMMIT) sessions, so a failed statement can't leave an aborted
-        transaction behind. A dropped connection can, though: SQLAlchemy
-        invalidates it and refuses every further query on the session with
-        PendingRollbackError until rollback() is called, so roll back before
-        degrading. Under AUTOCOMMIT the rollback is a no-op on the wire. On a
-        transactional session it would discard the caller's uncommitted
-        writes, so there the error propagates instead.
+        still be built from the other sources. A read-only transaction
+        (BEGIN READ ONLY, or AUTOCOMMIT) is rolled back so a later query in
+        the same request can run. On a write session, an invalidated
+        connection still propagates: rolling it back would discard the
+        caller's uncommitted writes.
         """
         try:
             if level:
@@ -472,10 +483,10 @@ class RepresentationManager:
                 return list(documents)
 
         except DBAPIError as e:
-            if e.connection_invalidated:
-                if not _is_autocommit(db):
-                    raise
+            if _rollback_is_safe(db):
                 await db.rollback()
+            elif e.connection_invalidated:
+                raise
             logger.exception("Error getting relevant observations")
             return []
         except Exception:

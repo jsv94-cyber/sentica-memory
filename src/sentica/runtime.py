@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
+import math
 import os
 import tomllib
 from dataclasses import dataclass
@@ -118,7 +119,9 @@ def _fingerprint() -> tuple[tuple[str, str | None], ...]:
         "DB_SQL_DEBUG",
         "COLLECT_METRICS_LOCAL",
         "REASONING_TRACES_FILE",
+        "LLM_OPENAI_API_KEY",
         "METRICS_ENABLED",
+        "SENTICA_DB_CALL_TIMEOUT_SECONDS",
         *REQUIRED_SETTINGS,
         *_PASSWORD_ENV,
     )
@@ -129,6 +132,27 @@ def _fingerprint() -> tuple[tuple[str, str | None], ...]:
         marker_state = None
     env = tuple((name, os.environ.get(name)) for name in names)
     return (*env, ("production_image_marker", f"{marker}:{marker_state}"))
+
+
+def db_call_timeout_seconds() -> float:
+    """Return the maintenance database call bound, or refuse a bad value.
+
+    Unset means 120 seconds. A value above 600, or a value that is not a
+    positive number, refuses startup.
+    """
+    raw = os.environ.get("SENTICA_DB_CALL_TIMEOUT_SECONDS", "120").strip()
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise SenticaStartupError(
+            "Refusing to start: SENTICA_DB_CALL_TIMEOUT_SECONDS is not a number"
+        ) from exc
+    if not math.isfinite(value) or value <= 0 or value > 600:
+        raise SenticaStartupError(
+            "Refusing to start: SENTICA_DB_CALL_TIMEOUT_SECONDS must be "
+            + "greater than 0 and at most 600"
+        )
+    return value
 
 
 def load_instance() -> SenticaInstance | None:
@@ -154,6 +178,7 @@ def load_instance() -> SenticaInstance | None:
 
 def _load_instance() -> SenticaInstance | None:
     selected = mode()
+    db_call_timeout_seconds()
     if selected == TEST_MODE:
         return None
 
@@ -240,6 +265,22 @@ def _refuse_unsafe_runtime() -> None:
     traces = os.environ.get("REASONING_TRACES_FILE", "").strip()
     if traces or settings.REASONING_TRACES_FILE:
         raise SenticaStartupError("Refusing to start: REASONING_TRACES_FILE is set")
+    configured = os.environ.get("VECTOR_STORE_TYPE")
+    if configured is None or not configured.strip():
+        vector_store = str(settings.VECTOR_STORE.TYPE).strip().lower()
+    else:
+        vector_store = configured.strip().lower()
+    if vector_store != "pgvector":
+        raise SenticaStartupError(
+            "Refusing to start: an external vector store is not allowed in production"
+        )
+    openai_key = os.environ.get("LLM_OPENAI_API_KEY")
+    if openai_key is None:
+        openai_key = settings.LLM.OPENAI_API_KEY
+    if openai_key == "sentica-local-dummy":
+        raise SenticaStartupError(
+            "Refusing to start: LLM_OPENAI_API_KEY is the local dummy key"
+        )
     metrics_on = _truthy("METRICS_ENABLED") or settings.METRICS.ENABLED
     labeled = any(
         _workspace_labeled(metric)

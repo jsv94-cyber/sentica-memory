@@ -27,6 +27,7 @@ from src.models import QueueItem
 from src.reconciler.backfill import BACKFILLS, Backfill, record_backfill_pending
 from src.reconciler.sync_vectors import (
     has_pending_work,
+    has_soft_deleted_documents,
     record_pending_embeddings_backlog,
 )
 from src.schemas import ReconcilerType
@@ -74,8 +75,28 @@ RECONCILER_TASKS: dict[str, ReconcilerTask] = {
         interval_seconds=QUEUE_CLEANUP_INTERVAL_SECONDS,
         payload={"reconciler_type": ReconcilerType.CLEANUP_QUEUE.value},
     ),
+    "cleanup": ReconcilerTask(
+        name="cleanup",
+        work_unit_key="reconciler:cleanup",
+        interval_seconds=settings.VECTOR_STORE.RECONCILIATION_INTERVAL_SECONDS,
+        payload={"reconciler_type": ReconcilerType.CLEANUP.value},
+        has_pending=has_soft_deleted_documents,
+    ),
     **{task.name: task for task in map(backfill_task, BACKFILLS.values())},
 }
+
+
+def _workspaces_for_task(task: ReconcilerTask, counts: list[Any]) -> list[str]:
+    """Each task enqueues only the workspaces whose own count is non-zero."""
+    if task.name == "sync_vectors":
+        return [row.workspace_name for row in counts if row.pending_embeddings > 0]
+    if task.name.startswith("backfill"):
+        return [row.workspace_name for row in counts if row.pending_backfills > 0]
+    if task.name == "cleanup":
+        return [row.workspace_name for row in counts if row.soft_deleted_documents > 0]
+    if task.has_pending is None:
+        return [row.workspace_name for row in counts]
+    return []
 
 
 _reconciler_scheduler: "ReconcilerScheduler | None" = None
@@ -249,61 +270,87 @@ class ReconcilerScheduler:
         Returns:
             True if a task was enqueued, False if skipped
         """
-        async with tracked_db("reconciler_enqueue") as db:
-            # Check if task is already in progress
-            in_progress_check = select(
+        from src.sentica.workspace_scope import (
+            fetch_pending_counts,
+            reset_workspace,
+            set_workspace,
+        )
+
+        async with tracked_db("reconciler_enqueue_plan", read_only=True) as db:
+            counts = await fetch_pending_counts(db)
+            if counts is None:
+                if task.has_pending is not None and not await task.has_pending(db):
+                    logger.debug(
+                        "Task %s has nothing to do, skipping enqueue", task.name
+                    )
+                    return False
+                names = list(await db.scalars(select(models.Workspace.name)))
+            else:
+                names = _workspaces_for_task(task, counts)
+        if not names:
+            return False
+        inserted = False
+        for name in names:
+            async with tracked_db("reconciler_enqueue") as db:
+                token = set_workspace(name)
+                try:
+                    if await self._enqueue_one(
+                        db,
+                        f"{task.work_unit_key}:{name}",
+                        name,
+                        task.payload,
+                    ):
+                        try:
+                            await db.commit()
+                            inserted = True
+                        except IntegrityError:
+                            await db.rollback()
+                finally:
+                    reset_workspace(token)
+        if inserted:
+            logger.debug("Enqueued reconciler task: %s", task.name)
+        return inserted
+
+    async def _enqueue_one(
+        self,
+        db: AsyncSession,
+        key: str,
+        workspace_name: str | None,
+        payload: dict[str, Any],
+    ) -> bool:
+        """Insert one reconciler row while the workspace setting is current."""
+        in_progress = await db.scalar(
+            select(
                 exists(
                     select(models.ActiveQueueSession.id).where(
-                        models.ActiveQueueSession.work_unit_key == task.work_unit_key
+                        models.ActiveQueueSession.work_unit_key == key
                     )
                 )
             )
-            is_in_progress = await db.scalar(in_progress_check)
-
-            if is_in_progress:
-                logger.debug("Task %s already in progress, skipping enqueue", task.name)
-                return False
-
-            # Check if there's already a pending task
-            pending_check = select(
+        )
+        if in_progress:
+            return False
+        pending = await db.scalar(
+            select(
                 exists(
                     select(QueueItem.id).where(
-                        QueueItem.work_unit_key == task.work_unit_key,
+                        QueueItem.work_unit_key == key,
                         QueueItem.processed == False,  # noqa: E712
                     )
                 )
             )
-            is_pending = await db.scalar(pending_check)
-
-            if is_pending:
-                logger.debug(
-                    "Task %s already pending in queue, skipping enqueue", task.name
-                )
-                return False
-
-            if task.has_pending is not None and not await task.has_pending(db):
-                logger.debug("Task %s has nothing to do, skipping enqueue", task.name)
-                return False
-
-            # Enqueue the task using ORM
-            queue_item = QueueItem(
-                work_unit_key=task.work_unit_key,
-                payload=task.payload,
+        )
+        if pending:
+            return False
+        db.add(
+            QueueItem(
+                work_unit_key=key,
+                payload=payload,
                 session_id=None,
                 task_type="reconciler",
-                workspace_name=None,
+                workspace_name=workspace_name,
                 message_id=None,
             )
-            db.add(queue_item)
-            try:
-                await db.commit()
-            except IntegrityError:
-                # Another instance already enqueued this task (unique constraint)
-                await db.rollback()
-                logger.debug(
-                    "Task %s already enqueued by another instance, skipping", task.name
-                )
-                return False
-
-            logger.debug("Enqueued reconciler task: %s", task.name)
-            return True
+        )
+        await db.flush()
+        return True

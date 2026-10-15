@@ -242,8 +242,48 @@ def test_entrypoint_checks_mode_and_bind_before_exec() -> None:
     exec_at = text.index('exec "$@"')
     assert text.index("SENTICA_MODE") < exec_at
     assert text.index("SENTICA_BIND_HOST") < exec_at
-    assert "timeout 120" in text
-    assert text.index("timeout 120") > exec_at
+    assert "provision_db.py" not in text
+    assert "schema revision is behind" in text
+    migrate = (ROOT / "docker" / "migrate-entrypoint.sh").read_text(encoding="utf-8")
+    assert "${SENTICA_MIGRATION_TIMEOUT_SECONDS:-360}" in migrate
+    assert "DB_MIGRATION_LOCK_WAIT_SECONDS" in migrate
+    assert "settings.DB.MIGRATION_LOCK_WAIT_SECONDS" in migrate
+    assert "provision_db.py" in migrate
+    assert "timeout 120" not in migrate
+    env = os.environ.copy()
+    env["SENTICA_MODE"] = "test"
+    env["SENTICA_MIGRATION_TIMEOUT_SECONDS"] = "300"
+    env["DB_MIGRATION_LOCK_WAIT_SECONDS"] = "300"
+    refused = subprocess.run(
+        ["sh", str(ROOT / "docker" / "migrate-entrypoint.sh")],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert refused.returncode != 0
+    assert "DB_MIGRATION_LOCK_WAIT_SECONDS" in refused.stderr
+    default = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            "-c",
+            "from src.config import settings; print(settings.DB.MIGRATION_LOCK_WAIT_SECONDS)",
+        ],
+        cwd=ROOT,
+        env={
+            key: value
+            for key, value in env.items()
+            if key != "DB_MIGRATION_LOCK_WAIT_SECONDS"
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert default.stdout.strip() == "300"
+    assert "360" in migrate
 
 
 def test_config_toml_password_refuses(
@@ -297,6 +337,7 @@ def test_malformed_token_key_refuses(
         ("COLLECT_METRICS_LOCAL", "true", "local metrics collector"),
         ("REASONING_TRACES_FILE", "/tmp/traces.jsonl", "REASONING_TRACES_FILE"),
         ("METRICS_ENABLED", "true", "workspace_name"),
+        ("LLM_OPENAI_API_KEY", "sentica-local-dummy", "local dummy key"),
     ],
 )
 def test_unsafe_production_settings_refuse(
@@ -310,3 +351,21 @@ def test_unsafe_production_settings_refuse(
     monkeypatch.setenv(name, value)
     with pytest.raises(SenticaStartupError, match=match):
         load_instance()
+
+
+def test_fake_embeddings_are_deterministic_and_nonzero() -> None:
+    import importlib.util
+
+    path = ROOT / "docker" / "sentica" / "fake_embeddings.py"
+    spec = importlib.util.spec_from_file_location("fake_embeddings", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    first = module.embedding_for("local hello", 8)
+    assert first == module.embedding_for("local hello", 8)
+    assert first != module.embedding_for("other text", 8)
+    assert any(value != 0.0 for value in first)
+    compose = (ROOT / "docker-compose.sentica.yml").read_text(encoding="utf-8")
+    assert "LLM_OPENAI_API_KEY: sentica-local-dummy" not in compose
+    assert "http://embeddings:8080/v1" in compose
+    assert "EMBEDDING_MODEL_CONFIG__OVERRIDES__BASE_URL" in compose

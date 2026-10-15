@@ -51,6 +51,11 @@ def backoff_eligible(
 
 async def has_pending_work(db: AsyncSession) -> bool:
     """True when a reconciliation cycle would find something to sync or clean up."""
+    from src.sentica.workspace_scope import fetch_pending_counts
+
+    counts = await fetch_pending_counts(db)
+    if counts is not None and any(row.pending_embeddings > 0 for row in counts):
+        return True
     cutoff = datetime.datetime.now(datetime.UTC) - datetime.timedelta(minutes=5)
     checks = [
         select(models.MessageEmbedding.id).where(
@@ -70,6 +75,19 @@ async def has_pending_work(db: AsyncSession) -> bool:
             )
         )
     return any([await db.scalar(c.limit(1)) is not None for c in checks])
+
+
+async def has_soft_deleted_documents(db: AsyncSession) -> bool:
+    """True when a document was soft-deleted longer ago than the grace period."""
+    cutoff = datetime.datetime.now(datetime.UTC) - datetime.timedelta(minutes=5)
+    row = await db.scalar(
+        select(models.Document.id)
+        .where(
+            models.Document.deleted_at.is_not(None), models.Document.deleted_at < cutoff
+        )
+        .limit(1)
+    )
+    return row is not None
 
 
 @dataclass
@@ -145,6 +163,15 @@ async def _get_message_embeddings_needing_sync(
 
     Note: "synced" = done forever, "failed" = permanent failure (manual intervention)
     """
+    from src.sentica.workspace_scope import current_workspace
+
+    bound = current_workspace()
+    pending = [
+        models.MessageEmbedding.sync_state == "pending",
+        backoff_eligible(models.MessageEmbedding.last_sync_at),
+    ]
+    if bound is not None:
+        pending.append(models.MessageEmbedding.workspace_name == bound)
     # Step 1: pick distinct message_ids with at least one eligible pending row,
     # prioritizing those with the oldest last_sync_at.
     msg_id_stmt = (
@@ -152,12 +179,7 @@ async def _get_message_embeddings_needing_sync(
             models.MessageEmbedding.message_id,
             func.min(models.MessageEmbedding.last_sync_at).label("oldest_attempt"),
         )
-        .where(
-            and_(
-                models.MessageEmbedding.sync_state == "pending",
-                backoff_eligible(models.MessageEmbedding.last_sync_at),
-            )
-        )
+        .where(and_(*pending))
         .group_by(models.MessageEmbedding.message_id)
         .order_by(func.min(models.MessageEmbedding.last_sync_at).asc().nullsfirst())
         .limit(batch_size)
@@ -175,8 +197,7 @@ async def _get_message_embeddings_needing_sync(
         .where(
             and_(
                 models.MessageEmbedding.message_id.in_(message_ids),
-                models.MessageEmbedding.sync_state == "pending",
-                backoff_eligible(models.MessageEmbedding.last_sync_at),
+                *pending,
             )
         )
         .order_by(models.MessageEmbedding.message_id, models.MessageEmbedding.id)
@@ -602,6 +623,7 @@ async def _cleanup_soft_deleted_documents_pgvector(
     db: AsyncSession,
     batch_size: int = RECONCILIATION_BATCH_SIZE,
     older_than_minutes: int = 5,
+    workspace_name: str | None = None,
 ) -> int:
     """
     Cleanup soft-deleted documents
@@ -619,6 +641,8 @@ async def _cleanup_soft_deleted_documents_pgvector(
         .limit(batch_size)
         .with_for_update(skip_locked=True)
     )
+    if workspace_name is not None:
+        stmt = stmt.where(models.Document.workspace_name == workspace_name)
     result = await db.execute(stmt)
     doc_ids = [row[0] for row in result.all()]
 
@@ -658,32 +682,43 @@ async def _reconcile_documents_batch(
 async def _reconcile_message_embeddings_batch(
     external_vector_store: VectorStore | None,
     metrics: ReconciliationMetrics,
-) -> bool:
+    *,
+    batch_size: int = RECONCILIATION_BATCH_SIZE,
+    workspace_name: str | None = None,
+) -> int:
     """
     Reconcile a single batch of message embeddings.
 
-    Returns True if work was done, False otherwise.
+    Returns how many embedding rows were considered. Zero means no work.
     """
-    async with tracked_db("reconciliation_embs") as db:
-        embs = await _get_message_embeddings_needing_sync(db)
-        if not embs:
-            return False
+    from src.sentica.workspace_scope import reset_workspace, set_workspace
 
-        with sentry_sdk.start_transaction(
-            name="reconcile_message_embeddings_batch", op="reconciler"
-        ):
-            synced, failed = await _sync_message_embeddings(
-                db, embs, external_vector_store
-            )
-            metrics.message_embeddings_synced += synced
-            metrics.message_embeddings_failed += failed
-            await db.commit()
-        return True
+    token = set_workspace(workspace_name) if workspace_name is not None else None
+    try:
+        async with tracked_db("reconciliation_embs") as db:
+            embs = await _get_message_embeddings_needing_sync(db, batch_size=batch_size)
+            if not embs:
+                return 0
+
+            with sentry_sdk.start_transaction(
+                name="reconcile_message_embeddings_batch", op="reconciler"
+            ):
+                synced, failed = await _sync_message_embeddings(
+                    db, embs, external_vector_store
+                )
+                metrics.message_embeddings_synced += synced
+                metrics.message_embeddings_failed += failed
+                await db.commit()
+            return len(embs)
+    finally:
+        if token is not None:
+            reset_workspace(token)
 
 
 async def _cleanup_documents_batch(
     external_vector_store: VectorStore,
     metrics: ReconciliationMetrics,
+    workspace_name: str | None = None,
 ) -> bool:
     """
     Clean up a single batch of soft-deleted documents.
@@ -697,6 +732,7 @@ async def _cleanup_documents_batch(
             db,
             external_vector_store,
             batch_size=RECONCILIATION_BATCH_SIZE,
+            workspace_name=workspace_name,
         )
         if not cleaned:
             return False
@@ -708,6 +744,7 @@ async def _cleanup_documents_batch(
 
 async def _cleanup_pgvector_batch(
     metrics: ReconciliationMetrics,
+    workspace_name: str | None = None,
 ) -> bool:
     """
     Clean up a single batch of soft-deleted documents in pgvector-only mode.
@@ -716,7 +753,9 @@ async def _cleanup_pgvector_batch(
     """
     async with tracked_db("reconciliation_pgvector_cleanup") as db:
         cleaned = await _cleanup_soft_deleted_documents_pgvector(
-            db, batch_size=RECONCILIATION_BATCH_SIZE
+            db,
+            batch_size=RECONCILIATION_BATCH_SIZE,
+            workspace_name=workspace_name,
         )
         if not cleaned:
             return False
@@ -750,11 +789,17 @@ async def record_pending_embeddings_backlog() -> None:
         return
     try:
         async with tracked_db("reconciler_pending_count", read_only=True) as db:
-            count = await db.scalar(
-                select(func.count())
-                .select_from(models.MessageEmbedding)
-                .where(models.MessageEmbedding.sync_state == "pending")
-            )
+            from src.sentica.workspace_scope import fetch_pending_counts
+
+            counts = await fetch_pending_counts(db)
+            if counts is None:
+                count = await db.scalar(
+                    select(func.count())
+                    .select_from(models.MessageEmbedding)
+                    .where(models.MessageEmbedding.sync_state == "pending")
+                )
+            else:
+                count = sum(row.pending_embeddings for row in counts)
         prometheus_metrics.set_message_embeddings_pending(count=count or 0)
     except Exception:
         logger.warning(
@@ -776,17 +821,46 @@ async def run_vector_reconciliation_cycle() -> ReconciliationMetrics:
     metrics = ReconciliationMetrics()
     external_vector_store = get_external_vector_store()
     deadline = time.monotonic() + RECONCILIATION_TIME_BUDGET_SECONDS
+    from src.sentica.workspace_scope import (
+        current_workspace,
+        fair_workspace_order,
+        fetch_pending_counts,
+    )
+
+    bound = current_workspace()
+    pending_names: list[str] | None = None
+    async with tracked_db("reconciliation_pending", read_only=True) as pending_db:
+        counts = await fetch_pending_counts(pending_db)
+        if counts is not None:
+            pending_names = [
+                row.workspace_name for row in counts if row.pending_embeddings > 0
+            ]
+    if bound is not None:
+        pending_names = [bound]
 
     # pgvector-only mode: still need to embed pending MessageEmbedding rows
     # (create_messages defers embedding to the reconciler), then clean up.
     if external_vector_store is None:
         while time.monotonic() < deadline:
-            embs_work = await _reconcile_message_embeddings_batch(None, metrics)
+            if pending_names is None:
+                embs_work = await _reconcile_message_embeddings_batch(None, metrics)
+            else:
+                ordered, _cursor = fair_workspace_order(pending_names, 0)
+                remaining = RECONCILIATION_BATCH_SIZE
+                embs_work = 0
+                for name in ordered:
+                    if remaining <= 0:
+                        break
+                    used = await _reconcile_message_embeddings_batch(
+                        None, metrics, batch_size=remaining, workspace_name=name
+                    )
+                    embs_work += used
+                    remaining -= used
 
             if time.monotonic() >= deadline:
                 break
 
-            cleanup_work = await _cleanup_pgvector_batch(metrics)
+            cleanup_work = await _cleanup_pgvector_batch(metrics, workspace_name=bound)
 
             if not (embs_work or cleanup_work):
                 break
@@ -801,16 +875,18 @@ async def run_vector_reconciliation_cycle() -> ReconciliationMetrics:
         if time.monotonic() >= deadline:
             break
 
-        # Reconcile message embeddings
+        # Reconcile message embeddings for this work unit's workspace.
         embs_work = await _reconcile_message_embeddings_batch(
-            external_vector_store, metrics
+            external_vector_store, metrics, workspace_name=bound
         )
 
         if time.monotonic() >= deadline:
             break
 
         # Clean up soft-deleted documents
-        cleanup_work = await _cleanup_documents_batch(external_vector_store, metrics)
+        cleanup_work = await _cleanup_documents_batch(
+            external_vector_store, metrics, workspace_name=bound
+        )
 
         # Continue only if any operation did work
         if not (docs_work or embs_work or cleanup_work):
@@ -819,3 +895,19 @@ async def run_vector_reconciliation_cycle() -> ReconciliationMetrics:
 
     logger.debug("Vector reconciliation cycle completed")
     return metrics
+
+
+async def run_document_cleanup() -> int:
+    """Hard-delete soft-deleted documents for the bound workspace only."""
+    from src.sentica.workspace_scope import current_workspace
+
+    bound = current_workspace()
+    metrics = ReconciliationMetrics()
+    external = get_external_vector_store()
+    if external is None:
+        while await _cleanup_pgvector_batch(metrics, workspace_name=bound):
+            continue
+        return metrics.documents_cleaned
+    while await _cleanup_documents_batch(external, metrics, workspace_name=bound):
+        continue
+    return metrics.documents_cleaned

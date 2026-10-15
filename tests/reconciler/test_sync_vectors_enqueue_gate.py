@@ -106,8 +106,13 @@ async def test_enqueue_gated_on_pending_work(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, has_work: bool
 ) -> None:
     @asynccontextmanager
-    async def _db(_: str | None = None) -> AsyncGenerator[AsyncSession]:
-        yield db_session
+    async def _db(
+        _: str | None = None, **_kwargs: object
+    ) -> AsyncGenerator[AsyncSession]:
+        try:
+            yield db_session
+        finally:
+            await db_session.commit()
 
     monkeypatch.setattr(scheduler_module, "tracked_db", _db)
     task = RECONCILER_TASKS["sync_vectors"].model_copy(
@@ -119,16 +124,26 @@ async def test_enqueue_gated_on_pending_work(
         (
             await db_session.execute(
                 select(models.QueueItem).where(
-                    models.QueueItem.work_unit_key == "reconciler:sync_vectors"
+                    models.QueueItem.work_unit_key.startswith("reconciler:sync_vectors")
                 )
             )
         )
         .scalars()
         .all()
     )
+    names = list(
+        (await db_session.execute(select(models.Workspace.name))).scalars().all()
+    )
 
-    assert enqueued is has_work
-    assert len(rows) == (1 if has_work else 0)
+    if not names or not has_work:
+        assert enqueued is False
+        assert rows == []
+    else:
+        assert enqueued is True
+        assert {row.work_unit_key for row in rows} == {
+            f"reconciler:sync_vectors:{name}" for name in names
+        }
+        assert {row.workspace_name for row in rows} == set(names)
 
 
 def test_sync_vectors_registers_its_gate() -> None:
@@ -139,10 +154,17 @@ async def test_cleanup_queue_is_not_gated(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     @asynccontextmanager
-    async def _db(_: str | None = None) -> AsyncGenerator[AsyncSession]:
-        yield db_session
+    async def _db(
+        _: str | None = None, **_kwargs: object
+    ) -> AsyncGenerator[AsyncSession]:
+        try:
+            yield db_session
+        finally:
+            await db_session.commit()
 
     monkeypatch.setattr(scheduler_module, "tracked_db", _db)
+    db_session.add(models.Workspace(name="cleanup-workspace"))
+    await db_session.commit()
     task = RECONCILER_TASKS["cleanup_queue"]
 
     enqueued = await ReconcilerScheduler()._try_enqueue_task(task)  # pyright: ignore[reportPrivateUsage]

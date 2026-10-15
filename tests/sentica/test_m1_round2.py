@@ -7,6 +7,7 @@ import os
 import time
 from pathlib import Path
 
+import jwt
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
@@ -153,11 +154,14 @@ async def test_orm_and_core_inserts_stamp_tenant(
 
     _production(monkeypatch, tmp_path)
     assert load_instance() is not None
+    db_session.add(models.Workspace(name="ws-round2"))
+    await db_session.flush()
     item = models.QueueItem(
         work_unit_key="reconciler:cleanup_queue-round2",
         task_type="reconciler",
         payload={"reconciler_type": "cleanup_queue"},
         processed=False,
+        workspace_name="ws-round2",
     )
     db_session.add(item)
     await db_session.flush()
@@ -171,6 +175,7 @@ async def test_orm_and_core_inserts_stamp_tenant(
                 "task_type": "webhook",
                 "payload": {"event_type": "test.event", "data": {}},
                 "processed": False,
+                "workspace_name": "ws-round2",
             }
         ],
     )
@@ -233,6 +238,42 @@ def test_maintenance_timeout_defaults_to_120(
     assert maintenance_db_call_timeout() == 45
 
 
+def test_db_call_timeout_refuses_unparsable_and_over_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.db import maintenance_db_call_timeout
+
+    monkeypatch.setenv("SENTICA_DB_CALL_TIMEOUT_SECONDS", "nope")
+    with pytest.raises(SenticaStartupError, match="not a number"):
+        maintenance_db_call_timeout()
+    monkeypatch.setenv("SENTICA_DB_CALL_TIMEOUT_SECONDS", "601")
+    with pytest.raises(SenticaStartupError, match="600"):
+        maintenance_db_call_timeout()
+    monkeypatch.setenv("SENTICA_MODE", "test")
+    monkeypatch.setenv("SENTICA_DB_CALL_TIMEOUT_SECONDS", "nope")
+    with pytest.raises(SenticaStartupError, match="not a number"):
+        load_instance()
+    assert not Path("docker/sentica/userlist-a.txt").exists()
+    assert not Path("docker/sentica/userlist-b.txt").exists()
+    instance_doc = Path("docs/INSTANCE.md").read_text(encoding="utf-8")
+    assert "bind-mounted as a" in instance_doc
+    assert "not as individual files" in instance_doc
+
+
+def test_m2_summary_defers_proxy_tls_redis_and_internal_networks() -> None:
+    text = Path(".review/M2-summary.md").read_text(encoding="utf-8")
+    heading = text.index("## Deferred to M9")
+    deferred = text[heading:]
+    assert "server_tls_sslmode" in deferred
+    assert "verify-full" in deferred
+    assert "Redis" in deferred
+    assert "non-root" in deferred or "root" in deferred
+    assert "internal: true" in deferred
+    assert "db" in deferred
+    assert "net-a" in deferred
+    assert "net-b" in deferred
+
+
 def test_production_connect_args_include_connect_timeout(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -287,6 +328,7 @@ def test_slow_llm_chat_streams_fully(
     client: object,
     sample_data: tuple[models.Workspace, models.Peer],
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     import asyncio
     from collections.abc import AsyncIterator
@@ -294,13 +336,62 @@ def test_slow_llm_chat_streams_fully(
     from starlette.testclient import TestClient
 
     from src.db import BoundedSession, ReadSessionLocal, SessionLocal
+    from src.sentica.runtime import TOKEN_AUDIENCE
 
     assert isinstance(client, TestClient)
     workspace, peer = sample_data
+    private = ed25519.Ed25519PrivateKey.generate()
+    public = tmp_path / "token.pub"
+    public.write_bytes(
+        private.public_key().public_bytes(
+            serialization.Encoding.PEM,
+            serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+    )
+    for path in ("client.crt", "client.key", "ca.crt"):
+        (tmp_path / path).write_text("present\n", encoding="utf-8")
+    monkeypatch.setenv("SENTICA_MODE", "production")
+    monkeypatch.setenv("SENTICA_TENANT_ID", "tenant-a")
+    monkeypatch.setenv("SENTICA_DB_PROXY_HOST", "pgbouncer")
+    monkeypatch.setenv("SENTICA_DB_PROXY_PORT", "6432")
+    monkeypatch.setenv("SENTICA_DB_USER", "tenant_a")
+    monkeypatch.setenv("SENTICA_DB_NAME", "tenant_a")
+    monkeypatch.setenv("SENTICA_CLIENT_CERT_PATH", str(tmp_path / "client.crt"))
+    monkeypatch.setenv("SENTICA_CLIENT_KEY_PATH", str(tmp_path / "client.key"))
+    monkeypatch.setenv("SENTICA_PROXY_CA_PATH", str(tmp_path / "ca.crt"))
+    monkeypatch.setenv("SENTICA_TOKEN_PUBLIC_KEY_PATH", str(public))
+    monkeypatch.setenv("SENTICA_TOKEN_ISSUER", "sentica-broker")
+    monkeypatch.setenv("SENTICA_BIND_HOST", "127.0.0.1")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    for name in (
+        "DB_CONNECTION_URI",
+        "DATABASE_URL",
+        "POSTGRES_PASSWORD",
+        "DB_PASSWORD",
+        "PGPASSWORD",
+        "PGPASSFILE",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    issued = int(time.time())
+    token = jwt.encode(
+        {
+            "iss": "sentica-broker",
+            "aud": TOKEN_AUDIENCE,
+            "iat": issued,
+            "exp": issued + 60,
+            "tenant_id": "tenant-a",
+            "request_id": "slow-llm",
+            "w": workspace.name,
+        },
+        private,
+        algorithm="EdDSA",
+    )
     write_class = SessionLocal.class_
     read_class = ReadSessionLocal.class_
-    SessionLocal.configure(class_=BoundedSession)
-    ReadSessionLocal.configure(class_=BoundedSession)
+    # Assign the class directly. configure(class_=...) stores class_ in the
+    # maker kwargs, and async_sessionmaker then passes it to Session().
+    SessionLocal.class_ = BoundedSession
+    ReadSessionLocal.class_ = BoundedSession
 
     async def slow_stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
         await asyncio.sleep(15)
@@ -313,13 +404,14 @@ def test_slow_llm_chat_streams_fully(
         with client.stream(
             "POST",
             f"/v3/workspaces/{workspace.name}/peers/{peer.name}/chat",
+            headers={"Authorization": f"Bearer {token}"},
             json={"query": "hello", "stream": True},
         ) as response:
-            assert response.status_code == 200
+            assert response.status_code == 200, response.read()
             body = response.read().decode()
     finally:
-        SessionLocal.configure(class_=write_class)
-        ReadSessionLocal.configure(class_=read_class)
+        SessionLocal.class_ = write_class
+        ReadSessionLocal.class_ = read_class
     assert time.monotonic() - started >= 14
     assert "slow-llm-token" in body
     assert " tail" in body

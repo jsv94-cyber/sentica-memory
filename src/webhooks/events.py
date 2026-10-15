@@ -58,27 +58,33 @@ async def publish_webhook_event(event: WebhookEvent) -> None:
             data=event.model_dump(mode="json", exclude={"type"}),
         )
 
-        async with tracked_db("publish_webhook_event") as db:
-            queue_item = QueueItem(
-                work_unit_key=construct_work_unit_key(
+        from src.sentica.workspace_scope import reset_workspace, set_workspace
+
+        token = set_workspace(event.workspace_id)
+        try:
+            async with tracked_db("publish_webhook_event") as db:
+                queue_item = QueueItem(
+                    work_unit_key=construct_work_unit_key(
+                        event.workspace_id,
+                        {
+                            "task_type": "webhook",
+                        },
+                    ),
+                    payload=payload,
+                    session_id=None,
+                    task_type="webhook",
+                    workspace_name=event.workspace_id,
+                    message_id=None,  # Webhooks don't have a message_id
+                )
+                db.add(queue_item)
+                await db.commit()
+                logger.debug(
+                    "Published webhook event '%s' for workspace '%s'",
+                    event.type,
                     event.workspace_id,
-                    {
-                        "task_type": "webhook",
-                    },
-                ),
-                payload=payload,
-                session_id=None,
-                task_type="webhook",
-                workspace_name=event.workspace_id,
-                message_id=None,  # Webhooks don't have a message_id
-            )
-            db.add(queue_item)
-            await db.commit()
-            logger.debug(
-                "Published webhook event '%s' for workspace '%s'",
-                event.type,
-                event.workspace_id,
-            )
+                )
+        finally:
+            reset_workspace(token)
 
     except Exception:
         logger.exception(

@@ -180,13 +180,17 @@ def parse_work_unit_key(work_unit_key: str) -> ParsedWorkUnit:
         )
 
     if task_type == "reconciler":
-        if len(parts) != 2:
+        if len(parts) == 2:
+            workspace_name = None
+        elif len(parts) == 3:
+            workspace_name = parts[2]
+        else:
             raise ValueError(
                 f"Invalid work_unit_key format for task_type {task_type}: {work_unit_key}"
             )
         return ParsedWorkUnit(
             task_type=task_type,
-            workspace_name=None,
+            workspace_name=workspace_name,
             session_name=None,
             observer=None,
             observed=None,

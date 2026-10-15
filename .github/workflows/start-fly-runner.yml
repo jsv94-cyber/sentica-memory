@@ -25,7 +25,7 @@ jobs:
   start-runner:
     if: false
     name: Start Fly Runner
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       actions: read
       contents: read
@@ -37,7 +37,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Generate unique runner labels
         id: generate-labels

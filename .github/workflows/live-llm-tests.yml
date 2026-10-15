@@ -36,7 +36,7 @@ jobs:
     # Manual triggers (label / workflow_dispatch) additionally require the
     # gate's CODEOWNERS check to have passed.
     if: false
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     environment: unified-tests
     permissions:
@@ -46,7 +46,7 @@ jobs:
       PYTHONUNBUFFERED: "1"
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
 
@@ -82,13 +82,13 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v2
+        uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version-file: ".python-version"
 

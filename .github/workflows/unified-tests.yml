@@ -59,7 +59,7 @@ jobs:
       TEST_DISCORD_WEBHOOK_URL: ${{ secrets.TEST_DISCORD_WEBHOOK_URL }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
 
@@ -149,7 +149,7 @@ jobs:
 
   cleanup-machine:
     name: Cleanup Fly Machine and Runner
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [start-runner, unified-tests]
     if: false
     env:

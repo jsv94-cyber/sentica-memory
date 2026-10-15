@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 from datetime import UTC, datetime
 from logging import getLogger
+from typing import Any
 
 import sentry_sdk
 from sqlalchemy import exists, func, select
@@ -151,6 +152,9 @@ class DreamScheduler:
         documents_since_last_dream_at_schedule: int | None = None,
         document_threshold: int | None = None,
     ) -> None:
+        from src.sentica.workspace_scope import reset_workspace, set_workspace
+
+        token = set_workspace(workspace_name)
         try:
             await asyncio.sleep(delay_minutes * 60)
 
@@ -172,6 +176,8 @@ class DreamScheduler:
             logger.error("Error in delayed dream for %s: %s", work_unit_key, e)
             if settings.SENTRY.ENABLED:
                 sentry_sdk.capture_exception(e)
+        finally:
+            reset_workspace(token)
 
     async def execute_dream(
         self,
@@ -188,8 +194,42 @@ class DreamScheduler:
         """Execute the dream by enqueueing it."""
         from src import crud
         from src.deriver.enqueue import enqueue_dream
+        from src.sentica.workspace_scope import reset_workspace, set_workspace
         from src.utils.config_helpers import get_configuration
 
+        token = set_workspace(workspace_name)
+        try:
+            await self._execute_dream_bound(
+                workspace_name,
+                dream_type,
+                observer=observer,
+                observed=observed,
+                trigger_reason=trigger_reason,
+                delay_reason=delay_reason,
+                documents_since_last_dream_at_schedule=documents_since_last_dream_at_schedule,
+                document_threshold=document_threshold,
+                crud=crud,
+                enqueue_dream=enqueue_dream,
+                get_configuration=get_configuration,
+            )
+        finally:
+            reset_workspace(token)
+
+    async def _execute_dream_bound(
+        self,
+        workspace_name: str,
+        dream_type: DreamType,
+        *,
+        observer: str,
+        observed: str,
+        trigger_reason: str | None,
+        delay_reason: str | None,
+        documents_since_last_dream_at_schedule: int | None,
+        document_threshold: int | None,
+        crud: Any,
+        enqueue_dream: Any,
+        get_configuration: Any,
+    ) -> None:
         async with tracked_db("dream_session_lookup") as db:
             stmt = (
                 select(models.Document.session_name)

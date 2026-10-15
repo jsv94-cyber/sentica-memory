@@ -42,7 +42,9 @@ Client certificates are valid for 48 hours and are meant to be replaced
 every 24 hours. New connections read the certificate and key files again.
 Replace them by writing a temporary file in the same directory and renaming
 it onto the destination, certificate and key together, so a reader never
-sees a partial pair. A pooled connection is dropped on checkout when either
+sees a partial pair. The certificate directory must be bind-mounted as a
+directory, not as individual files, so that rename is visible inside the
+container. A pooled connection is dropped on checkout when either
 file changes. Pooled connections are also recycled after at most one hour.
 
 Tokens are EdDSA or RS256, checked with the public key on the instance.
@@ -51,8 +53,15 @@ equal to this instance are required. An `ad` admin claim is refused.
 Expired, forged, wrong-issuer, and wrong-tenant tokens are refused and
 counted. The log line is a fixed phrase and does not include the token.
 
-Honcho tables live in the schema `memory`. The database role used by the
-instance is granted that schema only.
+Honcho tables live in the schema `memory`. The runtime role has `USAGE` on
+that schema and row grants. It is not the owner, it cannot create objects,
+and it does not bypass row-level security. A separate migration role owns
+the schema. Its certificate is mounted only into the one-shot migrate
+service.
+
+The proxy may use session pooling or transaction pooling. Every statement
+runs inside a transaction, and the workspace setting is local to that
+transaction, so neither pool mode keeps it after commit.
 
 If the proxy drops a connection, an in-flight transaction rolls back. The
 API answers `503` with `{"detail":"memory unavailable"}`. The deriver treats

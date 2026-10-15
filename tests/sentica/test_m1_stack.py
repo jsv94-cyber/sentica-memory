@@ -34,6 +34,8 @@ from cryptography.hazmat.primitives.asymmetric import ed25519, rsa
 from cryptography.hazmat.primitives.hashes import SHA256
 from cryptography.x509.oid import NameOID
 
+from tests.sentica.scram import scram_verifier
+
 pytestmark = pytest.mark.xdist_group(name="sentica_m1_stack")
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -76,11 +78,15 @@ def _compose(
     check: bool = True,
     stdin: str | None = None,
     timeout: float | None = None,
+    extra_files: list[str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     if not cert_dir_holder:
         raise RuntimeError("CERT_DIR is not set")
+    file_args = ["-f", str(COMPOSE_FILE)]
+    for extra in extra_files or []:
+        file_args.extend(["-f", extra])
     return _run(
-        ["docker", "compose", "-p", PROJECT, "-f", str(COMPOSE_FILE), *args],
+        ["docker", "compose", "-p", PROJECT, *file_args, *args],
         check=check,
         env={
             "CERT_DIR": cert_dir_holder[0],
@@ -137,6 +143,25 @@ def _assert_sqlstate(cert_dir: Path, sql: str, sqlstate: str) -> None:
     ):
         cur.execute(sql)  # pyright: ignore[reportCallIssue, reportArgumentType]
     assert exc.value.sqlstate == sqlstate
+
+
+def _bind_workspace(cur: Any, workspace: str) -> None:
+    """Let a raw tenant connection see one workspace under row-level security."""
+    cur.execute(
+        "SELECT set_config('sentica.workspace', %s, true)",
+        (workspace,),
+    )
+
+
+def _ensure_workspace(cur: Any, workspace: str) -> None:
+    cur.execute(
+        """
+        INSERT INTO memory.workspaces (id, name)
+        VALUES (%s, %s)
+        ON CONFLICT (name) DO NOTHING
+        """,
+        (uuid.uuid4().hex[:21], workspace),
+    )
 
 
 def _connect(
@@ -221,7 +246,14 @@ def stack() -> Iterator[Path]:
     secret_dir.mkdir()
     secret_dir_holder.clear()
     secret_dir_holder.append(str(secret_dir))
-    for name in ("tenant-a", "tenant-b", "userlist-a.txt", "userlist-b.txt"):
+    for name in (
+        "tenant-a",
+        "tenant-b",
+        "tenant-a-ddl",
+        "tenant-b-ddl",
+        "userlist-a.txt",
+        "userlist-b.txt",
+    ):
         (secret_dir / name).write_text("placeholder\n", encoding="utf-8")
     try:
         subprocess.run(
@@ -250,14 +282,30 @@ def stack() -> Iterator[Path]:
         cert_dir_holder.append(str(public))
         password_a = secrets.token_hex(24)
         password_b = secrets.token_hex(24)
-        (secret_dir / "tenant-a").write_text(password_a, encoding="utf-8")
-        (secret_dir / "tenant-b").write_text(password_b, encoding="utf-8")
+        password_a_ddl = secrets.token_hex(24)
+        password_b_ddl = secrets.token_hex(24)
+        (secret_dir / "tenant-a").write_text(
+            scram_verifier(password_a), encoding="utf-8"
+        )
+        (secret_dir / "tenant-b").write_text(
+            scram_verifier(password_b), encoding="utf-8"
+        )
+        (secret_dir / "tenant-a-ddl").write_text(
+            scram_verifier(password_a_ddl), encoding="utf-8"
+        )
+        (secret_dir / "tenant-b-ddl").write_text(
+            scram_verifier(password_b_ddl), encoding="utf-8"
+        )
         (secret_dir / "userlist-a.txt").write_text(
-            f'"tenant_a" "{password_a}"\n"sentica_operator" ""\n',
+            f'"tenant_a" "{password_a}"\n'
+            f'"tenant_a_ddl" "{password_a_ddl}"\n'
+            '"sentica_operator" ""\n',
             encoding="utf-8",
         )
         (secret_dir / "userlist-b.txt").write_text(
-            f'"tenant_b" "{password_b}"\n"sentica_operator" ""\n',
+            f'"tenant_b" "{password_b}"\n'
+            f'"tenant_b_ddl" "{password_b_ddl}"\n'
+            '"sentica_operator" ""\n',
             encoding="utf-8",
         )
         for path in secret_dir.iterdir():
@@ -265,6 +313,8 @@ def stack() -> Iterator[Path]:
         for name in (
             "tenant_a.key",
             "tenant_b.key",
+            "tenant_a_ddl.key",
+            "tenant_b_ddl.key",
             "sentica_operator.key",
             "pgbouncer-a.key",
             "pgbouncer-b.key",
@@ -663,6 +713,7 @@ def test_revocation_rolls_back_and_reports_unavailable(stack: Path) -> None:
                 _connect(PROXY_A, stack, "tenant_a", "tenant_a", "tenant_a") as conn,
                 conn.cursor() as cur,
             ):
+                _bind_workspace(cur, workspace)
                 cur.execute(
                     "SELECT count(*) FROM memory.messages WHERE content = %s",
                     (canary,),
@@ -681,10 +732,14 @@ def test_deriver_refuses_other_tenant(stack: Path) -> None:
     canary = f"canary-{uuid.uuid4().hex}"
     with _connect(PROXY_A, stack, "tenant_a", "tenant_a", "tenant_a") as conn:
         with conn.cursor() as cur:
+            _ensure_workspace(cur, "m1ws")
+            _bind_workspace(cur, "m1ws")
             cur.execute(
                 """
-                INSERT INTO memory.queue (work_unit_key, task_type, payload, processed)
-                VALUES (%s, 'deletion', %s::jsonb, false)
+                INSERT INTO memory.queue (
+                    work_unit_key, task_type, payload, processed, workspace_name
+                )
+                VALUES (%s, 'deletion', %s::jsonb, false, %s)
                 """,
                 (
                     "deletion:m1ws:message:m1msg",
@@ -696,6 +751,7 @@ def test_deriver_refuses_other_tenant(stack: Path) -> None:
                             "marker": canary,
                         }
                     ),
+                    "m1ws",
                 ),
             )
         conn.commit()
@@ -707,6 +763,7 @@ def test_deriver_refuses_other_tenant(stack: Path) -> None:
             _connect(PROXY_A, stack, "tenant_a", "tenant_a", "tenant_a") as conn,
             conn.cursor() as cur,
         ):
+            _bind_workspace(cur, "m1ws")
             cur.execute(
                 "SELECT error FROM memory.queue WHERE work_unit_key = %s",
                 ("deletion:m1ws:message:m1msg",),
@@ -956,6 +1013,7 @@ def test_reconciler_and_webhook_complete(stack: Path) -> None:
             _connect(PROXY_A, stack, "tenant_a", "tenant_a", "tenant_a") as conn,
             conn.cursor() as cur,
         ):
+            _bind_workspace(cur, "m1-workspace")
             cur.execute(
                 "SELECT task_type, processed, error, payload->>'tenant_id' "
                 "FROM memory.queue WHERE task_type IN ('reconciler', 'webhook') "
@@ -981,7 +1039,9 @@ def test_reconciler_and_webhook_complete(stack: Path) -> None:
 def test_representation_rows_for_other_tenant_are_all_errored(stack: Path) -> None:
     from src.deriver.queue_manager import QueueManager
 
-    source = inspect.getsource(QueueManager.process_work_unit)
+    source = inspect.getsource(
+        QueueManager._process_work_unit  # pyright: ignore[reportPrivateUsage]
+    )
     assert source.index("await self.reject_foreign_queue_rows") < source.index(
         "await self.get_queue_item_batch"
     )
@@ -989,16 +1049,20 @@ def test_representation_rows_for_other_tenant_are_all_errored(stack: Path) -> No
     work_unit = "representation:m1-workspace:m1-session:m1-peer"
     with _connect(PROXY_A, stack, "tenant_a", "tenant_a", "tenant_a") as conn:
         with conn.cursor() as cur:
+            _ensure_workspace(cur, "m1-workspace")
+            _bind_workspace(cur, "m1-workspace")
             for _ in range(2):
                 cur.execute(
                     """
-                    INSERT INTO memory.queue
-                        (work_unit_key, task_type, payload, processed)
-                    VALUES (%s, 'representation', %s::jsonb, false)
+                    INSERT INTO memory.queue (
+                        work_unit_key, task_type, payload, processed, workspace_name
+                    )
+                    VALUES (%s, 'representation', %s::jsonb, false, %s)
                     """,
                     (
                         work_unit,
                         json.dumps({"tenant_id": "tenant-b", "content": canary}),
+                        "m1-workspace",
                     ),
                 )
         conn.commit()
@@ -1009,6 +1073,7 @@ def test_representation_rows_for_other_tenant_are_all_errored(stack: Path) -> No
             _connect(PROXY_A, stack, "tenant_a", "tenant_a", "tenant_a") as conn,
             conn.cursor() as cur,
         ):
+            _bind_workspace(cur, "m1-workspace")
             cur.execute(
                 "SELECT processed, error FROM memory.queue WHERE work_unit_key = %s",
                 (work_unit,),
@@ -1025,52 +1090,68 @@ def test_representation_rows_for_other_tenant_are_all_errored(stack: Path) -> No
 
 
 def test_deriver_resumes_a_pending_row_once(stack: Path) -> None:
-    work_unit = "reconciler:cleanup_queue"
+    workspace = "m1-resume"
+    work_unit = "reconciler:cleanup_queue:m1-resume"
     _compose(["stop", "deriver-a"])
-    with _connect(PROXY_A, stack, "tenant_a", "tenant_a", "tenant_a") as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO memory.queue
-                    (work_unit_key, task_type, payload, processed)
-                VALUES (%s, 'reconciler', %s::jsonb, false)
-                """,
-                (
-                    work_unit,
-                    json.dumps(
-                        {"tenant_id": "tenant-a", "reconciler_type": "cleanup_queue"}
-                    ),
-                ),
-            )
-        conn.commit()
-    _compose(["stop", "pgbouncer-a"])
-    _compose(["start", "deriver-a"])
-    time.sleep(2)
-    _compose(["start", "pgbouncer-a"])
-    deadline = time.monotonic() + 40
     count = 0
     error = "pending"
-    while time.monotonic() < deadline:
-        try:
-            with (
-                _connect(PROXY_A, stack, "tenant_a", "tenant_a", "tenant_a") as conn,
-                conn.cursor() as cur,
-            ):
+    try:
+        with _connect(PROXY_A, stack, "tenant_a", "tenant_a", "tenant_a") as conn:
+            with conn.cursor() as cur:
+                _ensure_workspace(cur, workspace)
+                _bind_workspace(cur, workspace)
                 cur.execute(
-                    "SELECT count(*), max(error) FROM memory.queue "
-                    "WHERE work_unit_key = %s AND processed",
-                    (work_unit,),
+                    """
+                    INSERT INTO memory.queue (
+                        work_unit_key, task_type, payload, processed,
+                        workspace_name
+                    )
+                    VALUES (%s, 'reconciler', %s::jsonb, false, %s)
+                    """,
+                    (
+                        work_unit,
+                        json.dumps(
+                            {
+                                "tenant_id": "tenant-a",
+                                "reconciler_type": "cleanup_queue",
+                            }
+                        ),
+                        workspace,
+                    ),
                 )
-                row = cur.fetchone()
-                assert row is not None
-                count = int(str(row[0]))
-                error = "" if row[1] is None else str(row[1])
-                if count == 1 and not error:
-                    break
-        except psycopg.Error:
+            conn.commit()
+        _compose(["stop", "pgbouncer-a"])
+        _compose(["start", "deriver-a"])
+        time.sleep(2)
+        _compose(["start", "pgbouncer-a"])
+        deadline = time.monotonic() + 40
+        while time.monotonic() < deadline:
+            try:
+                with (
+                    _connect(
+                        PROXY_A, stack, "tenant_a", "tenant_a", "tenant_a"
+                    ) as conn,
+                    conn.cursor() as cur,
+                ):
+                    _bind_workspace(cur, workspace)
+                    cur.execute(
+                        "SELECT count(*), max(error) FROM memory.queue "
+                        "WHERE work_unit_key = %s AND processed",
+                        (work_unit,),
+                    )
+                    row = cur.fetchone()
+                    assert row is not None
+                    count = int(str(row[0]))
+                    error = "" if row[1] is None else str(row[1])
+                    if count == 1 and not error:
+                        break
+            except psycopg.Error:
+                time.sleep(0.5)
+                continue
             time.sleep(0.5)
-            continue
-        time.sleep(0.5)
+    finally:
+        _compose(["start", "pgbouncer-a"], check=False)
+        _compose(["start", "deriver-a"], check=False)
     assert count == 1
     assert not error
 
@@ -1168,10 +1249,67 @@ def test_database_error_canary_is_absent_from_logs(stack: Path) -> None:
     for secret in (canary, session_name, peer_name):
         assert secret not in combined
     assert "DETAIL:" not in combined
-    logs = _run(["docker", "logs", f"{PROJECT}-api-a-1"], check=False)
-    logged = logs.stdout + logs.stderr
-    for secret in (canary, session_name, peer_name):
-        assert secret not in logged
+    assert "sentica.named" in combined
+
+
+def test_named_request_and_dream_log_omit_names(stack: Path) -> None:
+    canary = f"dream-canary-{uuid.uuid4().hex}"
+    key_a = _token_key(stack, "a")
+    token = _token(
+        key_a,
+        issuer="sentica-test-issuer-a",
+        tenant="tenant-a",
+        request_id="dream-logs",
+        workspace=canary,
+    )
+    headers = {"Authorization": f"Bearer {token}"}
+    created = httpx.post(
+        f"{API_A}/v3/workspaces",
+        headers=headers,
+        json={"name": canary},
+        timeout=20,
+    )
+    assert created.status_code in (200, 201), created.text
+    session_name = f"sess-{uuid.uuid4().hex[:8]}"
+    peer_name = f"peer-{uuid.uuid4().hex[:8]}"
+    session = httpx.post(
+        f"{API_A}/v3/workspaces/{canary}/sessions",
+        headers=headers,
+        json={"id": session_name},
+        timeout=20,
+    )
+    assert session.status_code in (200, 201), session.text
+    peer = httpx.post(
+        f"{API_A}/v3/workspaces/{canary}/peers",
+        headers=headers,
+        json={"name": peer_name},
+        timeout=20,
+    )
+    assert peer.status_code in (200, 201), peer.text
+    script = (
+        "import logging\n"
+        "logging.basicConfig(level=logging.INFO)\n"
+        "from src.db import SessionLocal\n"
+        "workspace = " + repr(canary) + "\n"
+        "peer = " + repr(peer_name) + "\n"
+        "session = " + repr(session_name) + "\n"
+        "logging.getLogger('src.dreamer.orchestrator').info(\n"
+        "    f'dream cycle for {workspace}/{peer}/{session}')\n"
+        "logging.getLogger('src.dreamer.orchestrator').info(\n"
+        "    'observed=%s', peer)\n"
+        "print('logged', SessionLocal is not None)\n"
+    )
+    for service in ("api-a", "deriver-a"):
+        ran = _compose(
+            ["exec", "-T", service, "/app/.venv/bin/python", "-"],
+            check=False,
+            stdin=script,
+        )
+        combined = ran.stdout + ran.stderr
+        assert ran.returncode == 0, ran.stderr[-1500:]
+        assert "logged" in combined
+        for secret in (canary, session_name, peer_name):
+            assert secret not in combined
 
 
 def test_pg_hba_rejects_trust_and_cross_tenant(stack: Path) -> None:
@@ -1250,15 +1388,25 @@ def test_migration_exits_when_proxy_is_paused(stack: Path) -> None:
     started = time.monotonic()
     try:
         result = _compose(
-            ["run", "--no-deps", "--rm", "-T", "api-a"],
+            [
+                "run",
+                "--no-deps",
+                "--rm",
+                "-T",
+                "-e",
+                "DB_MIGRATION_LOCK_WAIT_SECONDS=2",
+                "-e",
+                "SENTICA_MIGRATION_TIMEOUT_SECONDS=8",
+                "migrate-a",
+            ],
             check=False,
-            timeout=150,
+            timeout=40,
         )
     finally:
         _compose(["unpause", "pgbouncer-a"], check=False)
     output = result.stdout + result.stderr
     assert result.returncode != 0, output[-2000:]
-    assert time.monotonic() - started < 140
+    assert time.monotonic() - started < 25
     assert "Starting API server" not in output
 
 
@@ -1324,3 +1472,318 @@ def test_migration_exits_when_cert_is_revoked(stack: Path) -> None:
     assert result.returncode != 0, output[-2000:]
     assert time.monotonic() - started < 120
     assert "Starting API server" not in output
+
+
+def test_api_and_deriver_have_no_tenant_password(stack: Path) -> None:
+    secret_dir = stack.parent / "secrets"
+    passwords: list[str] = []
+    for name in ("userlist-a.txt", "userlist-b.txt"):
+        for line in (secret_dir / name).read_text(encoding="utf-8").splitlines():
+            if not line or "sentica_operator" in line:
+                continue
+            passwords.append(line.split('"')[3])
+    assert len(passwords) == 4
+    # Search inside the container and print only hits. Copying every file
+    # back to the test process exhausts memory.
+    script = (
+        "import pathlib\n"
+        f"passwords = {passwords!r}\n"
+        "env = pathlib.Path('/proc/1/environ').read_bytes()\n"
+        "for password in passwords:\n"
+        "    if password.encode() in env:\n"
+        "        print('ENV_HIT')\n"
+        "skip = ('/proc', '/sys', '/dev')\n"
+        "for path in pathlib.Path('/').rglob('*'):\n"
+        "    text = str(path)\n"
+        "    if text.startswith(skip):\n"
+        "        continue\n"
+        "    if (\n"
+        "        text == '/secrets' or text.startswith('/secrets/')\n"
+        "        or text == '/in' or text.startswith('/in/')\n"
+        "        or path.name.startswith('userlist')\n"
+        "    ):\n"
+        "        print('FORBIDDEN', text)\n"
+        "    if not path.is_file():\n"
+        "        continue\n"
+        "    try:\n"
+        "        data = path.read_bytes()\n"
+        "    except OSError:\n"
+        "        continue\n"
+        "    if any(password.encode() in data for password in passwords):\n"
+        "        print('FILE_HIT', text)\n"
+    )
+    for service in ("api-a", "api-b", "deriver-a", "deriver-b"):
+        ran = _compose(
+            ["exec", "-T", service, "/app/.venv/bin/python", "-"],
+            check=False,
+            stdin=script,
+        )
+        assert ran.returncode == 0, ran.stderr[-1500:]
+        combined = ran.stdout + ran.stderr
+        assert "FORBIDDEN" not in combined
+        assert "ENV_HIT" not in combined
+        assert "FILE_HIT" not in combined
+
+
+def test_tenant_a_cannot_escape_its_workspace(stack: Path) -> None:
+    for statement in (
+        "ALTER TABLE memory.messages NO FORCE ROW LEVEL SECURITY",
+        "DROP POLICY sentica_workspace ON memory.messages",
+        "CREATE TABLE memory.should_fail (id int)",
+    ):
+        _assert_sqlstate(stack, statement, "42501")
+    left = "a" + uuid.uuid4().hex[:20]
+    right = "b" + uuid.uuid4().hex[:20]
+    with (
+        _connect(PROXY_A, stack, "tenant_a", "tenant_a", "tenant_a") as conn,
+        conn.cursor() as cur,
+    ):
+        cur.execute("SELECT pg_has_role(current_user, 'tenant_a_ddl', 'USAGE')")
+        assert cur.fetchone() == (False,)
+        for name in (left, right):
+            _ensure_workspace(cur, name)
+        conn.commit()
+        _bind_workspace(cur, left)
+        cur.execute(
+            "INSERT INTO memory.peers (id, name, workspace_name) VALUES (%s, %s, %s)",
+            ("p" + uuid.uuid4().hex[:20], "peer", left),
+        )
+        with pytest.raises(psycopg.Error) as cross:
+            cur.execute(
+                "INSERT INTO memory.peers (id, name, workspace_name) "
+                "VALUES (%s, %s, %s)",
+                ("q" + uuid.uuid4().hex[:20], "peer", right),
+            )
+        assert cross.value.sqlstate == "42501"
+        conn.rollback()
+        _bind_workspace(cur, left)
+        cur.execute(
+            "INSERT INTO memory.peers (id, name, workspace_name) VALUES (%s, %s, %s)",
+            ("p" + uuid.uuid4().hex[:20], "peer", left),
+        )
+        with pytest.raises(psycopg.Error) as moved:
+            cur.execute(
+                "UPDATE memory.peers SET workspace_name = %s WHERE workspace_name = %s",
+                (right, left),
+            )
+        assert moved.value.sqlstate == "42501"
+        conn.rollback()
+        _bind_workspace(cur, left)
+        cur.execute(
+            "INSERT INTO memory.peers (id, name, workspace_name) VALUES (%s, %s, %s)",
+            ("p" + uuid.uuid4().hex[:20], "peer", left),
+        )
+        conn.commit()
+        _bind_workspace(cur, "")
+        cur.execute("SELECT count(*) FROM memory.peers")
+        hidden = cur.fetchone()
+        assert hidden is not None and hidden[0] == 0
+        _bind_workspace(cur, left)
+        cur.execute("SELECT count(*) FROM memory.peers")
+        visible = cur.fetchone()
+        assert visible is not None and visible[0] == 1
+
+
+def test_ddl_key_is_not_mounted_into_api_or_deriver(stack: Path) -> None:
+    del stack
+    for service in ("api-a", "api-b", "deriver-a", "deriver-b"):
+        ran = _compose(
+            [
+                "exec",
+                "-T",
+                service,
+                "sh",
+                "-c",
+                "test ! -e /certs/tenant_a_ddl.key && test ! -e /certs/tenant_b_ddl.key",
+            ],
+            check=False,
+        )
+        assert ran.returncode == 0, ran.stderr[-500:]
+
+
+def test_posted_message_embedding_leaves_pending(stack: Path) -> None:
+    workspace = "m2embed" + uuid.uuid4().hex[:8]
+    content = "embed-" + uuid.uuid4().hex
+    private = _token_key(stack, "a")
+    token = _token(
+        private,
+        issuer="sentica-test-issuer-a",
+        tenant="tenant-a",
+        workspace=workspace,
+    )
+    headers = {"Authorization": f"Bearer {token}"}
+    created = httpx.post(
+        f"{API_A}/v3/workspaces",
+        headers=headers,
+        json={"name": workspace},
+        timeout=20,
+    )
+    assert created.status_code in (200, 201), created.text
+    assert httpx.post(
+        f"{API_A}/v3/workspaces/{workspace}/sessions",
+        headers=headers,
+        json={"id": "s1"},
+        timeout=20,
+    ).status_code in (200, 201)
+    assert httpx.post(
+        f"{API_A}/v3/workspaces/{workspace}/peers",
+        headers=headers,
+        json={"name": "p1"},
+        timeout=20,
+    ).status_code in (200, 201)
+    posted = httpx.post(
+        f"{API_A}/v3/workspaces/{workspace}/sessions/s1/messages",
+        headers=headers,
+        json={"messages": [{"peer_id": "p1", "content": content}]},
+        timeout=20,
+    )
+    assert posted.status_code in (200, 201), posted.text
+    # The request path may embed the row immediately. Put it back so the
+    # scheduler gate, not that path, is what the deriver claims.
+    deadline = time.monotonic() + 20
+    saw_row = False
+    while time.monotonic() < deadline:
+        with (
+            _connect(PROXY_A, stack, "tenant_a", "tenant_a", "tenant_a") as conn,
+            conn.cursor() as cur,
+        ):
+            _bind_workspace(cur, workspace)
+            cur.execute(
+                "SELECT sync_state FROM memory.message_embeddings WHERE content = %s",
+                (content,),
+            )
+            row = cur.fetchone()
+        if row is not None:
+            saw_row = True
+            if str(row[0]) != "pending":
+                break
+        time.sleep(0.5)
+    assert saw_row
+    with (
+        _connect(PROXY_A, stack, "tenant_a", "tenant_a", "tenant_a") as conn,
+        conn.cursor() as cur,
+    ):
+        _bind_workspace(cur, workspace)
+        cur.execute(
+            "UPDATE memory.message_embeddings SET sync_state = 'pending', "
+            "embedding = NULL, last_sync_at = NULL WHERE content = %s",
+            (content,),
+        )
+        conn.commit()
+    script = (
+        "import asyncio\n"
+        "from src.dependencies import tracked_db\n"
+        "from src.reconciler.scheduler import RECONCILER_TASKS, ReconcilerScheduler\n"
+        "from src.sentica.workspace_scope import fetch_pending_counts\n"
+        "wanted = " + repr(workspace) + "\n"
+        "async def main():\n"
+        "    async with tracked_db('stack.counts', read_only=True) as db:\n"
+        "        counts = await fetch_pending_counts(db)\n"
+        "    assert counts is not None\n"
+        "    names = [\n"
+        "        row.workspace_name for row in counts if row.pending_embeddings > 0\n"
+        "    ]\n"
+        "    print('gate', wanted in names)\n"
+        "    scheduler = ReconcilerScheduler()\n"
+        "    enqueued = await scheduler._try_enqueue_task(\n"
+        "        RECONCILER_TASKS['sync_vectors']\n"
+        "    )\n"
+        "    print('enqueued', bool(enqueued))\n"
+        "asyncio.run(main())\n"
+    )
+    assert "run_vector_reconciliation_cycle" not in script
+    ran = _compose(
+        ["exec", "-T", "deriver-a", "/app/.venv/bin/python", "-"],
+        check=False,
+        stdin=script,
+        timeout=60,
+    )
+    assert ran.returncode == 0, ran.stderr[-1500:] + ran.stdout[-1500:]
+    assert "gate True" in ran.stdout
+    assert "enqueued True" in ran.stdout
+    deadline = time.monotonic() + 90
+    state = "pending"
+    queue_ok = False
+    row: tuple[object, ...] | None = None
+    queued: tuple[object, ...] | None = None
+    while time.monotonic() < deadline and (state != "synced" or not queue_ok):
+        with (
+            _connect(PROXY_A, stack, "tenant_a", "tenant_a", "tenant_a") as conn,
+            conn.cursor() as cur,
+        ):
+            _bind_workspace(cur, workspace)
+            cur.execute(
+                "SELECT sync_state, embedding::text "
+                "FROM memory.message_embeddings WHERE content = %s",
+                (content,),
+            )
+            row = cur.fetchone()
+            cur.execute(
+                "SELECT processed, error IS NULL FROM memory.queue "
+                "WHERE work_unit_key = %s",
+                ("reconciler:sync_vectors:" + workspace,),
+            )
+            queued = cur.fetchone()
+        assert row is not None
+        state = str(row[0])
+        queue_ok = queued is not None and queued[0] is True and queued[1] is True
+        if state != "synced" or not queue_ok:
+            time.sleep(1)
+    assert state == "synced", (state, row, queued)
+    assert row is not None
+    vector = str(row[1])
+    assert vector.startswith("[")
+    assert not vector.startswith("[0,0,")
+    assert queue_ok
+
+
+def test_api_refuses_a_stale_schema_and_a_runtime_cert_as_ddl(stack: Path) -> None:
+    """api-a will not boot on an old revision, and the runtime cert is not ddl."""
+    with (
+        _connect(PROXY_A, stack, "tenant_a_ddl", "tenant_a", "tenant_a_ddl") as conn,
+        conn.cursor() as cur,
+    ):
+        cur.execute("SELECT version_num FROM memory.alembic_version")
+        current = cur.fetchone()
+        assert current is not None
+        head = str(current[0])
+        cur.execute(
+            "UPDATE memory.alembic_version SET version_num = %s",
+            ("3e7a1c9d5b20",),
+        )
+        conn.commit()
+    # api-a already owns 172.28.10.10. The one-off uses another address on net-a.
+    override = stack.parent / "api-a-once.yml"
+    override.write_text(
+        "services:\n"
+        "  api-a:\n"
+        "    networks:\n"
+        "      net-a:\n"
+        "        ipv4_address: 172.28.10.50\n",
+        encoding="utf-8",
+    )
+    try:
+        ran = _compose(
+            ["run", "--no-deps", "--rm", "-T", "api-a"],
+            check=False,
+            timeout=90,
+            extra_files=[str(override)],
+        )
+        output = ran.stdout + ran.stderr
+        assert ran.returncode != 0, output[-1500:]
+        assert "Refusing to start: schema revision is behind" in output
+    finally:
+        override.unlink(missing_ok=True)
+        with (
+            _connect(
+                PROXY_A, stack, "tenant_a_ddl", "tenant_a", "tenant_a_ddl"
+            ) as conn,
+            conn.cursor() as cur,
+        ):
+            cur.execute(
+                "UPDATE memory.alembic_version SET version_num = %s",
+                (head,),
+            )
+            conn.commit()
+    with pytest.raises(psycopg.OperationalError):
+        _connect(PROXY_A, stack, "tenant_a_ddl", "tenant_a", "tenant_a").close()

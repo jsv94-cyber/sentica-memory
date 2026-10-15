@@ -38,10 +38,33 @@ x-common-env: &common-env
   DB_POOL_RECYCLE: "2"
   COLLECT_METRICS_LOCAL: "false"
   LLM_ANTHROPIC_API_KEY: sentica-local-dummy
-  LLM_OPENAI_API_KEY: sentica-local-dummy
+  LLM_OPENAI_API_KEY: sentica-stack-key
+  LLM_OPENAI_BASE_URL: http://embeddings:8080/v1
+  EMBEDDING_MODEL_CONFIG__OVERRIDES__BASE_URL: http://embeddings:8080/v1
   LLM_GEMINI_API_KEY: sentica-local-dummy
 
 services:
+  embeddings:
+    image: python:3.13-slim
+    logging: *no-disk-logs
+    command: ["python", "/fake_embeddings.py"]
+    volumes:
+      - ./docker/sentica/fake_embeddings.py:/fake_embeddings.py:ro
+    networks:
+      - net-a
+      - net-b
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2).read()",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
   database:
     image: pgvector/pgvector:pg15
     logging: *no-disk-logs
@@ -60,8 +83,12 @@ services:
       - ./docker/sentica/postgres-entry.sh:/postgres-entry.sh:ro
       - ${SECRET_DIR}/tenant-a:/secrets/tenant-a:ro
       - ${SECRET_DIR}/tenant-b:/secrets/tenant-b:ro
+      - ${SECRET_DIR}/tenant-a-ddl:/secrets/tenant-a-ddl:ro
+      - ${SECRET_DIR}/tenant-b-ddl:/secrets/tenant-b-ddl:ro
     tmpfs:
       - /var/lib/postgresql/data:size=1g
+      - /var/lib/postgresql/secrets
+      - /var/lib/postgresql/certs
     networks:
       db:
         ipv4_address: 172.28.12.10
@@ -88,6 +115,8 @@ services:
       - ${CERT_DIR}/pgbouncer-a.crt:/in/server.crt:ro
       - ${CERT_DIR}/pgbouncer-a.key:/in/server.key:ro
       - ${CERT_DIR}/client-ca.crt:/certs/client-ca.crt:ro
+    tmpfs:
+      - /tmp
     networks:
       db:
         ipv4_address: 172.28.12.13
@@ -116,6 +145,8 @@ services:
       - ${CERT_DIR}/pgbouncer-b.crt:/in/server.crt:ro
       - ${CERT_DIR}/pgbouncer-b.key:/in/server.key:ro
       - ${CERT_DIR}/client-ca.crt:/certs/client-ca.crt:ro
+    tmpfs:
+      - /tmp
     networks:
       db:
         ipv4_address: 172.28.12.14
@@ -173,10 +204,70 @@ services:
       timeout: 5s
       retries: 10
 
+  migrate-a:
+    build: *api-build
+    logging: *no-disk-logs
+    entrypoint: ["/app/docker/migrate-entrypoint.sh"]
+    restart: "no"
+    depends_on:
+      pgbouncer-a:
+        condition: service_healthy
+    environment:
+      <<: *common-env
+      SENTICA_TENANT_ID: tenant-a
+      SENTICA_DB_PROXY_HOST: pgbouncer-a
+      SENTICA_DB_USER: tenant_a_ddl
+      SENTICA_DB_NAME: tenant_a
+      SENTICA_TOKEN_ISSUER: sentica-test-issuer-a
+      SENTICA_CLIENT_CERT_PATH: /certs/tenant_a_ddl.crt
+      SENTICA_CLIENT_KEY_PATH: /certs/tenant_a_ddl.key
+      SENTICA_TOKEN_PUBLIC_KEY_PATH: /certs/tenant-a.token.pub
+      SENTICA_BIND_HOST: 172.28.10.15
+    volumes:
+      - ${CERT_DIR}/ca.crt:/certs/ca.crt:ro
+      - ${CERT_DIR}/tenant_a_ddl.crt:/certs/tenant_a_ddl.crt:ro
+      - ${CERT_DIR}/tenant_a_ddl.key:/certs/tenant_a_ddl.key:ro
+      - ${CERT_DIR}/tenant-a.token.pub:/certs/tenant-a.token.pub:ro
+    networks:
+      net-a:
+        ipv4_address: 172.28.10.15
+
+  migrate-b:
+    build: *api-build
+    logging: *no-disk-logs
+    entrypoint: ["/app/docker/migrate-entrypoint.sh"]
+    restart: "no"
+    depends_on:
+      pgbouncer-b:
+        condition: service_healthy
+    environment:
+      <<: *common-env
+      SENTICA_TENANT_ID: tenant-b
+      SENTICA_DB_PROXY_HOST: pgbouncer-b
+      SENTICA_DB_USER: tenant_b_ddl
+      SENTICA_DB_NAME: tenant_b
+      SENTICA_TOKEN_ISSUER: sentica-test-issuer-b
+      SENTICA_CLIENT_CERT_PATH: /certs/tenant_b_ddl.crt
+      SENTICA_CLIENT_KEY_PATH: /certs/tenant_b_ddl.key
+      SENTICA_TOKEN_PUBLIC_KEY_PATH: /certs/tenant-b.token.pub
+      SENTICA_BIND_HOST: 172.28.11.15
+    volumes:
+      - ${CERT_DIR}/ca.crt:/certs/ca.crt:ro
+      - ${CERT_DIR}/tenant_b_ddl.crt:/certs/tenant_b_ddl.crt:ro
+      - ${CERT_DIR}/tenant_b_ddl.key:/certs/tenant_b_ddl.key:ro
+      - ${CERT_DIR}/tenant-b.token.pub:/certs/tenant-b.token.pub:ro
+    networks:
+      net-b:
+        ipv4_address: 172.28.11.15
+
   api-a:
     build: *api-build
     logging: *no-disk-logs
     depends_on:
+      embeddings:
+        condition: service_healthy
+      migrate-a:
+        condition: service_completed_successfully
       pgbouncer-a:
         condition: service_healthy
       redis-a:
@@ -223,6 +314,10 @@ services:
     build: *api-build
     logging: *no-disk-logs
     depends_on:
+      embeddings:
+        condition: service_healthy
+      migrate-b:
+        condition: service_completed_successfully
       pgbouncer-b:
         condition: service_healthy
       redis-b:

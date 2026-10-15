@@ -1029,7 +1029,7 @@ class TestReconcilerTracing:
         ):
             worked = await _reconcile_message_embeddings_batch(None, metrics)
 
-        assert worked is False
+        assert worked == 0
         txn.assert_not_called()
 
     async def test_transaction_started_when_embeddings_present(self) -> None:
@@ -1054,7 +1054,7 @@ class TestReconcilerTracing:
         ):
             worked = await _reconcile_message_embeddings_batch(None, metrics)
 
-        assert worked is True
+        assert worked == 1
         assert metrics.message_embeddings_synced == 1
         txn.assert_called_once()
         assert txn.call_args.kwargs.get("name") == "reconcile_message_embeddings_batch"

@@ -193,43 +193,32 @@ async def test_get_read_db_rolls_back_and_closes(
     assert read_fake.close_calls == 1
 
 
-def test_read_engine_is_autocommit_and_shares_pool() -> None:
-    # The read engine must differ from the write engine ONLY by isolation
-    # level: AUTOCOMMIT (so reads never autobegin a transaction) on the same
-    # underlying pool (no second connection budget).
+def test_read_engine_is_read_only_and_shares_pool() -> None:
+    # Reads run in BEGIN READ ONLY on the same pool as writes.
     from src.db import engine, read_engine
 
-    assert (
-        read_engine.sync_engine._execution_options.get(  # pyright: ignore[reportPrivateUsage]
-            "isolation_level"
-        )
-        == "AUTOCOMMIT"
-    )
+    options = read_engine.sync_engine._execution_options  # pyright: ignore[reportPrivateUsage]
+    assert options.get("isolation_level") == "READ COMMITTED"
+    assert options.get("postgresql_readonly") is True
     assert read_engine.sync_engine.pool is engine.sync_engine.pool
 
 
 @pytest.mark.asyncio
-async def test_read_only_session_runs_in_autocommit_on_the_wire() -> None:
-    # Wire-level guarantee behind the whole read-path fix: a read_only session's
-    # connection has the DBAPI autocommit flag set, so psycopg emits no BEGIN
-    # and the backend sits in state 'idle' (not 'idle in transaction') after a
-    # statement returns. NOTE: get_isolation_level() can NOT verify this — it
-    # reports the server's transaction_isolation GUC (READ COMMITTED), because
-    # autocommit is a driver behavior, not a server isolation level.
+async def test_read_only_session_runs_in_a_read_only_transaction() -> None:
+    # A read checkout emits BEGIN READ ONLY. The workspace setting is local
+    # to that transaction.
     from sqlalchemy import text
 
     from src.db import read_engine
 
     async with real_tracked_db("read_op", read_only=True) as db:
         pid = (await db.execute(text("SELECT pg_backend_pid()"))).scalar()
+        mode = (await db.execute(text("SHOW transaction_read_only"))).scalar()
         conn = await db.connection()
         raw = (await conn.get_raw_connection()).driver_connection
         assert raw is not None
-        assert raw.autocommit is True
-
-        # Definitive check, from a second connection: after the SELECT above,
-        # the session's backend must be plain 'idle' — an open transaction
-        # would report 'idle in transaction' and be reapable in production.
+        assert raw.autocommit is False
+        assert mode == "on"
         async with read_engine.connect() as observer:
             state = (
                 await observer.execute(
@@ -237,7 +226,7 @@ async def test_read_only_session_runs_in_autocommit_on_the_wire() -> None:
                     {"p": pid},
                 )
             ).scalar()
-        assert state == "idle"
+        assert state == "idle in transaction"
 
 
 @pytest.mark.asyncio
@@ -290,13 +279,8 @@ async def test_read_only_session_works_with_tracing_checkout_hook() -> None:
             conn = await db.connection()
             raw = (await conn.get_raw_connection()).driver_connection
             assert raw is not None
-            # AUTOCOMMIT was applied despite the checkout hook running first.
-            assert raw.autocommit is True
-            # The hook still tagged the connection (set_config is session-scoped,
-            # so it survives the autocommit boundary).
+            assert raw.autocommit is False
             assert app_name == "tracing-regression"
-            # Backend is idle, not idle-in-transaction: the no-BEGIN guarantee
-            # holds even with the hook firing.
             async with read_engine.connect() as observer:
                 state = (
                     await observer.execute(
@@ -304,7 +288,7 @@ async def test_read_only_session_works_with_tracing_checkout_hook() -> None:
                         {"p": pid},
                     )
                 ).scalar()
-            assert state == "idle"
+            assert state == "idle in transaction"
     finally:
         event.remove(engine.sync_engine, "checkout", _set_application_name_on_checkout)
         request_context.reset(context_token)

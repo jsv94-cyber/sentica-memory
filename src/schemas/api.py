@@ -19,6 +19,7 @@ from pydantic import (
     ConfigDict,
     Field,
     PrivateAttr,
+    RootModel,
     field_validator,
     model_validator,
 )
@@ -290,16 +291,30 @@ class PeerRepresentationGet(BaseModel):
         le=100,
         description="Only used if `search_query` is provided. Maximum number of conclusions to include in the representation",
     )
+    workspaces: list[str] | None = Field(
+        default=None,
+        description="Workspaces to read. Each one is queried on its own.",
+    )
 
 
 class RepresentationResponse(BaseModel):
     representation: str
+    workspace_id: str | None = None
+
+
+class RepresentationList(RootModel[list[RepresentationResponse]]):
+    """Representations, one for each requested workspace."""
 
 
 class PeerCardResponse(BaseModel):
     peer_card: list[str] | None = Field(
         None, description="The peer card content, or None if not found"
     )
+    workspace_id: str | None = None
+
+
+class PeerCardList(RootModel[list[PeerCardResponse]]):
+    """Peer cards, one for each requested workspace."""
 
 
 class PeerCardSet(BaseModel):
@@ -489,10 +504,15 @@ class SessionContext(SessionBase):
         default=None,
         description="The peer card, if context is requested from a specific perspective",
     )
+    workspace_id: str | None = None
 
     model_config = ConfigDict(  # pyright: ignore
         from_attributes=True, populate_by_name=True
     )
+
+
+class SessionContextList(RootModel[list[SessionContext]]):
+    """Session contexts, one for each requested workspace."""
 
 
 class PeerContext(BaseModel):
@@ -508,6 +528,11 @@ class PeerContext(BaseModel):
         default=None,
         description="The peer card for the target peer from the observer's perspective",
     )
+    workspace_id: str | None = None
+
+
+class PeerContextList(RootModel[list[PeerContext]]):
+    """Peer contexts, one for each requested workspace."""
 
 
 class SessionSummaries(SessionBase):
@@ -739,6 +764,10 @@ class MessageSearchOptions(BaseModel):
         le=100,
         description="Number of results to return",
     )
+    workspaces: list[str] | None = Field(
+        default=None,
+        description="Workspaces to search. Each one is queried on its own.",
+    )
 
 
 class WorkspaceMessageSearchOptions(MessageSearchOptions):
@@ -823,6 +852,10 @@ class DialecticOptions(BaseModel):
     include_evidence: bool = Field(
         default=False, description=_INCLUDE_EVIDENCE_DESCRIPTION
     )
+    workspaces: list[str] | None = Field(
+        default=None,
+        description="Workspaces to query. Each one is answered on its own.",
+    )
 
 
 class WorkspaceChatOptions(BaseModel):
@@ -859,6 +892,10 @@ class WorkspaceChatOptions(BaseModel):
     )
     include_evidence: bool = Field(
         default=False, description=_INCLUDE_EVIDENCE_DESCRIPTION
+    )
+    workspaces: list[str] | None = Field(
+        default=None,
+        description="Workspaces to query. Each one is answered on its own.",
     )
 
 
@@ -961,6 +998,7 @@ class DialecticResponse(BaseModel):
         default=None,
         description="What the answer was built from. Present only when `include_evidence` is true.",
     )
+    workspace_id: str | None = None
 
 
 class DialecticStreamDelta(BaseModel):
