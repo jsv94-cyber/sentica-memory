@@ -12,7 +12,9 @@
 # deriver environments have no database password. Postgres data and Redis
 # data are tmpfs and disappear when the containers stop. Logs use the none
 # driver so Docker does not write them to the host disk.
-# Published ports bind 127.0.0.1 for this local proof only.
+# Published ports bind 127.0.0.1 for this local proof only. Docker does not
+# publish a port from an internal network, so publish-a and publish-b forward
+# those ports. The API, deriver, proxy, and database are not on that network.
 
 name: sentica-m1
 
@@ -42,6 +44,14 @@ x-common-env: &common-env
   LLM_OPENAI_BASE_URL: http://embeddings:8080/v1
   EMBEDDING_MODEL_CONFIG__OVERRIDES__BASE_URL: http://embeddings:8080/v1
   LLM_GEMINI_API_KEY: sentica-stack-key
+  HOME: /tmp
+
+x-hardened: &hardened
+  read_only: true
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
 
 services:
   embeddings:
@@ -81,6 +91,8 @@ services:
       - ./docker/sentica/20-passwords.sh:/docker-entrypoint-initdb.d/20-passwords.sh:ro
       - ./docker/sentica/pg_hba.conf:/etc/sentica/pg_hba.conf:ro
       - ./docker/sentica/postgres-entry.sh:/postgres-entry.sh:ro
+      - ${CERT_DIR}/database.crt:/in/database.crt:ro
+      - ${CERT_DIR}/database.key:/in/database.key:ro
       - ${SECRET_DIR}/tenant-a:/secrets/tenant-a:ro
       - ${SECRET_DIR}/tenant-b:/secrets/tenant-b:ro
       - ${SECRET_DIR}/tenant-a-ddl:/secrets/tenant-a-ddl:ro
@@ -106,8 +118,6 @@ services:
     depends_on:
       database:
         condition: service_healthy
-    ports:
-      - "127.0.0.1:${SENTICA_PROXY_A_PORT:-6433}:6432"
     volumes:
       - ./docker/sentica/pgbouncer-entry.sh:/pgbouncer-entry.sh:ro
       - ./docker/sentica/pgbouncer-a.ini:/etc/pgbouncer/pgbouncer.ini:ro
@@ -115,6 +125,7 @@ services:
       - ${CERT_DIR}/pgbouncer-a.crt:/in/server.crt:ro
       - ${CERT_DIR}/pgbouncer-a.key:/in/server.key:ro
       - ${CERT_DIR}/client-ca.crt:/certs/client-ca.crt:ro
+      - ${CERT_DIR}/ca.crt:/certs/ca.crt:ro
     tmpfs:
       - /tmp
     networks:
@@ -136,8 +147,6 @@ services:
     depends_on:
       database:
         condition: service_healthy
-    ports:
-      - "127.0.0.1:${SENTICA_PROXY_B_PORT:-6434}:6432"
     volumes:
       - ./docker/sentica/pgbouncer-entry.sh:/pgbouncer-entry.sh:ro
       - ./docker/sentica/pgbouncer-b.ini:/etc/pgbouncer/pgbouncer.ini:ro
@@ -145,6 +154,7 @@ services:
       - ${CERT_DIR}/pgbouncer-b.crt:/in/server.crt:ro
       - ${CERT_DIR}/pgbouncer-b.key:/in/server.key:ro
       - ${CERT_DIR}/client-ca.crt:/certs/client-ca.crt:ro
+      - ${CERT_DIR}/ca.crt:/certs/ca.crt:ro
     tmpfs:
       - /tmp
     networks:
@@ -205,6 +215,7 @@ services:
       retries: 10
 
   migrate-a:
+    <<: *hardened
     build: *api-build
     logging: *no-disk-logs
     entrypoint: ["/app/docker/migrate-entrypoint.sh"]
@@ -223,6 +234,8 @@ services:
       SENTICA_CLIENT_KEY_PATH: /certs/tenant_a_ddl.key
       SENTICA_TOKEN_PUBLIC_KEY_PATH: /certs/tenant-a.token.pub
       SENTICA_BIND_HOST: 172.28.10.15
+    tmpfs:
+      - /tmp
     volumes:
       - ${CERT_DIR}/ca.crt:/certs/ca.crt:ro
       - ${CERT_DIR}/tenant_a_ddl.crt:/certs/tenant_a_ddl.crt:ro
@@ -233,6 +246,7 @@ services:
         ipv4_address: 172.28.10.15
 
   migrate-b:
+    <<: *hardened
     build: *api-build
     logging: *no-disk-logs
     entrypoint: ["/app/docker/migrate-entrypoint.sh"]
@@ -251,6 +265,8 @@ services:
       SENTICA_CLIENT_KEY_PATH: /certs/tenant_b_ddl.key
       SENTICA_TOKEN_PUBLIC_KEY_PATH: /certs/tenant-b.token.pub
       SENTICA_BIND_HOST: 172.28.11.15
+    tmpfs:
+      - /tmp
     volumes:
       - ${CERT_DIR}/ca.crt:/certs/ca.crt:ro
       - ${CERT_DIR}/tenant_b_ddl.crt:/certs/tenant_b_ddl.crt:ro
@@ -261,6 +277,7 @@ services:
         ipv4_address: 172.28.11.15
 
   api-a:
+    <<: *hardened
     build: *api-build
     logging: *no-disk-logs
     depends_on:
@@ -272,8 +289,6 @@ services:
         condition: service_healthy
       redis-a:
         condition: service_healthy
-    ports:
-      - "127.0.0.1:${SENTICA_API_A_PORT:-8101}:8000"
     tmpfs:
       - /tmp
     environment:
@@ -311,6 +326,7 @@ services:
       start_period: 40s
 
   api-b:
+    <<: *hardened
     build: *api-build
     logging: *no-disk-logs
     depends_on:
@@ -322,8 +338,6 @@ services:
         condition: service_healthy
       redis-b:
         condition: service_healthy
-    ports:
-      - "127.0.0.1:${SENTICA_API_B_PORT:-8102}:8000"
     tmpfs:
       - /tmp
     environment:
@@ -361,6 +375,7 @@ services:
       start_period: 40s
 
   deriver-a:
+    <<: *hardened
     build: *api-build
     logging: *no-disk-logs
     entrypoint: ["/app/docker/entrypoint.sh"]
@@ -398,6 +413,7 @@ services:
       - net-a
 
   deriver-b:
+    <<: *hardened
     build: *api-build
     logging: *no-disk-logs
     entrypoint: ["/app/docker/entrypoint.sh"]
@@ -434,16 +450,68 @@ services:
     networks:
       - net-b
 
+  publish-a:
+    image: python:3.13-slim
+    logging: *no-disk-logs
+    depends_on:
+      api-a:
+        condition: service_healthy
+      pgbouncer-a:
+        condition: service_healthy
+    command:
+      [
+        "python",
+        "/publish.py",
+        "8000=172.28.10.10:8000",
+        "6432=172.28.10.13:6432",
+      ]
+    ports:
+      - "127.0.0.1:${SENTICA_API_A_PORT:-8101}:8000"
+      - "127.0.0.1:${SENTICA_PROXY_A_PORT:-6433}:6432"
+    volumes:
+      - ./docker/sentica/publish.py:/publish.py:ro
+    networks:
+      - proof
+      - net-a
+
+  publish-b:
+    image: python:3.13-slim
+    logging: *no-disk-logs
+    depends_on:
+      api-b:
+        condition: service_healthy
+      pgbouncer-b:
+        condition: service_healthy
+    command:
+      [
+        "python",
+        "/publish.py",
+        "8000=172.28.11.10:8000",
+        "6432=172.28.11.13:6432",
+      ]
+    ports:
+      - "127.0.0.1:${SENTICA_API_B_PORT:-8102}:8000"
+      - "127.0.0.1:${SENTICA_PROXY_B_PORT:-6434}:6432"
+    volumes:
+      - ./docker/sentica/publish.py:/publish.py:ro
+    networks:
+      - proof
+      - net-b
+
 networks:
+  proof:
   db:
+    internal: true
     ipam:
       config:
         - subnet: 172.28.12.0/24
   net-a:
+    internal: true
     ipam:
       config:
         - subnet: 172.28.10.0/24
   net-b:
+    internal: true
     ipam:
       config:
         - subnet: 172.28.11.0/24

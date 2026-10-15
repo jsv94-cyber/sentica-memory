@@ -238,6 +238,9 @@ async def apply_decay(db: AsyncSession, *, workspace_name: str, now: datetime) -
             row.deleted_at = now
         changed += 1
     await db.commit()
+    from src.sentica.ops_metrics import note_decay
+
+    note_decay(changed)
     return changed
 
 
@@ -257,6 +260,9 @@ async def purge_expired(db: AsyncSession, *, workspace_name: str, now: datetime)
         return 0
     await _delete_documents(db, ids)
     await db.commit()
+    from src.sentica.ops_metrics import note_prune
+
+    note_prune(len(ids))
     return len(ids)
 
 

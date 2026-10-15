@@ -4911,6 +4911,23 @@
           }
         }
       }
+    },
+    "/ready": {
+      "get": {
+        "summary": "Ready Check",
+        "description": "Readiness. The process can serve traffic only when the database answers.",
+        "operationId": "ready_check_ready_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {

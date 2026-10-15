@@ -380,3 +380,35 @@ Decisions:
   No `tests/sentica/test_m2_*` file, `tests/sentica/rls_job.py`, or the
   `test-m2-rls` job changed.
 
+## M9. Packaging
+
+Built:
+
+- `/ready` checks the database and is a probe, next to `/health` and
+  `/metrics`. Filtered conclusions, decay, and prune each have a counter.
+  Request, latency, queue depth, and token series were already present.
+- The API and deriver image stays uid 100. The two-instance proof runs
+  those containers read-only, with every capability dropped and
+  no-new-privileges set. `/tmp` is tmpfs. `docker-compose.gvisor.yml`
+  selects the `runsc` runtime. This host has no `runsc`, so the resource
+  sample used the default runtime.
+- PgBouncer verifies Postgres with `server_tls_sslmode = verify-full`
+  against the test CA. Redis replaces its entry process with the `redis`
+  user. The password file stays readable by the API user. Networks `db`,
+  `net-a`, and `net-b` are internal. Docker does not publish ports from an
+  internal network, so `publish-a` and `publish-b` forward `127.0.0.1` to
+  the API and the proxy. The image carries the tiktoken encodings, because
+  those networks have no route to the internet.
+- `docs/DEPLOY.md` has the run flags, the network rules, and the sample:
+  0.24% CPU and 249 MiB idle, 0.27% CPU and 251 MiB at 1,000 messages per
+  hour. `docs/CONFIG.md` lists every Sentica setting. `SECURITY.md` states
+  the isolation model and where to report a vulnerability.
+  `docs/UPSTREAM_SYNC.md` says to cherry-pick and not merge upstream main.
+
+Decisions:
+
+- The runtime-role pin stays 59. No `tests/sentica/test_m2_*` file,
+  `tests/sentica/rls_job.py`, or the `test-m2-rls` job changed. The
+  `.review/M2-summary.md` deferral note stays where it is.
+- Local unit tests: 3325 passed, 53 skipped.
+

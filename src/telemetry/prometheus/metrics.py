@@ -598,6 +598,9 @@ class PrometheusMetrics:
         for event_type in HIGH_VOLUME_EVENT_TYPES:
             self._touch(telemetry_events_sampled_out_counter, type=event_type)
         self.set_telemetry_buffer_size(size=0)
+        from src.sentica.ops_metrics import initialize_ops_metrics
+
+        initialize_ops_metrics()
 
         if instance_type == "api":
             # dialectic tokens: token_type x component(total) x reasoning_level

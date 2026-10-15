@@ -1,5 +1,89 @@
 # Configuration
 
+Sentica settings are environment variables. Upstream Honcho settings are
+the groups at the end of this file. A name not listed here is not read.
+
+## Every Sentica setting
+
+| Setting | Role |
+| --- | --- |
+| `SENTICA_MODE` | `production` or `test`. Anything else refuses to start. |
+| `SENTICA_TENANT_ID` | The one tenant this instance serves. |
+| `SENTICA_DB_PROXY_HOST` | Certificate proxy hostname. |
+| `SENTICA_DB_PROXY_PORT` | Certificate proxy port. |
+| `SENTICA_DB_USER` | Database role. No password is set. |
+| `SENTICA_DB_NAME` | Database name. |
+| `SENTICA_DB_CALL_TIMEOUT_SECONDS` | Statement timeout. Default 120. Maximum 600. |
+| `SENTICA_CLIENT_CERT_PATH` | Client certificate file. |
+| `SENTICA_CLIENT_KEY_PATH` | Client private key file. |
+| `SENTICA_PROXY_CA_PATH` | CA that signed the proxy certificate. |
+| `SENTICA_TOKEN_PUBLIC_KEY_PATH` | Broker token verification key. |
+| `SENTICA_TOKEN_ISSUER` | Expected token issuer. |
+| `SENTICA_TOKEN_SIGNING_KEY` | Test-only signing key path. Production does not use it. |
+| `SENTICA_BIND_HOST` | Private address the API binds. Required in production. |
+| `SENTICA_REDIS_HOST` | This instance's Redis hostname. |
+| `SENTICA_MIGRATION_TIMEOUT_SECONDS` | How long startup waits for migrations. Default 360. |
+| `SENTICA_DECAY_INTERVAL_DAYS` | Unused conclusions halve once per interval. Default 30. |
+| `SENTICA_DECAY_FLOOR` | Weight below this is soft-deleted. Default 0.05. |
+| `SENTICA_DECAY_RETENTION_DAYS` | Soft-deleted rows are purged after this. Default 30. |
+| `SENTICA_SAFETY_MODEL_CHECK` | Optional second filter. Off unless `1`, `true`, `yes`, or `on`. |
+| `SENTICA_GATEWAY_MODE` | Gateway mode. Off unless `1`, `true`, `yes`, or `on`. |
+| `SENTICA_GATEWAY_BASE_URL` | Default gateway URL when a purpose-specific URL is unset. |
+| `SENTICA_GATEWAY_DERIVER_BASE_URL` | Deriver gateway URL. |
+| `SENTICA_GATEWAY_SUMMARY_BASE_URL` | Summary gateway URL. |
+| `SENTICA_GATEWAY_DIALECTIC_BASE_URL` | Dialectic gateway URL. |
+| `SENTICA_GATEWAY_DREAM_BASE_URL` | Dream gateway URL. |
+| `SENTICA_GATEWAY_EMBED_BASE_URL` | Embedding gateway URL. |
+| `SENTICA_GATEWAY_DERIVER_MODEL` | Required deriver model when gateway mode is on. |
+| `SENTICA_GATEWAY_SUMMARY_MODEL` | Required summary model when gateway mode is on. |
+| `SENTICA_GATEWAY_DIALECTIC_MODEL` | Required dialectic model when gateway mode is on. |
+| `SENTICA_GATEWAY_DREAM_MODEL` | Required dream model when gateway mode is on. |
+| `SENTICA_GATEWAY_EMBED_MODEL` | Required embedding model when gateway mode is on. |
+| `SENTICA_GATEWAY_DAILY_TOKEN_BUDGET` | Optional daily token cap. Unset means unlimited. `0` is exhausted. |
+| `SENTICA_GATEWAY_RETRY_ATTEMPTS` | Gateway retries. Default 3. |
+| `SENTICA_GATEWAY_RETRY_WAIT_SECONDS` | Wait between gateway retries. Default 0.05. |
+| `SENTICA_API_PORT` | Host port for the local API. Default 8000. |
+| `SENTICA_POSTGRES_PORT` | Host port for the local database. Default 5432. |
+| `SENTICA_REDIS_PORT` | Host port for the local Redis. Default 6379. |
+| `SENTICA_API_A_PORT` | Host port for instance A in the two-instance proof. |
+| `SENTICA_API_B_PORT` | Host port for instance B in the two-instance proof. |
+| `SENTICA_PROXY_A_PORT` | Host port for A's certificate proxy. |
+| `SENTICA_PROXY_B_PORT` | Host port for B's certificate proxy. |
+| `SENTICA_UID` | Image user id. Default 100. The agent must not use this id. |
+| `SENTICA_GID` | Image group id. Default 100. |
+| `SENTICA_BAKE_PRODUCTION_MARKER` | Build arg. `true` bakes the production image marker. |
+| `SENTICA_RLS_JOB` | Set to `1` only by the runtime-role CI job. |
+| `SENTICA_RLS_ADMIN_DSN` | Admin connection string for that CI job only. |
+
+## Upstream setting groups
+
+These classes live in `src/config.py`. Each field is an environment variable
+named from the class prefix plus the field name.
+
+| Class | Prefix |
+| --- | --- |
+| `DBSettings` | `DB_` |
+| `AuthSettings` | `AUTH_` |
+| `SentrySettings` | `SENTRY_` |
+| `LLMSettings` | `LLM_` |
+| `EmbeddingSettings` | `EMBEDDING_` |
+| `DeriverSettings` | `DERIVER_` |
+| `PeerCardSettings` | `PEER_CARD_` |
+| `DialecticSettings` | `DIALECTIC_` |
+| `SummarySettings` | `SUMMARY_` |
+| `WebhookSettings` | `WEBHOOK_` |
+| `MetricsSettings` | `METRICS_` |
+| `TelemetrySettings` | `TELEMETRY_` |
+| `CacheSettings` | `CACHE_` |
+| `DreamSettings` | `DREAM_` |
+| `VectorStoreSettings` | `VECTOR_STORE_` |
+| `TraceViewerSettings` | `TRACE_VIEWER_` |
+| `AppSettings` | (none) |
+
+`DialecticLevelSettings` is nested under `DIALECTIC_LEVELS__<level>__`.
+`ModelOverrideSettings`, `FallbackModelSettings`, and
+`ConfiguredModelSettings` are nested under the model config that uses them.
+
 ## SENTICA_MIGRATION_TIMEOUT_SECONDS
 
 How long the container entrypoint waits for database migrations, in seconds.
