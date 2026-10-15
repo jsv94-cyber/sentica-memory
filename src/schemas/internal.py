@@ -76,6 +76,10 @@ class DocumentCreate(DocumentBase):
         default=None,
         description="The session from which the document was derived (NULL for global observations)",
     )
+    subject_ref: str | None = Field(
+        default=None,
+        description="Subject this document is about, such as customer:123.",
+    )
     level: DocumentLevel = Field(
         default="explicit",
         description="The level of the document (explicit, deductive, inductive, or contradiction)",

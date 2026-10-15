@@ -283,3 +283,35 @@ Decisions:
   No `tests/sentica/test_m2_*` file, `tests/sentica/rls_job.py`, or the
   `test-m2-rls` job changed.
 
+## M5. Freshness
+
+Built:
+
+- A conclusion can carry `subject_ref`. `POST /subjects/{ref}/changed`
+  marks every live conclusion for that subject stale.
+- A new conclusion is compared with the nearest live conclusion for the
+  same subject, observer, and observed peer. Within cosine distance 0.35
+  it is an update, or a contradiction when the text says the old fact no
+  longer holds. The old row stays and `superseded_by` points at the new
+  one. Retrieval skips superseded rows and sorts stale rows after current
+  ones.
+- `retrieved_count` and `used_count` record use. The conclusions query
+  route counts a retrieval. Decay halves unused weight every
+  `SENTICA_DECAY_INTERVAL_DAYS` (30), soft-deletes below
+  `SENTICA_DECAY_FLOOR` (0.05), and purges after
+  `SENTICA_DECAY_RETENTION_DAYS` (30). The reconciler runs that pass at
+  most once an hour.
+- `POST /deletions` hard-deletes a peer or a subject, including message
+  embeddings and derived summaries. The record is appended to the
+  workspace's internal metadata and stores counts only. It is not a new
+  table, so the runtime-role table list stays the same.
+
+Decisions:
+
+- Superseding looks at the same `subject_ref` only. Facts with no subject
+  are not replaced, so existing writes keep their current behavior.
+- A missing `source_trust` is still unknown. It is not treated as owner.
+- Local unit tests: 3304 passed, 53 skipped. The runtime-role pin stays 59.
+  No `tests/sentica/test_m2_*` file, `tests/sentica/rls_job.py`, or the
+  `test-m2-rls` job changed.
+

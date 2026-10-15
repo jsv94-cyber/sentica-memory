@@ -134,6 +134,10 @@ class Case:
 _W = "/v3/workspaces/{workspace_id}"
 
 
+def _b_delete_peer(c: TestClient, ws: str, _s: str, p: str):
+    return c.post(f"/v3/workspaces/{ws}/deletions", json={"peer_id": p})
+
+
 def _b_create_peer(c: TestClient, ws: str, _s: str, p: str):
     return c.post(f"/v3/workspaces/{ws}/peers", json={"id": p})
 
@@ -607,6 +611,20 @@ POLICY: tuple[Case, ...] = (
             "Mints a scoped JWT rather than touching a peer, so no peer row is read "
             "or written. Keys cannot be bound to a scope yet."
         ),
+    ),
+    Case(
+        "POST",
+        f"{_W}/deletions",
+        "peer_id",
+        True,
+        refuse_missing=False,
+        missing_reason=(
+            "A name that is not a flagged scope deletes nothing when the peer "
+            "is absent. The request writes a count record and does not create "
+            "the peer."
+        ),
+        missing_status=(201,),
+        build=_b_delete_peer,
     ),
 )
 

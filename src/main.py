@@ -37,6 +37,7 @@ from src.routers import (
     peers,
     scopes,
     sessions,
+    subjects,
     webhooks,
     workspaces,
 )
@@ -221,6 +222,7 @@ app.include_router(sessions.router, prefix="/v3")
 app.include_router(scopes.router, prefix="/v3")
 app.include_router(messages.router, prefix="/v3")
 app.include_router(conclusions.router, prefix="/v3")
+app.include_router(subjects.router, prefix="/v3")
 app.include_router(keys.router, prefix="/v3")
 app.include_router(webhooks.router, prefix="/v3")
 app.include_router(deriver_metrics.router)

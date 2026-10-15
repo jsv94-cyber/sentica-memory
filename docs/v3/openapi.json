@@ -4271,6 +4271,121 @@
         }
       }
     },
+    "/v3/workspaces/{workspace_id}/subjects/{subject_ref}/changed": {
+      "post": {
+        "tags": [
+          "subjects"
+        ],
+        "summary": "Subject Changed",
+        "description": "Mark every live conclusion for this subject stale.",
+        "operationId": "subject_changed_v3_workspaces__workspace_id__subjects__subject_ref__changed_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Workspace Id"
+            }
+          },
+          {
+            "name": "subject_ref",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Subject Ref"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubjectChanged"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v3/workspaces/{workspace_id}/deletions": {
+      "post": {
+        "tags": [
+          "subjects"
+        ],
+        "summary": "Create Deletion",
+        "description": "Hard-delete a peer or a subject. The record has counts and no text.",
+        "operationId": "create_deletion_v3_workspaces__workspace_id__deletions_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Workspace Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeletionCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeletionResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v3/keys": {
       "post": {
         "tags": [
@@ -4809,6 +4924,52 @@
             "title": "Source Trust",
             "description": "external when every source message was external. Empty when the conclusion is not external-only."
           },
+          "subject_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject Ref",
+            "description": "Subject this conclusion is about, such as customer:123."
+          },
+          "stale": {
+            "type": "boolean",
+            "title": "Stale",
+            "description": "True after the subject changed and this conclusion has not been replaced.",
+            "default": false
+          },
+          "superseded_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Superseded By",
+            "description": "Id of the conclusion that replaced this one. Empty when it is current."
+          },
+          "weight": {
+            "type": "number",
+            "title": "Weight",
+            "description": "Decay weight. Unused conclusions halve over time.",
+            "default": 1.0
+          },
+          "retrieved_count": {
+            "type": "integer",
+            "title": "Retrieved Count",
+            "default": 0
+          },
+          "used_count": {
+            "type": "integer",
+            "title": "Used Count",
+            "default": 0
+          },
           "created_at": {
             "type": "string",
             "format": "date-time",
@@ -4874,6 +5035,18 @@
             ],
             "title": "Session Id",
             "description": "A session ID to store the conclusion in, if specified"
+          },
+          "subject_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject Ref",
+            "description": "Subject this conclusion is about, such as customer:123."
           }
         },
         "type": "object",
@@ -5478,6 +5651,84 @@
           "items"
         ],
         "title": "CursorPage[Workspace]"
+      },
+      "DeletionCreate": {
+        "properties": {
+          "peer_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Peer Id"
+          },
+          "subject_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject Ref"
+          }
+        },
+        "type": "object",
+        "title": "DeletionCreate"
+      },
+      "DeletionResult": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "peer_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Peer Name"
+          },
+          "subject_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject Ref"
+          },
+          "document_count": {
+            "type": "integer",
+            "title": "Document Count"
+          },
+          "embedding_count": {
+            "type": "integer",
+            "title": "Embedding Count"
+          },
+          "summary_count": {
+            "type": "integer",
+            "title": "Summary Count"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "document_count",
+          "embedding_count",
+          "summary_count"
+        ],
+        "title": "DeletionResult"
       },
       "DialecticConfiguration": {
         "properties": {
@@ -7339,6 +7590,24 @@
         },
         "type": "object",
         "title": "SessionUpdate"
+      },
+      "SubjectChanged": {
+        "properties": {
+          "subject_ref": {
+            "type": "string",
+            "title": "Subject Ref"
+          },
+          "stale_count": {
+            "type": "integer",
+            "title": "Stale Count"
+          }
+        },
+        "type": "object",
+        "required": [
+          "subject_ref",
+          "stale_count"
+        ],
+        "title": "SubjectChanged"
       },
       "Summary": {
         "properties": {

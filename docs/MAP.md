@@ -2,7 +2,7 @@
 
 This map describes the tree pinned to upstream Honcho v3.3.0. Citations are
 `path:line` and name the line where the symbol is defined or the call is made.
-Public API routes are mounted under `/v3` at `src/main.py:218`.
+Public API routes are mounted under `/v3` at `src/main.py:219`.
 
 ## Database engine and sessions
 
@@ -81,16 +81,16 @@ Tables are SQLAlchemy models in `src/models.py`. Names are unique inside a
 workspace. `workspace_name` is part of the composite foreign keys, so a row
 cannot point at another workspace.
 
-- `src/models.py:104` `workspaces`: `name` unique, JSONB `metadata`,
+- `src/models.py:105` `workspaces`: `name` unique, JSONB `metadata`,
   `internal_metadata`, and `configuration`.
-- `src/models.py:137` `peers`: unique `(name, workspace_name)`.
-- `src/models.py:174` `sessions`: unique `(name, workspace_name)`, `is_active`.
-- `src/models.py:41` `session_peers`: membership. Columns include
+- `src/models.py:138` `peers`: unique `(name, workspace_name)`.
+- `src/models.py:175` `sessions`: unique `(name, workspace_name)`, `is_active`.
+- `src/models.py:42` `session_peers`: membership. Columns include
   `configuration`, `internal_metadata`, `joined_at`, `left_at`.
-- `src/models.py:213` `messages`: integer `id`, public nanoid `public_id`,
+- `src/models.py:214` `messages`: integer `id`, public nanoid `public_id`,
   `content`, `token_count`, `seq_in_session`. Composite foreign keys to the
-  session and the peer. Full-text GIN index at `src/models.py:276`. Trigram
-  GIN index at `src/models.py:285` (added in v3.3.0).
+  session and the peer. Full-text GIN index at `src/models.py:277`. Trigram
+  GIN index at `src/models.py:286` (added in v3.3.0).
 
 CRUD lives under `src/crud/` (`workspace.py`, `peer.py`, `session.py`,
 `message.py`). Routers: `src/routers/workspaces.py`, `src/routers/peers.py`,
@@ -114,13 +114,13 @@ that observer. See `src/deriver/scope_backfill.py`.
 A conclusion is a `documents` row. The API name is conclusion. The code name
 is observation or document.
 
-- `src/models.py:357` `collections`: one row per `(observer, observed,
+- `src/models.py:358` `collections`: one row per `(observer, observed,
   workspace_name)`. Both observer and observed are peers in that workspace.
-- `src/models.py:405` `documents`: `content`, `level`, `embedding` (pgvector
+- `src/models.py:406` `documents`: `content`, `level`, `embedding` (pgvector
   HNSW), `session_name`, `deleted_at`, and vector sync columns. `level` is
   `explicit`, `deductive`, `inductive`, or `contradiction`
   (`src/utils/types.py:294`).
-- `src/models.py:584` `document_sources`: reasoning-tree edges
+- `src/models.py:611` `document_sources`: reasoning-tree edges
   `(derived_id, source_id, position)`.
 
 `src/crud/collection.py:134` `get_or_create_collection` opens the pair's
@@ -128,12 +128,18 @@ collection. `src/crud/representation.py:84` `RepresentationManager` writes
 derived observations (`save_representation` at `src/crud/representation.py:98`)
 and reads them back (`get_working_representation` at
 `src/crud/representation.py:268`). Semantic search is
-`src/crud/document.py:380` `query_documents`.
+`src/crud/document.py:387` `query_documents`. Superseded conclusions are
+left out, and stale ones sort after current ones.
 
 `src/routers/conclusions.py:22` is `/v3/workspaces/{workspace_id}/conclusions`.
-Creating conclusions calls `src/crud/document.py:1141` `create_observations`.
+Creating conclusions calls `src/crud/document.py:1155` `create_observations`.
+A new conclusion with a `subject_ref` can supersede the nearest older one
+for that subject (`src/sentica/freshness.py:104` `supersede_similar`).
+`POST /subjects/{ref}/changed` marks them stale
+(`src/sentica/freshness.py:87` `mark_subject_changed`). Decay and hard
+deletion live in the same module.
 
-`src/models.py:299` `message_embeddings` stores a chunk of message text and its
+`src/models.py:300` `message_embeddings` stores a chunk of message text and its
 vector, separate from `messages`, with `sync_state` so embedding can lag
 message insert. The reconciler fills `pending` rows
 (`src/reconciler/sync_vectors.py`).
@@ -172,10 +178,10 @@ calls. Surprisal sampling, when enabled, is `src/dreamer/surprisal.py`.
 
 ## Deriver queue
 
-The queue is the Postgres table `queue` (`src/models.py:611` `QueueItem`):
+The queue is the Postgres table `queue` (`src/models.py:638` `QueueItem`):
 `task_type`, JSONB `payload`, `work_unit_key`, `workspace_name`, optional
 `session_id` and `message_id`, `processed`, `error`.
-`src/models.py:670` `active_queue_sessions` is the claim lock, one row per
+`src/models.py:697` `active_queue_sessions` is the claim lock, one row per
 work unit key.
 
 `src/deriver/enqueue.py:27` `enqueue` inserts representation and summary rows
@@ -190,7 +196,7 @@ Payload shapes are `src/utils/queue_payload.py`. Task types: `representation`,
 The representation payload includes the message text
 (`src/utils/queue_payload.py:28` `content: str`). Summary, dream, scope, and
 deletion payloads do not. Every payload is written only to the Postgres
-`queue.payload` column (`src/models.py:622`) by the inserts in
+`queue.payload` column (`src/models.py:649`) by the inserts in
 `src/deriver/enqueue.py`. Redis is the cache (`src/cache/client.py`), not a
 copy of the queue. The message text in that column is in the database, which
 is the store.
@@ -280,7 +286,7 @@ dream prompt builders. They are not separate files.
 ## Process split
 
 `src/main.py` is the API. It serves HTTP, enqueues work, and runs the
-dialectic tool loop inside the request. `src/main.py:260` `/health` returns
+dialectic tool loop inside the request. `src/main.py:281` `/health` returns
 `{"status": "ok"}`. Metrics are `/metrics`.
 
 `src/deriver/__main__.py` is the worker. It consumes the queue, summarizes,

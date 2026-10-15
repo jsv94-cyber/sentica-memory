@@ -673,6 +673,23 @@ class Conclusion(BaseModel):
         default=None,
         description="external when every source message was external. Empty when the conclusion is not external-only.",
     )
+    subject_ref: str | None = Field(
+        default=None,
+        description="Subject this conclusion is about, such as customer:123.",
+    )
+    stale: bool = Field(
+        default=False,
+        description="True after the subject changed and this conclusion has not been replaced.",
+    )
+    superseded_by: str | None = Field(
+        default=None,
+        description="Id of the conclusion that replaced this one. Empty when it is current.",
+    )
+    weight: float = Field(
+        default=1.0, description="Decay weight. Unused conclusions halve over time."
+    )
+    retrieved_count: int = Field(default=0)
+    used_count: int = Field(default=0)
     created_at: datetime.datetime
 
     @field_validator("source_ids", mode="before")
@@ -723,6 +740,10 @@ class ConclusionCreate(BaseModel):
     session_id: str | None = Field(
         default=None,
         description="A session ID to store the conclusion in, if specified",
+    )
+    subject_ref: str | None = Field(
+        default=None,
+        description="Subject this conclusion is about, such as customer:123.",
     )
 
     _token_count: int = PrivateAttr(default=0)

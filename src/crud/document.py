@@ -84,6 +84,7 @@ def get_all_documents(
         .where(models.Document.observer == observer)
         .where(models.Document.observed == observed)
         .where(models.Document.deleted_at.is_(None))  # Exclude soft-deleted
+        .where(models.Document.superseded_by.is_(None))
     )
 
     # Apply additional filters if provided
@@ -125,6 +126,7 @@ def get_documents_with_filters(
         select(models.Document)
         .where(models.Document.workspace_name == workspace_name)
         .where(models.Document.deleted_at.is_(None))  # Exclude soft-deleted
+        .where(models.Document.superseded_by.is_(None))
     )
 
     # Apply additional filters if provided
@@ -170,6 +172,7 @@ async def query_documents_recent(
         models.Document.observer == observer,
         models.Document.observed == observed,
         models.Document.deleted_at.is_(None),
+        models.Document.superseded_by.is_(None),
     )
 
     if session_name is not None:
@@ -210,6 +213,7 @@ async def query_documents_most_derived(
             models.Document.observer == observer,
             models.Document.observed == observed,
             models.Document.deleted_at.is_(None),
+            models.Document.superseded_by.is_(None),
         )
         .order_by(
             models.Document.times_derived.desc(),
@@ -333,6 +337,7 @@ async def fetch_documents_by_ids(
         .where(models.Document.observer == observer)
         .where(models.Document.observed == observed)
         .where(models.Document.deleted_at.is_(None))
+        .where(models.Document.superseded_by.is_(None))
         .where(models.Document.id.in_(document_ids))
     )
     stmt = apply_filter(stmt, models.Document, filters)
@@ -361,6 +366,7 @@ async def _query_documents_pgvector(
         .where(models.Document.observed == observed)
         .where(models.Document.embedding.isnot(None))
         .where(models.Document.deleted_at.is_(None))
+        .where(models.Document.superseded_by.is_(None))
     )
 
     if max_distance is not None:
@@ -369,9 +375,10 @@ async def _query_documents_pgvector(
         )
 
     stmt = apply_filter(stmt, models.Document, filters)
-    stmt = stmt.order_by(models.Document.embedding.cosine_distance(embedding)).limit(
-        top_k
-    )
+    stmt = stmt.order_by(
+        models.Document.stale.asc(),
+        models.Document.embedding.cosine_distance(embedding),
+    ).limit(top_k)
 
     result = await db.execute(stmt)
     return list(result.scalars().all())
@@ -744,6 +751,7 @@ async def create_documents(
                 models.Document.observer == observer,
                 models.Document.observed == observed,
                 models.Document.deleted_at.is_(None),
+                models.Document.superseded_by.is_(None),
                 normalized_content_sql.in_(batch_normalized),
             )
         )
@@ -997,6 +1005,14 @@ async def create_documents(
         # at the final commit); the queue layer classifies and retries.
         await db.rollback()
         raise
+
+    from src.sentica.freshness import supersede_similar
+
+    fresh_ids = {created.id for created in honcho_documents}
+    for created in honcho_documents:
+        await db.refresh(created)
+        if created.subject_ref:
+            await supersede_similar(db, created, skip_ids=fresh_ids)
 
     return CreateDocumentsResult(
         created_documents=accepted_documents,
@@ -1262,6 +1278,7 @@ async def create_observations(
                 internal_metadata={},  # No message_ids since not derived from messages
                 session_name=obs.session_id,
             )
+        doc.subject_ref = obs.subject_ref
         doc.sync_state = "pending"
         honcho_documents.append(doc)
 
@@ -1381,6 +1398,13 @@ async def create_observations(
         len(honcho_documents),
         workspace_name,
     )
+    from src.sentica.freshness import supersede_similar
+
+    fresh_ids = {created.id for created in honcho_documents}
+    for created in honcho_documents:
+        await db.refresh(created)
+        if created.subject_ref:
+            await supersede_similar(db, created, skip_ids=fresh_ids)
     return honcho_documents
 
 
@@ -1422,6 +1446,7 @@ def _document_model_from_create(
         )
     if doc.embedding:
         new_doc.sync_state = "pending"
+    new_doc.subject_ref = doc.subject_ref
     return new_doc
 
 
@@ -1536,6 +1561,7 @@ async def _pgvector_dup_candidates(
             .where(models.Document.observed == observed)
             .where(models.Document.embedding.isnot(None))
             .where(models.Document.deleted_at.is_(None))
+            .where(models.Document.superseded_by.is_(None))
             .where(distance <= _SEMANTIC_DUP_MAX_DISTANCE)
         )
         leg = apply_filter(leg, models.Document, filters)
@@ -1810,6 +1836,7 @@ async def get_documents_by_ids(
         models.Document.workspace_name == workspace_name,
         models.Document.id.in_(document_ids),
         models.Document.deleted_at.is_(None),
+        models.Document.superseded_by.is_(None),
     )
     result = await db.execute(stmt)
     return result.scalars().all()
@@ -1854,6 +1881,7 @@ def get_child_observations(
         models.Document.workspace_name == workspace_name,
         or_(linked, models.Document.legacy_source_ids.contains([parent_id])),
         models.Document.deleted_at.is_(None),
+        models.Document.superseded_by.is_(None),
     )
     if observer:
         stmt = stmt.where(models.Document.observer == observer)

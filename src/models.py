@@ -12,6 +12,7 @@ from sqlalchemy import (
     CheckConstraint,
     Column,
     DateTime,
+    Float,
     ForeignKey,
     ForeignKeyConstraint,
     Identity,
@@ -429,6 +430,26 @@ class Document(Base):
     deleted_at: Mapped[datetime.datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True, default=None
     )
+    subject_ref: Mapped[str | None] = mapped_column(TEXT, nullable=True)
+    stale: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    superseded_by: Mapped[str | None] = mapped_column(TEXT, nullable=True)
+    weight: Mapped[float] = mapped_column(
+        Float, nullable=False, default=1.0, server_default=text("1")
+    )
+    retrieved_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    used_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    last_used_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    decayed_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     # Vector sync state tracking
     sync_state: Mapped[VectorSyncState] = mapped_column(
@@ -577,6 +598,12 @@ class Document(Base):
             "deleted_at",
             postgresql_where=text("deleted_at IS NOT NULL"),
         ),
+        Index(
+            "ix_documents_workspace_subject_ref",
+            "workspace_name",
+            "subject_ref",
+        ),
+        CheckConstraint("weight >= 0", name="documents_weight_non_negative"),
     )
 
 

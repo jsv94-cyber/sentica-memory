@@ -213,6 +213,9 @@ class ReconcilerScheduler:
                 # endregion
                 await record_pending_embeddings_backlog()
                 await record_backfill_pending()
+                from src.sentica.freshness import decay_due_workspaces
+
+                await decay_due_workspaces()
 
                 # Check each task and enqueue if due
                 for task_name, task in RECONCILER_TASKS.items():

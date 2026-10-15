@@ -44,6 +44,14 @@ A message may set `source_trust` to `owner`, `staff`, `external`, or
 `owner`. A conclusion whose source messages are all `external` is returned
 with `source_trust` `external`, and that text is left out of the peer card.
 
+## Freshness
+
+`SENTICA_DECAY_INTERVAL_DAYS` defaults to 30. An unused conclusion halves
+its weight once per interval. `SENTICA_DECAY_FLOOR` defaults to 0.05. A
+weight below that is soft-deleted. `SENTICA_DECAY_RETENTION_DAYS` defaults
+to 30. Soft-deleted conclusions are purged after that. A retrieval or a use
+resets the clock. The reconciler runs this pass at most once an hour.
+
 ## Safety model check
 
 `SENTICA_SAFETY_MODEL_CHECK` is off unless it is `1`, `true`, `yes`, or
