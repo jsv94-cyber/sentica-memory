@@ -400,10 +400,10 @@ async def test_record_backfill_pending_sets_gauge(
     assert calls == [("fake", 7)]
 
 
-async def test_record_backfill_pending_uses_pending_backfills(
+async def test_record_backfill_pending_gives_each_gauge_its_own_count(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from src.sentica.workspace_scope import PendingCount
+    from src.sentica.workspace_scope import PendingCount, current_workspace
 
     calls: list[tuple[str, int]] = []
 
@@ -416,8 +416,13 @@ async def test_record_backfill_pending_uses_pending_backfills(
             PendingCount("right", 0, 0, 1, 0, 0),
         ]
 
-    async def _not_counted(_db: AsyncSession) -> int:
-        raise AssertionError("count_pending must not run when the function returns")
+    async def _sources(_db: AsyncSession) -> int:
+        del _db
+        return 4 if current_workspace() == "left" else 1
+
+    async def _other(_db: AsyncSession) -> int:
+        del _db
+        return 2 if current_workspace() == "left" else 0
 
     monkeypatch.setattr("src.config.settings.METRICS.ENABLED", True)
     monkeypatch.setattr(prometheus_metrics, "set_backfill_pending", _record)
@@ -425,9 +430,66 @@ async def test_record_backfill_pending_uses_pending_backfills(
     monkeypatch.setattr(
         backfill_module,
         "BACKFILLS",
-        {"fake": _fake_backfill(_Rows(7), count_pending=_not_counted)},
+        {
+            "sources": replace(
+                _fake_backfill(_Rows(0)), name="sources", count_pending=_sources
+            ),
+            "other": replace(
+                _fake_backfill(_Rows(0)), name="other", count_pending=_other
+            ),
+        },
     )
 
     await backfill_module.record_backfill_pending()
 
-    assert calls == [("fake", 5)]
+    assert calls == [("sources", 5), ("other", 2)]
+
+
+async def test_document_sources_gauge_opens_no_per_workspace_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.sentica.workspace_scope import PendingCount, current_workspace
+
+    calls: list[tuple[str, int]] = []
+    opened: list[str] = []
+
+    def _record(*, task: str, count: int) -> None:
+        calls.append((task, count))
+
+    async def _counts(_db: object) -> list[PendingCount]:
+        return [
+            PendingCount("left", 0, 0, 4, 0, 0),
+            PendingCount("right", 0, 0, 0, 0, 0),
+        ]
+
+    async def _sources(_db: AsyncSession) -> int:
+        del _db
+        raise AssertionError("document_sources counted a workspace")
+
+    async def _other(_db: AsyncSession) -> int:
+        del _db
+        opened.append(current_workspace() or "")
+        return 3 if current_workspace() == "left" else 0
+
+    monkeypatch.setattr("src.config.settings.METRICS.ENABLED", True)
+    monkeypatch.setattr(prometheus_metrics, "set_backfill_pending", _record)
+    monkeypatch.setattr("src.sentica.workspace_scope.fetch_pending_counts", _counts)
+    monkeypatch.setattr(
+        backfill_module,
+        "BACKFILLS",
+        {
+            "document_sources": replace(
+                _fake_backfill(_Rows(0)),
+                name="document_sources",
+                count_pending=_sources,
+            ),
+            "other": replace(
+                _fake_backfill(_Rows(0)), name="other", count_pending=_other
+            ),
+        },
+    )
+
+    await backfill_module.record_backfill_pending()
+
+    assert calls == [("document_sources", 4), ("other", 3)]
+    assert opened == ["left", "right"]

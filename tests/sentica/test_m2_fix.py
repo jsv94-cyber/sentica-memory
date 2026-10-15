@@ -60,7 +60,10 @@ def test_pending_counts_function_has_no_content_columns() -> None:
     assert "pending_backfills" in sql
     assert "soft_deleted_documents" in sql
     assert "dreams_due" in sql
-    assert "deleted_at IS NULL" in sql
+    assert "last_dream_document_count" in sql
+    assert "split_part" not in sql
+    assert "work_unit_key" not in sql
+    assert "deleted_at IS NOT NULL" in sql
     assert "sentica_pending_counts()" in sql
     assert "content" not in sql
     assert "SECURITY DEFINER" in queue_sql
@@ -394,7 +397,11 @@ async def test_deriver_metrics_are_limited_to_the_token_workspaces(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from src import schemas
-    from src.backlog import DeriverMetricsPoller, DeriverMetricsSnapshot
+    from src.backlog import (
+        DeriverMetricsPoller,
+        DeriverMetricsSnapshot,
+        active_work_seconds,
+    )
     from src.config import settings
     from src.routers import deriver_metrics
     from src.security import JWTParams
@@ -414,6 +421,24 @@ async def test_deriver_metrics_are_limited_to_the_token_workspaces(
         )
 
     monkeypatch.setattr("src.crud.metrics_for_workspaces", _scoped)
+
+    async def _counts(_db: object) -> list[object]:
+        from src.sentica.workspace_scope import PendingCount
+
+        return [PendingCount("left", 0, 0, 0, 0, 9)]
+
+    async def _due(_db: object) -> list[object]:
+        from src.dreamer.dream_due import DueDream
+        from src.schemas import DreamType
+        from src.sentica.workspace_scope import current_workspace
+
+        del _db
+        if current_workspace() != "left":
+            return []
+        return [DueDream("left", "p1", "p1", DreamType.OMNI, "s1")]
+
+    monkeypatch.setattr("src.sentica.workspace_scope.fetch_pending_counts", _counts)
+    monkeypatch.setattr("src.dreamer.dream_due.list_due_dreams", _due)
     poller = DeriverMetricsPoller()
     poller._snapshot = DeriverMetricsSnapshot(  # pyright: ignore[reportPrivateUsage]
         signal_seconds=9.0,
@@ -437,8 +462,8 @@ async def test_deriver_metrics_are_limited_to_the_token_workspaces(
         deriver_metrics.set_deriver_metrics_poller(None)
     assert seen == [["left"]]
     assert body["pending_items"] == 1
-    assert body["outstanding_work_seconds"] == 0.0
-    assert body["dreams_due"] == 0
+    assert body["dreams_due"] == 1
+    assert body["outstanding_work_seconds"] == active_work_seconds()
 
 
 async def test_execute_dream_and_delayed_dream_bind_the_workspace(

@@ -338,6 +338,9 @@ def test_malformed_token_key_refuses(
         ("REASONING_TRACES_FILE", "/tmp/traces.jsonl", "REASONING_TRACES_FILE"),
         ("METRICS_ENABLED", "true", "workspace_name"),
         ("LLM_OPENAI_API_KEY", "sentica-local-dummy", "local dummy key"),
+        ("LLM_ANTHROPIC_API_KEY", "sentica-local-dummy", "local dummy key"),
+        ("LLM_GEMINI_API_KEY", "sentica-local-dummy", "local dummy key"),
+        ("LLM_MISTRAL_API_KEY", "sentica-local-dummy", "local dummy key"),
     ],
 )
 def test_unsafe_production_settings_refuse(
@@ -366,6 +369,6 @@ def test_fake_embeddings_are_deterministic_and_nonzero() -> None:
     assert first != module.embedding_for("other text", 8)
     assert any(value != 0.0 for value in first)
     compose = (ROOT / "docker-compose.sentica.yml").read_text(encoding="utf-8")
-    assert "LLM_OPENAI_API_KEY: sentica-local-dummy" not in compose
+    assert "sentica-local-dummy" not in compose
     assert "http://embeddings:8080/v1" in compose
     assert "EMBEDDING_MODEL_CONFIG__OVERRIDES__BASE_URL" in compose

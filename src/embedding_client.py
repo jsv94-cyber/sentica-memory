@@ -403,6 +403,7 @@ class _EmbeddingClient:
         if not texts:
             return []
 
+        # Validate / cap per-input token limit and collect counts for batching
         prepared_texts: list[str] = []
         token_counts: list[int] = []
         for idx, text in enumerate(texts):
@@ -427,16 +428,17 @@ class _EmbeddingClient:
             prepared_texts.append(text)
             token_counts.append(tokens)
 
-        # Positional ids keep the result in input order. This does not call
-        # batch_embed; callers of that method are counted on their own.
+        # Use positional indices as text_ids so we can reassemble in input order.
         text_chunks: dict[str, list[tuple[str, int]]] = {
             str(i): [(prepared_texts[i], token_counts[i])]
             for i in range(len(prepared_texts))
         }
+
         batches = self._create_batches(text_chunks)
         batch_results = await asyncio.gather(
             *[self._process_batch(batch) for batch in batches],
         )
+
         combined: dict[str, list[list[float]]] = self._accumulate_embeddings(
             batch_results
         )

@@ -37,17 +37,18 @@ async def get_deriver_metrics_response(
         from src.backlog import outstanding_work_seconds
         from src.crud import metrics_for_workspaces
         from src.dependencies import tracked_db
-        from src.sentica.workspace_scope import fetch_pending_counts
+        from src.dreamer.dream_due import list_due_dreams
+        from src.sentica.workspace_scope import reset_workspace, set_workspace
 
         scoped = await metrics_for_workspaces(allowed)
-        async with tracked_db("deriver_metrics.dreams", read_only=True) as db:
-            counts = await fetch_pending_counts(db)
-        names = set(allowed)
-        dreams = (
-            0
-            if counts is None
-            else sum(row.dreams_due for row in counts if row.workspace_name in names)
-        )
+        dreams = 0
+        for name in allowed:
+            token = set_workspace(name)
+            try:
+                async with tracked_db("deriver_metrics.dreams", read_only=True) as db:
+                    dreams += len(await list_due_dreams(db))
+            finally:
+                reset_workspace(token)
         return {
             "outstanding_work_seconds": outstanding_work_seconds(
                 scoped, dreams_due=dreams

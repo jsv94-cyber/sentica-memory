@@ -12,7 +12,6 @@ import sqlalchemy as sa
 from alembic import op
 
 from src.config import settings
-from src.sentica.workspace_scope import workspace_policy_sql
 
 revision: str = "a9c1e3f5b7d2"
 down_revision: str | None = "3e7a1c9d5b20"
@@ -24,6 +23,29 @@ def _quote(name: str) -> str:
     if not name.replace("_", "").isalnum():
         raise RuntimeError(f"unexpected identifier {name}")
     return '"' + name + '"'
+
+
+def workspace_policy_sql(schema: str, table_name: str) -> str:
+    """ENABLE and FORCE the fail-closed workspace policy on one table."""
+    if not schema.replace("_", "").isalnum():
+        raise RuntimeError("unexpected schema name")
+    if not table_name.replace("_", "").isalnum():
+        raise RuntimeError("unexpected table name")
+    table = f'"{schema}"."{table_name}"'
+    return f"""
+        ALTER TABLE {table} ENABLE ROW LEVEL SECURITY;
+        ALTER TABLE {table} FORCE ROW LEVEL SECURITY;
+        DROP POLICY IF EXISTS sentica_workspace ON {table};
+        CREATE POLICY sentica_workspace ON {table}
+            USING (
+                coalesce(current_setting('sentica.workspace', true), '') <> ''
+                AND workspace_name = current_setting('sentica.workspace', true)
+            )
+            WITH CHECK (
+                coalesce(current_setting('sentica.workspace', true), '') <> ''
+                AND workspace_name = current_setting('sentica.workspace', true)
+            )
+    """
 
 
 def upgrade() -> None:

@@ -37,11 +37,11 @@ x-common-env: &common-env
   EMBED_MESSAGES: "true"
   DB_POOL_RECYCLE: "2"
   COLLECT_METRICS_LOCAL: "false"
-  LLM_ANTHROPIC_API_KEY: sentica-local-dummy
+  LLM_ANTHROPIC_API_KEY: sentica-stack-key
   LLM_OPENAI_API_KEY: sentica-stack-key
   LLM_OPENAI_BASE_URL: http://embeddings:8080/v1
   EMBEDDING_MODEL_CONFIG__OVERRIDES__BASE_URL: http://embeddings:8080/v1
-  LLM_GEMINI_API_KEY: sentica-local-dummy
+  LLM_GEMINI_API_KEY: sentica-stack-key
 
 services:
   embeddings:

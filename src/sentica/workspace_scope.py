@@ -264,90 +264,27 @@ def fair_workspace_order(names: Sequence[str], cursor: int) -> tuple[list[str], 
     return ordered[start:] + ordered[:start], cursor + 1
 
 
-def _explicit_documents(quoted: str) -> str:
-    """The explicit, live documents list_due_dreams counts."""
-    return (
-        f"FROM {quoted}.documents AS d "
-        "WHERE d.workspace_name = c.workspace_name "
-        "AND d.observer = c.observer "
-        "AND d.observed = c.observed "
-        "AND d.level = 'explicit' "
-        "AND d.deleted_at IS NULL"
-    )
-
-
 def _dreams_due_sql(quoted: str) -> str:
-    """Count collections list_due_dreams would return.
+    """Collections whose explicit documents exceed the last dream count.
 
-    The numeric gates are the DreamSettings defaults at the moment this SQL
-    is created. list_due_dreams applies the same comparisons to the same rows.
+    This is a superset of list_due_dreams. It bakes in no thresholds, idle
+    window, session setting, or queue key. list_due_dreams applies those.
     """
-    from src.config import settings
-
-    if not settings.DREAM.ENABLED or "omni" not in settings.DREAM.ENABLED_TYPES:
-        return "0::bigint"
-    threshold = int(settings.DREAM.DOCUMENT_THRESHOLD)
-    idle = int(settings.DREAM.IDLE_TIMEOUT_MINUTES)
-    hours = int(settings.DREAM.MIN_HOURS_BETWEEN_DREAMS)
-    explicit = _explicit_documents(quoted)
-    newest = f"(SELECT d.session_name {explicit} ORDER BY d.created_at DESC LIMIT 1)"
     return f"""
         (
             SELECT count(*)::bigint
             FROM {quoted}.collections AS c
-            JOIN {quoted}.workspaces AS dw ON dw.name = c.workspace_name
             WHERE c.workspace_name = w.name
-                AND coalesce(
-                    (
-                        SELECT (s.configuration #>> '{{dream,enabled}}')::boolean
-                        FROM {quoted}.sessions AS s
-                        WHERE s.workspace_name = c.workspace_name
-                            AND s.name = {newest}
-                    ),
-                    (dw.configuration #>> '{{dream,enabled}}')::boolean,
-                    true
-                )
                 AND (
-                    SELECT count(*) {explicit}
-                ) - coalesce(
+                    SELECT count(*)
+                    FROM {quoted}.documents AS d
+                    WHERE d.workspace_name = c.workspace_name
+                        AND d.observer = c.observer
+                        AND d.observed = c.observed
+                        AND d.level = 'explicit'
+                ) > coalesce(
                     (c.internal_metadata->'dream'->>'last_dream_document_count')::int,
                     0
-                ) >= {threshold}
-                AND (
-                    SELECT max(d.created_at) {explicit}
-                ) < now() - interval '{idle} minutes'
-                AND {newest} IS NOT NULL
-                AND (
-                    c.internal_metadata->'dream'->>'last_dream_at' IS NULL
-                    OR NOT (
-                        (c.internal_metadata->'dream'->>'last_dream_at')
-                            ~ '^[0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}'
-                        AND (c.internal_metadata->'dream'->>'last_dream_at')::timestamptz
-                            > now() - interval '{hours} hours'
-                    )
-                )
-                AND NOT EXISTS (
-                    SELECT 1
-                    FROM {quoted}.queue AS q
-                    WHERE q.processed = false
-                        AND q.task_type = 'representation'
-                        AND q.workspace_name = c.workspace_name
-                        AND (
-                            (
-                                split_part(q.work_unit_key, ':', 5) = ''
-                                AND split_part(q.work_unit_key, ':', 4) = c.observed
-                            )
-                            OR split_part(q.work_unit_key, ':', 5) = c.observed
-                        )
-                )
-                AND NOT EXISTS (
-                    SELECT 1
-                    FROM {quoted}.queue AS q
-                    WHERE q.task_type = 'dream'
-                        AND q.workspace_name = c.workspace_name
-                        AND q.created_at >= (SELECT max(d.created_at) {explicit})
-                        AND split_part(q.work_unit_key, ':', 4) = c.observer
-                        AND split_part(q.work_unit_key, ':', 5) = c.observed
                 )
         )
     """

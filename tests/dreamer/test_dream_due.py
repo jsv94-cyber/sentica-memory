@@ -132,6 +132,38 @@ class TestCountDueDreams:
 
         assert await count_due_dreams(db_session) == 0
 
+    async def test_soft_deleted_explicit_documents_count(
+        self,
+        db_session: AsyncSession,
+        sample_data: tuple[models.Workspace, models.Peer],
+    ):
+        """Upstream counts a soft-deleted explicit document toward the threshold."""
+        collection = await _make_collection(db_session, sample_data)
+        session_name = await _make_session(db_session, collection.workspace_name)
+        await _insert_docs(
+            db_session,
+            collection,
+            "explicit",
+            49,
+            age_minutes=90,
+            session_name=session_name,
+        )
+        db_session.add(
+            models.Document(
+                content="removed",
+                level="explicit",
+                workspace_name=collection.workspace_name,
+                observer=collection.observer,
+                observed=collection.observed,
+                session_name=session_name,
+                created_at=_now() - datetime.timedelta(minutes=90),
+                deleted_at=_now(),
+            )
+        )
+        await db_session.commit()
+
+        assert await count_due_dreams(db_session) == 1
+
     async def test_derived_levels_do_not_count(
         self,
         db_session: AsyncSession,

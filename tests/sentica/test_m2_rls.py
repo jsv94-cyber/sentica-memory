@@ -157,34 +157,51 @@ def test_runtime_role_lockdown() -> None:
             conn, "SELECT version_num FROM memory.alembic_version"
         ).fetchone()
         assert version is not None
-        description = _exec(
-            conn, "SELECT * FROM memory.sentica_pending_counts() LIMIT 0"
-        )
-        columns = description.description
-        assert columns is not None
-        assert [col.name for col in columns] == [
-            "workspace_name",
-            "pending_queue",
-            "pending_embeddings",
-            "pending_backfills",
-            "soft_deleted_documents",
-            "dreams_due",
-        ]
-        proc = _exec(
-            conn,
-            """
-            SELECT p.pronargs, p.proconfig
-            FROM pg_proc AS p
-            JOIN pg_namespace AS n ON n.oid = p.pronamespace
-            WHERE n.nspname = 'memory' AND p.proname = 'sentica_pending_counts'
-            """,
-        ).fetchone()
-        assert proc is not None
-        assert proc[0] == 0
-        assert proc[1] is not None
-        assert any(
-            item.startswith("search_path=") and "pg_temp" in item for item in proc[1]
-        )
+        expected_columns = {
+            "sentica_pending_counts": [
+                "workspace_name",
+                "pending_queue",
+                "pending_embeddings",
+                "pending_backfills",
+                "soft_deleted_documents",
+                "dreams_due",
+            ],
+            "sentica_pending_queue_counts": [
+                "workspace_name",
+                "pending_queue",
+            ],
+        }
+        for function_name, expected in expected_columns.items():
+            description = _exec(
+                conn, "SELECT * FROM memory." + function_name + "() LIMIT 0"
+            )
+            columns = description.description
+            assert columns is not None
+            assert [col.name for col in columns] == expected
+            proc = _exec(
+                conn,
+                """
+                SELECT p.pronargs, p.proconfig
+                FROM pg_proc AS p
+                JOIN pg_namespace AS n ON n.oid = p.pronamespace
+                WHERE n.nspname = 'memory' AND p.proname = %s
+                """,
+                (function_name,),
+            ).fetchone()
+            assert proc is not None
+            assert proc[0] == 0
+            assert proc[1] is not None
+            assert any(
+                item.startswith("search_path=") and "pg_temp" in item
+                for item in proc[1]
+            )
+            allowed = _exec(
+                conn,
+                "SELECT has_function_privilege(current_user, %s::regprocedure, "
+                + "'EXECUTE')",
+                ("memory." + function_name + "()",),
+            ).fetchone()
+            assert allowed == (True,)
         left = "a" + uuid.uuid4().hex[:20]
         right = "b" + uuid.uuid4().hex[:20]
         for name in (left, right):
@@ -284,7 +301,7 @@ def _app_dsn(worker_id: str, db_engine: AsyncEngine | None = None) -> str:
 def _bind_unit_db(
     monkeypatch: pytest.MonkeyPatch,
     db_engine: AsyncEngine,
-    request: pytest.FixtureRequest | None = None,
+    request: pytest.FixtureRequest,
 ) -> None:
     """Point tracked_db at the per-test engine and pin the workspace GUC on it."""
     if rls_job():
@@ -338,8 +355,7 @@ def _bind_unit_db(
         scope.remove_workspace_scope(db_engine, read)
         _READ_ENGINES.pop(id(db_engine), None)
 
-    if request is not None:
-        request.addfinalizer(_cleanup)
+    request.addfinalizer(_cleanup)
 
 
 def _install_counts(worker_id: str, db_engine: AsyncEngine | None = None) -> bool:
@@ -547,6 +563,8 @@ async def test_due_dream_is_reported_and_triggered(
     assert isinstance(db_engine, AsyncEngine)
     _bind_unit_db(monkeypatch, db_engine, request)
     name = "d" + uuid.uuid4().hex[:8]
+    monkeypatch.setattr(settings.DREAM, "ENABLED", False)
+    monkeypatch.setattr(settings.DREAM, "DOCUMENT_THRESHOLD", 50)
     installed = _install_counts(worker_id, db_engine)
     schema = settings.DB.SCHEMA
     seen: list[tuple[str | None, object]] = []
@@ -582,7 +600,6 @@ async def test_due_dream_is_reported_and_triggered(
         ).status_code in (200, 201)
         created = datetime.now(UTC) - timedelta(days=2)
         recent = datetime.now(UTC)
-        threshold = settings.DREAM.DOCUMENT_THRESHOLD
         with psycopg.connect(_app_dsn(worker_id, db_engine)) as conn:
             _exec(conn, "BEGIN")
             _exec(conn, "SELECT set_config('sentica.workspace', %s, true)", (name,))
@@ -605,7 +622,7 @@ async def test_due_dream_is_reported_and_triggered(
                     + "SELECT 'd' || substr(md5(%s || g::text), 1, 20), "
                     + "'dream note', %s, %s, %s, 's1', 'explicit', %s "
                     + "FROM generate_series(1, %s) AS g",
-                    (observer + name, observer, observer, name, stamp, threshold),
+                    (observer + name, observer, observer, name, stamp, 2),
                 )
             _exec(conn, "COMMIT")
         from sqlalchemy import text
@@ -628,7 +645,10 @@ async def test_due_dream_is_reported_and_triggered(
             ).all()
         assert present is not None, due_rows
         matched = [row for row in due_rows if row[0] == name]
-        assert matched and int(matched[0][1]) == 1, due_rows
+        assert matched and int(matched[0][1]) == 2, due_rows
+        monkeypatch.setattr(settings.DREAM, "ENABLED", True)
+        monkeypatch.setattr(settings.DREAM, "DOCUMENT_THRESHOLD", 1)
+        monkeypatch.setattr(settings.DREAM, "ENABLED_TYPES", ["omni"])
         poller = DeriverMetricsPoller()
         await poller.refresh()
         assert any(item[0] == name for item in seen), seen
