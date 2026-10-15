@@ -72,5 +72,8 @@ release v3.3.0 (`608aec8a928da13c540262ed980c569448fb53ab`).
 | `src/sentica/dreams.py` | Daily digests and weekly insights inside one workspace. | M7 |
 | `src/routers/workspaces.py` | `PUT /workspaces/{id}/synthesis` turns new dreams off. | M7 |
 | `tests/sentica/test_m7_dreams.py` | Weekly cites digests, isolation, the banned filter, and the off switch. | M7 |
+| `src/sentica/eval_harness.py` | Deterministic recall for the synthetic-business eval, and the baseline comparison. | M8 |
+| `tests/sentica/test_m8_eval.py` | Category scores, latency, and the isolation red-team. | M8 |
+| `eval/BASELINE.md` | First-run recall, latency, and the zero-leak line CI guards. | M8 |
 | `.review/M2-summary.md` | Review notes for M2, including the M9 deferrals. | M2 |
 

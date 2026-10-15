@@ -190,6 +190,16 @@ records live on the workspace. `PUT /workspaces/{id}/synthesis`
 dreams off and leaves earlier ones in place. The reconciler calls
 `src/sentica/dreams.py:230` `dreams_due`.
 
+## Evaluation
+
+Retrieval on seeded businesses is scored without a model judge.
+`src/sentica/eval_harness.py:291` `recall_at` is the share of gold conclusions
+in the top k. An empty result is full marks only for an abstention question.
+`src/sentica/eval_harness.py:342` `parse_baseline` reads `eval/BASELINE.md`.
+`src/sentica/eval_harness.py:361` `regressions` fails a category that falls
+more than 2 points. The red-team must report zero leaks across workspaces
+and tenants.
+
 ## Deriver queue
 
 The queue is the Postgres table `queue` (`src/models.py:643` `QueueItem`):
