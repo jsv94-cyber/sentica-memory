@@ -59,6 +59,14 @@ weight below that is soft-deleted. `SENTICA_DECAY_RETENTION_DAYS` defaults
 to 30. Soft-deleted conclusions are purged after that. A retrieval or a use
 resets the clock. The reconciler runs this pass at most once an hour.
 
+## Workspace synthesis
+
+`PUT /v3/workspaces/{workspace_id}/synthesis` sets `sentica_synthesis` on
+the workspace. A missing value means synthesis is on, including for a
+restricted workspace. `false` stops new daily and weekly dreams and does
+not delete earlier ones. A daily digest is written once per UTC date. A
+weekly insight is written once per ISO week, from the daily digests.
+
 ## Safety model check
 
 `SENTICA_SAFETY_MODEL_CHECK` is off unless it is `1`, `true`, `yes`, or

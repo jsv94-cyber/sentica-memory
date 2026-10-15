@@ -216,6 +216,9 @@ class ReconcilerScheduler:
                 from src.sentica.freshness import decay_due_workspaces
 
                 await decay_due_workspaces()
+                from src.sentica.dreams import dreams_due
+
+                await dreams_due()
 
                 # Check each task and enqueue if due
                 for task_name, task in RECONCILER_TASKS.items():

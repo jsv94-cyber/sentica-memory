@@ -182,6 +182,14 @@ runs the deduction specialist, then the induction specialist.
 `src/dreamer/__init__.py:5` exports `process_dream`, which the queue consumer
 calls. Surprisal sampling, when enabled, is `src/dreamer/surprisal.py`.
 
+Workspace synthesis is separate from that collection dream.
+`src/sentica/dreams.py:140` `run_dreams` writes a daily digest from that
+workspace's conclusions, then a weekly insight from those digests. The
+records live on the workspace. `PUT /workspaces/{id}/synthesis`
+(`src/routers/workspaces.py:255` `set_workspace_synthesis`) turns new
+dreams off and leaves earlier ones in place. The reconciler calls
+`src/sentica/dreams.py:230` `dreams_due`.
+
 ## Deriver queue
 
 The queue is the Postgres table `queue` (`src/models.py:643` `QueueItem`):

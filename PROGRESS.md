@@ -338,3 +338,23 @@ Decisions:
   No `tests/sentica/test_m2_*` file, `tests/sentica/rls_job.py`, or the
   `test-m2-rls` job changed.
 
+## M7. Dreams inside each workspace
+
+Built:
+
+- A daily digest is written from that workspace's conclusions. A weekly
+  insight is written from those digests, not from raw messages. Each
+  record stores the ids it came from and the workspace name. Banned text
+  is dropped by the M4 filter. Tokens for the run are counted per tenant.
+- Synthesis is on unless the workspace sets `sentica_synthesis` to false
+  through `PUT /workspaces/{id}/synthesis`. Turning it off stops new dreams
+  and leaves earlier ones in place. The records live on the workspace, not
+  a new table.
+
+Decisions:
+
+- The collection dreamer is unchanged. This pass is a separate schedule.
+- Local unit tests: 3316 passed, 53 skipped. The runtime-role pin stays 59.
+  No `tests/sentica/test_m2_*` file, `tests/sentica/rls_job.py`, or the
+  `test-m2-rls` job changed.
+
