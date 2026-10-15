@@ -49,7 +49,10 @@ def test_ambiguous_workspace_claims_are_refused() -> None:
 
 
 def test_pending_counts_function_has_no_content_columns() -> None:
+    from src.sentica.workspace_scope import pending_queue_counts_function_sql
+
     sql = pending_counts_function_sql("memory")
+    queue_sql = pending_queue_counts_function_sql("memory")
     assert "SECURITY DEFINER" in sql
     assert "search_path = memory, pg_temp" in sql
     assert "pending_queue" in sql
@@ -57,8 +60,25 @@ def test_pending_counts_function_has_no_content_columns() -> None:
     assert "pending_backfills" in sql
     assert "soft_deleted_documents" in sql
     assert "dreams_due" in sql
+    assert "deleted_at IS NULL" in sql
     assert "sentica_pending_counts()" in sql
     assert "content" not in sql
+    assert "SECURITY DEFINER" in queue_sql
+    assert "search_path = memory, pg_temp" in queue_sql
+    assert "sentica_pending_queue_counts()" in queue_sql
+    assert "pending_embeddings" not in queue_sql
+    assert "content" not in queue_sql
+    migration = (
+        ROOT
+        / "migrations"
+        / "versions"
+        / "c4e8b1a2d6f0_runtime_role_and_pending_counts.py"
+    ).read_text(encoding="utf-8")
+    assert "REVOKE ALL ON FUNCTION" in migration
+    assert "sentica_pending_queue_counts" in migration
+    assert "sentica_pending_counts" in migration
+    assert "must end in _ddl" in migration
+    assert "ix_documents_soft_deleted_cleanup" in migration
 
 
 def test_db_call_timeout_rejects_nan_and_infinity(
@@ -115,7 +135,7 @@ def test_data_migration_updates_each_workspace(worker_id: str) -> None:
         schema = conn.execute("SELECT current_schema()").fetchone()
         assert schema is not None
     engine = create_engine(url)
-    with engine.begin() as sql_conn:
+    with engine.connect() as sql_conn:
         apply_per_workspace(
             sql_conn,
             schema[0],
@@ -397,6 +417,7 @@ async def test_deriver_metrics_are_limited_to_the_token_workspaces(
     poller = DeriverMetricsPoller()
     poller._snapshot = DeriverMetricsSnapshot(  # pyright: ignore[reportPrivateUsage]
         signal_seconds=9.0,
+        dreams_due=7,
         stats=schemas.DeriverMetrics(
             eligible_work_units=0,
             claimed_work_units=0,
@@ -416,6 +437,8 @@ async def test_deriver_metrics_are_limited_to_the_token_workspaces(
         deriver_metrics.set_deriver_metrics_poller(None)
     assert seen == [["left"]]
     assert body["pending_items"] == 1
+    assert body["outstanding_work_seconds"] == 0.0
+    assert body["dreams_due"] == 0
 
 
 async def test_execute_dream_and_delayed_dream_bind_the_workspace(
@@ -713,7 +736,8 @@ def test_null_queue_rows_are_deleted_when_force_rls_is_on(
     admin_url = make_url(admin).set(drivername="postgresql")
     suffix = uuid.uuid4().hex[:10]
     database = "m2mig" + suffix
-    role = "m2ddl" + suffix
+    runtime = "m2" + suffix
+    role = runtime + "_ddl"
     password = "m2mig-secret"
     maintenance = admin_url.set(database="postgres").render_as_string(
         hide_password=False
@@ -731,6 +755,10 @@ def test_null_queue_rows_are_deleted_when_force_rls_is_on(
         role_url.replace("postgresql://", "postgresql+psycopg://", 1),
     )
     with psycopg.connect(maintenance, autocommit=True) as conn:
+        _exec(
+            conn,
+            "CREATE ROLE " + runtime + " NOLOGIN NOSUPERUSER NOBYPASSRLS",
+        )
         _exec(
             conn,
             "CREATE ROLE "
@@ -773,6 +801,102 @@ def test_null_queue_rows_are_deleted_when_force_rls_is_on(
             ).fetchone()
         assert nullable == ("NO",)
         assert left == (0,)
+        with psycopg.connect(owner, autocommit=True) as conn:
+            superuser_left = _exec(
+                conn,
+                "SELECT count(*) FROM "
+                + schema
+                + ".queue WHERE workspace_name IS NULL",
+            ).fetchone()
+        assert superuser_left == (0,)
+    finally:
+        with psycopg.connect(maintenance, autocommit=True) as conn:
+            _exec(
+                conn,
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                + "WHERE datname = %s AND pid <> pg_backend_pid()",
+                (database,),
+            )
+            _exec(conn, "DROP DATABASE IF EXISTS " + database)
+            _exec(conn, "DROP ROLE IF EXISTS " + role)
+            _exec(conn, "DROP ROLE IF EXISTS " + runtime)
+
+
+async def test_claim_loop_uses_the_queue_counts_function(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.deriver.queue_manager import QueueManager
+    from src.sentica.workspace_scope import PendingQueueCount
+
+    called = {"queue": 0, "full": 0}
+
+    async def _queue(_db: object) -> list[PendingQueueCount]:
+        called["queue"] += 1
+        return [PendingQueueCount(workspace_name="left", pending_queue=0)]
+
+    async def _full(_db: object) -> list[object]:
+        called["full"] += 1
+        raise AssertionError("the claim loop must not read the reconciler counts")
+
+    monkeypatch.setattr(
+        "src.sentica.workspace_scope.fetch_pending_queue_counts", _queue
+    )
+    monkeypatch.setattr("src.sentica.workspace_scope.fetch_pending_counts", _full)
+    claimed = await QueueManager().get_and_claim_work_units()
+    assert called == {"queue": 1, "full": 0}
+    assert claimed == {}
+
+
+def test_migration_refuses_a_role_that_does_not_end_in_ddl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import os
+
+    from alembic import command
+    from alembic.config import Config
+    from sqlalchemy.engine.url import make_url
+
+    from src.config import settings
+    from tests.sentica.rls_job import rls_job
+
+    admin = (
+        os.environ["SENTICA_RLS_ADMIN_DSN"]
+        if rls_job()
+        else os.environ["DB_CONNECTION_URI"]
+    )
+    admin_url = make_url(admin).set(drivername="postgresql")
+    suffix = uuid.uuid4().hex[:10]
+    database = "m2bad" + suffix
+    role = "m2plain" + suffix
+    maintenance = admin_url.set(database="postgres").render_as_string(
+        hide_password=False
+    )
+    if rls_job():
+        maintenance = admin_url.render_as_string(hide_password=False)
+    role_url = admin_url.set(
+        username=role, password="m2mig-secret", database=database
+    ).render_as_string(hide_password=False)
+    monkeypatch.setattr(
+        settings.DB,
+        "CONNECTION_URI",
+        role_url.replace("postgresql://", "postgresql+psycopg://", 1),
+    )
+    with psycopg.connect(maintenance, autocommit=True) as conn:
+        _exec(
+            conn,
+            "CREATE ROLE "
+            + role
+            + " LOGIN PASSWORD 'm2mig-secret' NOSUPERUSER NOBYPASSRLS",
+        )
+        _exec(conn, "CREATE DATABASE " + database + " OWNER " + role)
+    try:
+        owner = admin_url.set(database=database).render_as_string(hide_password=False)
+        with psycopg.connect(owner, autocommit=True) as conn:
+            _exec(conn, "CREATE EXTENSION IF NOT EXISTS vector")
+            _exec(conn, "CREATE EXTENSION IF NOT EXISTS pg_trgm")
+        cfg = Config(str(ROOT / "alembic.ini"))
+        with pytest.raises(Exception, match="must end in _ddl"):
+            command.upgrade(cfg, "head")
     finally:
         with psycopg.connect(maintenance, autocommit=True) as conn:
             _exec(

@@ -203,6 +203,7 @@ jobs:
           REVOKE INSERT, UPDATE, DELETE ON memory.alembic_version FROM tenant_rls;
           GRANT SELECT ON memory.alembic_version TO tenant_rls;
           GRANT EXECUTE ON FUNCTION memory.sentica_pending_counts() TO tenant_rls;
+          GRANT EXECUTE ON FUNCTION memory.sentica_pending_queue_counts() TO tenant_rls;
           ALTER ROLE tenant_rls SET search_path TO memory, public;
           ALTER ROLE tenant_rls_ddl SET search_path TO memory, public;
           SQL

@@ -196,9 +196,9 @@ copy of the queue. The message text in that column is in the database, which
 is the store.
 
 The worker process is `python -m src.deriver` (`src/deriver/__main__.py:22`
-calls `src/deriver/queue_manager.py:1342` `main`). `src/deriver/queue_manager.py:140`
+calls `src/deriver/queue_manager.py:1369` `main`). `src/deriver/queue_manager.py:140`
 `QueueManager.polling_loop` (`src/deriver/queue_manager.py:546`) claims work
-units (`src/deriver/queue_manager.py:322`) and processes them in order.
+units (`src/deriver/queue_manager.py:323`) and processes them in order.
 `src/deriver/consumer.py:47` `process_item` dispatches on `task_type`.
 Representation batches go to `src/deriver/deriver.py:44`
 `process_representation_tasks_batch`, which makes one structured model call
@@ -238,12 +238,12 @@ Dialectic is reached from `POST /v3/.../peers/{peer_id}/chat`
 `agentic_chat`. The agent builds its prompt in `src/dialectic/core.py:122`
 and then loops on tools until it can answer.
 
-Embeddings do not use `honcho_llm_call`. `src/embedding_client.py:710`
+Embeddings do not use `honcho_llm_call`. `src/embedding_client.py:708`
 `EmbeddingClient` wraps `src/embedding_client.py:196` `_EmbeddingClient`.
 `src/embedding_client.py:308` `embed` calls the provider.
 The default transport is OpenAI `text-embedding-3-small`
 (`src/config.py` `EmbeddingSettings`). The OpenAI request is
-`src/embedding_client.py:360` `embeddings.create`. Gemini uses
+`src/embedding_client.py:351` `embeddings.create`. Gemini uses
 `embed_content` in the same class when the transport is `gemini`.
 Callers are message create (fast path), the reconciler
 (`src/reconciler/sync_vectors.py`), and document insert in

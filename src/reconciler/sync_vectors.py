@@ -163,6 +163,15 @@ async def _get_message_embeddings_needing_sync(
 
     Note: "synced" = done forever, "failed" = permanent failure (manual intervention)
     """
+    from src.sentica.workspace_scope import current_workspace
+
+    bound = current_workspace()
+    pending = [
+        models.MessageEmbedding.sync_state == "pending",
+        backoff_eligible(models.MessageEmbedding.last_sync_at),
+    ]
+    if bound is not None:
+        pending.append(models.MessageEmbedding.workspace_name == bound)
     # Step 1: pick distinct message_ids with at least one eligible pending row,
     # prioritizing those with the oldest last_sync_at.
     msg_id_stmt = (
@@ -170,12 +179,7 @@ async def _get_message_embeddings_needing_sync(
             models.MessageEmbedding.message_id,
             func.min(models.MessageEmbedding.last_sync_at).label("oldest_attempt"),
         )
-        .where(
-            and_(
-                models.MessageEmbedding.sync_state == "pending",
-                backoff_eligible(models.MessageEmbedding.last_sync_at),
-            )
-        )
+        .where(and_(*pending))
         .group_by(models.MessageEmbedding.message_id)
         .order_by(func.min(models.MessageEmbedding.last_sync_at).asc().nullsfirst())
         .limit(batch_size)
@@ -193,8 +197,7 @@ async def _get_message_embeddings_needing_sync(
         .where(
             and_(
                 models.MessageEmbedding.message_id.in_(message_ids),
-                models.MessageEmbedding.sync_state == "pending",
-                backoff_eligible(models.MessageEmbedding.last_sync_at),
+                *pending,
             )
         )
         .order_by(models.MessageEmbedding.message_id, models.MessageEmbedding.id)

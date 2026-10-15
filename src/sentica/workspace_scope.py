@@ -20,10 +20,18 @@ _workspace: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "sentica_workspace", default=None
 )
 _installed = False
+_listener_targets: list[tuple[Any, str, Any]] = []
+
+
+class PendingQueueCount(NamedTuple):
+    """Queue depth for one workspace. The claim loop reads only this."""
+
+    workspace_name: str
+    pending_queue: int
 
 
 class PendingCount(NamedTuple):
-    """Names and counts only. The function takes no arguments."""
+    """Names and counts only. The reconciler gates read this."""
 
     workspace_name: str
     pending_queue: int
@@ -180,12 +188,31 @@ def install_workspace_scope(*engines: AsyncEngine) -> None:
 
     for async_engine in engines:
         sync_engine = async_engine.sync_engine
-        event.listen(sync_engine, "before_cursor_execute", _apply)
-        event.listen(sync_engine, "checkin", _clear)
-        event.listen(sync_engine, "commit", _clear)
-        event.listen(sync_engine, "rollback", _clear)
-        event.listen(sync_engine, "rollback_savepoint", _clear_savepoint)
+        for name, fn in (
+            ("before_cursor_execute", _apply),
+            ("checkin", _clear),
+            ("commit", _clear),
+            ("rollback", _clear),
+            ("rollback_savepoint", _clear_savepoint),
+        ):
+            event.listen(sync_engine, name, fn)
+            _listener_targets.append((sync_engine, name, fn))
     _installed = True
+
+
+def remove_workspace_scope(*engines: AsyncEngine) -> None:
+    """Drop workspace listeners from these engines. Other engines stay."""
+    global _installed
+    wanted = {engine.sync_engine for engine in engines}
+    kept: list[tuple[Any, str, Any]] = []
+    for target, name, fn in _listener_targets:
+        if target not in wanted:
+            kept.append((target, name, fn))
+            continue
+        if event.contains(target, name, fn):
+            event.remove(target, name, fn)
+    _listener_targets[:] = kept
+    _installed = bool(kept)
 
 
 def workspace_targets(
@@ -237,9 +264,125 @@ def fair_workspace_order(names: Sequence[str], cursor: int) -> tuple[list[str], 
     return ordered[start:] + ordered[:start], cursor + 1
 
 
-def pending_counts_function_sql(schema: str) -> str:
-    """One read-only function. It returns counts, never message or document text."""
+def _explicit_documents(quoted: str) -> str:
+    """The explicit, live documents list_due_dreams counts."""
+    return (
+        f"FROM {quoted}.documents AS d "
+        "WHERE d.workspace_name = c.workspace_name "
+        "AND d.observer = c.observer "
+        "AND d.observed = c.observed "
+        "AND d.level = 'explicit' "
+        "AND d.deleted_at IS NULL"
+    )
+
+
+def _dreams_due_sql(quoted: str) -> str:
+    """Count collections list_due_dreams would return.
+
+    The numeric gates are the DreamSettings defaults at the moment this SQL
+    is created. list_due_dreams applies the same comparisons to the same rows.
+    """
+    from src.config import settings
+
+    if not settings.DREAM.ENABLED or "omni" not in settings.DREAM.ENABLED_TYPES:
+        return "0::bigint"
+    threshold = int(settings.DREAM.DOCUMENT_THRESHOLD)
+    idle = int(settings.DREAM.IDLE_TIMEOUT_MINUTES)
+    hours = int(settings.DREAM.MIN_HOURS_BETWEEN_DREAMS)
+    explicit = _explicit_documents(quoted)
+    newest = f"(SELECT d.session_name {explicit} ORDER BY d.created_at DESC LIMIT 1)"
+    return f"""
+        (
+            SELECT count(*)::bigint
+            FROM {quoted}.collections AS c
+            JOIN {quoted}.workspaces AS dw ON dw.name = c.workspace_name
+            WHERE c.workspace_name = w.name
+                AND coalesce(
+                    (
+                        SELECT (s.configuration #>> '{{dream,enabled}}')::boolean
+                        FROM {quoted}.sessions AS s
+                        WHERE s.workspace_name = c.workspace_name
+                            AND s.name = {newest}
+                    ),
+                    (dw.configuration #>> '{{dream,enabled}}')::boolean,
+                    true
+                )
+                AND (
+                    SELECT count(*) {explicit}
+                ) - coalesce(
+                    (c.internal_metadata->'dream'->>'last_dream_document_count')::int,
+                    0
+                ) >= {threshold}
+                AND (
+                    SELECT max(d.created_at) {explicit}
+                ) < now() - interval '{idle} minutes'
+                AND {newest} IS NOT NULL
+                AND (
+                    c.internal_metadata->'dream'->>'last_dream_at' IS NULL
+                    OR NOT (
+                        (c.internal_metadata->'dream'->>'last_dream_at')
+                            ~ '^[0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}'
+                        AND (c.internal_metadata->'dream'->>'last_dream_at')::timestamptz
+                            > now() - interval '{hours} hours'
+                    )
+                )
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM {quoted}.queue AS q
+                    WHERE q.processed = false
+                        AND q.task_type = 'representation'
+                        AND q.workspace_name = c.workspace_name
+                        AND (
+                            (
+                                split_part(q.work_unit_key, ':', 5) = ''
+                                AND split_part(q.work_unit_key, ':', 4) = c.observed
+                            )
+                            OR split_part(q.work_unit_key, ':', 5) = c.observed
+                        )
+                )
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM {quoted}.queue AS q
+                    WHERE q.task_type = 'dream'
+                        AND q.workspace_name = c.workspace_name
+                        AND q.created_at >= (SELECT max(d.created_at) {explicit})
+                        AND split_part(q.work_unit_key, ':', 4) = c.observer
+                        AND split_part(q.work_unit_key, ':', 5) = c.observed
+                )
+        )
+    """
+
+
+def pending_queue_counts_function_sql(schema: str) -> str:
+    """Queue depth only. The claim loop uses this and nothing else."""
     quoted = _ident(schema)
+    return f"""
+        CREATE OR REPLACE FUNCTION {quoted}.sentica_pending_queue_counts()
+        RETURNS TABLE (
+            workspace_name text,
+            pending_queue bigint
+        )
+        LANGUAGE sql
+        STABLE
+        SECURITY DEFINER
+        SET search_path = {schema}, pg_temp
+        AS $$
+            SELECT w.name,
+                (
+                    SELECT count(*)::bigint
+                    FROM {quoted}.queue AS q
+                    WHERE q.processed = false AND q.workspace_name = w.name
+                )
+            FROM {quoted}.workspaces AS w
+            ORDER BY w.name
+        $$
+    """
+
+
+def pending_counts_function_sql(schema: str) -> str:
+    """Reconciler gates. Names and counts only, never message or document text."""
+    quoted = _ident(schema)
+    dreams = _dreams_due_sql(quoted)
     return f"""
         CREATE OR REPLACE FUNCTION {quoted}.sentica_pending_counts()
         RETURNS TABLE (
@@ -282,23 +425,7 @@ def pending_counts_function_sql(schema: str) -> str:
                         AND d.deleted_at IS NOT NULL
                         AND d.deleted_at < now() - interval '5 minutes'
                 ),
-                (
-                    SELECT count(*)::bigint
-                    FROM {quoted}.collections AS c
-                    WHERE c.workspace_name = w.name
-                        AND (
-                            SELECT count(*)
-                            FROM {quoted}.documents AS d
-                            WHERE d.workspace_name = c.workspace_name
-                                AND d.observer = c.observer
-                                AND d.observed = c.observed
-                                AND d.level = 'explicit'
-                                AND d.deleted_at IS NULL
-                        ) > coalesce(
-                            (c.internal_metadata->'dream'->>'last_dream_document_count')::int,
-                            0
-                        )
-                )
+                {dreams}
             FROM {quoted}.workspaces AS w
             ORDER BY w.name
         $$
@@ -318,25 +445,30 @@ def ddl_select_policy_sql(schema: str, table_name: str, role: str) -> str:
 
 
 def apply_per_workspace(connection: Any, schema: str, statement: str) -> int:
-    """Run one statement inside each workspace, with the setting local to it.
+    """Run one statement inside each workspace and commit that workspace.
 
     The caller is the migration role. Row-level security is forced, so an
-    update that is not wrapped this way changes no rows.
+    update that is not wrapped this way changes no rows. Each workspace is
+    its own transaction, so one failure does not roll back the others.
     """
     from sqlalchemy import text
 
     quoted = _ident(schema)
-    rows = connection.execute(
-        text(f"SELECT name FROM {quoted}.workspaces ORDER BY name")
-    ).fetchall()
+    if connection.in_transaction():
+        connection.commit()
+    with connection.begin():
+        rows = connection.execute(
+            text(f"SELECT name FROM {quoted}.workspaces ORDER BY name")
+        ).fetchall()
     updated = 0
     for (name,) in rows:
-        connection.execute(
-            text("SELECT set_config('sentica.workspace', :name, true)"),
-            {"name": name},
-        )
-        result = connection.execute(text(statement))
-        updated += int(result.rowcount or 0)
+        with connection.begin():
+            connection.execute(
+                text("SELECT set_config('sentica.workspace', :name, true)"),
+                {"name": name},
+            )
+            result = connection.execute(text(statement))
+            updated += int(result.rowcount or 0)
     return updated
 
 
@@ -367,8 +499,7 @@ async def open_workspace(
     return token
 
 
-async def fetch_pending_counts(db: Any) -> list[PendingCount] | None:
-    """Counts from the migration-owned function, or None when it is not installed."""
+async def _function_rows(db: Any, function_name: str) -> list[Any] | None:
     from sqlalchemy import text
 
     from src.config import settings
@@ -376,15 +507,36 @@ async def fetch_pending_counts(db: Any) -> list[PendingCount] | None:
     schema = settings.DB.SCHEMA
     if not schema.replace("_", "").isalnum():
         raise RuntimeError("unexpected schema name")
+    if not function_name.replace("_", "").isalnum():
+        raise RuntimeError("unexpected function name")
     present = await db.scalar(
         text("SELECT to_regprocedure(:name)"),
-        {"name": f"{schema}.sentica_pending_counts()"},
+        {"name": f"{schema}.{function_name}()"},
     )
     if present is None:
         return None
     result = await db.execute(
-        text("SELECT * FROM " + _ident(schema) + ".sentica_pending_counts()")
+        text("SELECT * FROM " + _ident(schema) + "." + function_name + "()")
     )
+    return list(result.all())
+
+
+async def fetch_pending_queue_counts(db: Any) -> list[PendingQueueCount] | None:
+    """Queue depths from the claim-loop function, or None when it is absent."""
+    rows = await _function_rows(db, "sentica_pending_queue_counts")
+    if rows is None:
+        return None
+    return [
+        PendingQueueCount(workspace_name=str(row[0]), pending_queue=int(row[1]))
+        for row in rows
+    ]
+
+
+async def fetch_pending_counts(db: Any) -> list[PendingCount] | None:
+    """Reconciler counts, or None when that function is not installed."""
+    rows = await _function_rows(db, "sentica_pending_counts")
+    if rows is None:
+        return None
     return [
         PendingCount(
             workspace_name=str(row[0]),
@@ -394,5 +546,5 @@ async def fetch_pending_counts(db: Any) -> list[PendingCount] | None:
             soft_deleted_documents=int(row[4]),
             dreams_due=int(row[5]),
         )
-        for row in result.all()
+        for row in rows
     ]

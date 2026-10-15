@@ -119,6 +119,7 @@ def _fingerprint() -> tuple[tuple[str, str | None], ...]:
         "DB_SQL_DEBUG",
         "COLLECT_METRICS_LOCAL",
         "REASONING_TRACES_FILE",
+        "LLM_OPENAI_API_KEY",
         "METRICS_ENABLED",
         "SENTICA_DB_CALL_TIMEOUT_SECONDS",
         *REQUIRED_SETTINGS,
@@ -272,6 +273,13 @@ def _refuse_unsafe_runtime() -> None:
     if vector_store != "pgvector":
         raise SenticaStartupError(
             "Refusing to start: an external vector store is not allowed in production"
+        )
+    openai_key = os.environ.get("LLM_OPENAI_API_KEY")
+    if openai_key is None:
+        openai_key = settings.LLM.OPENAI_API_KEY
+    if openai_key == "sentica-local-dummy":
+        raise SenticaStartupError(
+            "Refusing to start: LLM_OPENAI_API_KEY is the local dummy key"
         )
     metrics_on = _truthy("METRICS_ENABLED") or settings.METRICS.ENABLED
     labeled = any(

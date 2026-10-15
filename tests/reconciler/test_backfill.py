@@ -398,3 +398,36 @@ async def test_record_backfill_pending_sets_gauge(
     await backfill_module.record_backfill_pending()
 
     assert calls == [("fake", 7)]
+
+
+async def test_record_backfill_pending_uses_pending_backfills(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.sentica.workspace_scope import PendingCount
+
+    calls: list[tuple[str, int]] = []
+
+    def _record(*, task: str, count: int) -> None:
+        calls.append((task, count))
+
+    async def _counts(_db: object) -> list[PendingCount]:
+        return [
+            PendingCount("left", 0, 0, 4, 0, 0),
+            PendingCount("right", 0, 0, 1, 0, 0),
+        ]
+
+    async def _not_counted(_db: AsyncSession) -> int:
+        raise AssertionError("count_pending must not run when the function returns")
+
+    monkeypatch.setattr("src.config.settings.METRICS.ENABLED", True)
+    monkeypatch.setattr(prometheus_metrics, "set_backfill_pending", _record)
+    monkeypatch.setattr("src.sentica.workspace_scope.fetch_pending_counts", _counts)
+    monkeypatch.setattr(
+        backfill_module,
+        "BACKFILLS",
+        {"fake": _fake_backfill(_Rows(7), count_pending=_not_counted)},
+    )
+
+    await backfill_module.record_backfill_pending()
+
+    assert calls == [("fake", 5)]

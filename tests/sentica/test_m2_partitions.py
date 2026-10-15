@@ -769,6 +769,7 @@ async def test_canary_written_only_to_r_stays_out_of_other_workspaces(
     client: object,
     db_session: object,
     monkeypatch: pytest.MonkeyPatch,
+    mock_llm_call_functions: dict[str, Any],
 ) -> None:
     """A fact stored in R never reaches prompts, embeddings, or responses for A."""
     from sqlalchemy import select
@@ -893,6 +894,7 @@ async def test_canary_written_only_to_r_stays_out_of_other_workspaces(
         "stream": 0,
         "conclusions": 0,
         "dialectic": 0,
+        "summarizer": 0,
     }
     tool_rounds = {"n": 0}
     tool_results = {"n": 0}
@@ -949,12 +951,21 @@ async def test_canary_written_only_to_r_stays_out_of_other_workspaces(
             ],
         )
 
+    def _capture_call(kind: str, kwargs: dict[str, object]) -> None:
+        messages = kwargs.get("messages")
+        prompt = kwargs.get("prompt")
+        recorded.append("capture:" + kind + ":" + repr(messages))
+        if prompt is not None:
+            recorded.append("capture:" + kind + ":prompt:" + str(prompt))
+
     async def _complete(
         _backend: object, _config: object, **kwargs: object
     ) -> CompletionResult:
+        _capture_call("complete", kwargs)
         messages = kwargs.get("messages")
         names = _tool_names(kwargs.get("tools"))
         if kwargs.get("response_format") is PromptRepresentation:
+            recorded.append("capture:deriver:" + repr(messages))
             return await _deriver(prompt=kwargs.get("prompt"))
         if "create_observations_deductive" in names:
             return await _specialist("deduction", messages)
@@ -965,6 +976,7 @@ async def test_canary_written_only_to_r_stays_out_of_other_workspaces(
         return CompletionResult(content="ok")
 
     async def _stream(_backend: object, _config: object, **kwargs: object) -> object:
+        _capture_call("stream", kwargs)
         counters["stream"] += 1
         messages = kwargs.get("messages")
         recorded.append("capture:stream:" + repr(messages))
@@ -984,26 +996,19 @@ async def test_canary_written_only_to_r_stays_out_of_other_workspaces(
         recorded.append("capture:batch_embed:" + repr(texts))
         return {key: [[0.0] * width] for key in texts}
 
-    async def _zero_embed(_text: str, *_args: object, **_kwargs: object) -> list[float]:
+    async def _zero_embed(text: str, *_args: object, **_kwargs: object) -> list[float]:
+        recorded.append("capture:embed:" + repr(text))
         return [0.0] * width
 
     settings.LLM.OPENAI_API_KEY = "test-key"
     inner = embedding_client._get_client()  # pyright: ignore[reportPrivateUsage]
-    real_simple = inner.simple_batch_embed
 
     async def _simple(
-        texts: list[str], *_args: object, **kwargs: object
+        texts: list[str], *_args: object, **_kwargs: object
     ) -> list[list[float]]:
         counters["simple_batch_embed"] += 1
         recorded.append("capture:simple_batch_embed:" + repr(list(texts)))
-        on_oversize = kwargs.get("on_oversize", "raise")
-        if on_oversize not in ("raise", "truncate"):
-            on_oversize = "raise"
-        embedded = await real_simple(
-            texts,
-            on_oversize=on_oversize,  # type: ignore[arg-type]
-        )
-        return embedded
+        return [[0.0] * width for _text in texts]
 
     monkeypatch.setattr(inner, "batch_embed", _batch)
     monkeypatch.setattr(inner, "simple_batch_embed", _simple)
@@ -1082,6 +1087,37 @@ async def test_canary_written_only_to_r_stays_out_of_other_workspaces(
         workspace = await crud.get_workspace(db, workspace_name=left)
         session = await crud.get_session(db, session_name="s1", workspace_name=left)
         configuration = get_configuration(None, session, workspace)
+    from src.llm.types import HonchoLLMCallResponse
+    from src.utils.summarizer import SUMMARY_TARGET_RATIO, short_summary_prompt
+
+    def _short_summary(
+        formatted_messages: str,
+        input_tokens: int,
+        previous_summary: str | None = None,
+        custom_instructions: str | None = None,
+        *,
+        telemetry: object = None,
+    ) -> HonchoLLMCallResponse[str]:
+        del telemetry
+        counters["summarizer"] += 1
+        previous = (
+            previous_summary
+            or "There is no previous summary -- the messages are the beginning of the conversation."
+        )
+        target = int(
+            min(input_tokens, settings.SUMMARY.MAX_TOKENS_SHORT) * SUMMARY_TARGET_RATIO
+        )
+        recorded.append(
+            "capture:summarizer:"
+            + short_summary_prompt(
+                formatted_messages, target, previous, custom_instructions
+            )
+        )
+        return HonchoLLMCallResponse(
+            content="local summary", output_tokens=1, finish_reasons=["stop"]
+        )
+
+    mock_llm_call_functions["short_summary"].side_effect = _short_summary
     await summarize_if_needed(
         left,
         "s1",
@@ -1174,7 +1210,21 @@ async def test_canary_written_only_to_r_stays_out_of_other_workspaces(
     assert tool_results["n"] == chats
     assert stream_saw_tool_result["ok"]
     for name, count in counters.items():
+        if name == "batch_embed":
+            continue
         assert count > 0, name
+    assert counters["deduction"] >= 2
+    assert counters["induction"] >= 2
+    assert any(
+        line.startswith("capture:deriver:") and "local hello" in line
+        for line in recorded
+    )
+    # The tool argument is {"text": canary}. A content block uses "content".
+    # Scrubbing the argument must leave a content block visible.
+    content_block = repr([{"role": "user", "content": canary}])
+    still_visible = content_block.replace(f'"text": "{canary}"', "")
+    still_visible = still_visible.replace(f"'text': '{canary}'", "")
+    assert canary in still_visible
     blob = "\n".join([*responses, *recorded])
     scrubbed = blob.replace(f'"text": "{canary}"', "")
     scrubbed = scrubbed.replace(f"'text': '{canary}'", "")
@@ -1687,8 +1737,6 @@ async def _message_layer(
                     await session.rollback()
 
         monkeypatch.setattr("src.crud.message.tracked_db", _as_role)
-    if disable_rls:
-        _messages_rls(False)
 
     from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -1754,6 +1802,8 @@ async def _message_layer(
     monkeypatch.setattr("src.llm.executor.backend_for_provider", _unused_client)
     monkeypatch.setattr("src.llm.executor.execute_completion", _complete)
     try:
+        if disable_rls:
+            _messages_rls(False)
         authorize(client, [left], primary=left)
         answer = client.post(
             f"/v3/workspaces/{left}/peers/p1/chat",
@@ -1763,6 +1813,7 @@ async def _message_layer(
         assert followups, "tool result did not reach the next model call"
         blob = "\n".join(followups)
         if disable_rls:
+            assert canary in blob
             assert "Found " in blob
             assert "No messages found containing" not in blob
         else:

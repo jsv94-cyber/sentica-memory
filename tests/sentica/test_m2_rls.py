@@ -236,6 +236,32 @@ def test_runtime_role_lockdown() -> None:
             with psycopg.connect(ddl, autocommit=True) as owner:
                 owner.execute("ALTER TABLE memory.peers ENABLE ROW LEVEL SECURITY")
                 owner.execute("ALTER TABLE memory.peers FORCE ROW LEVEL SECURITY")
+        import os
+
+        runtime_role = os.environ["SENTICA_DB_USER"]
+        with psycopg.connect(ddl, autocommit=True) as owner:
+            owner.execute("DROP ROLE IF EXISTS m2_no_execute")
+            owner.execute("CREATE ROLE m2_no_execute NOLOGIN NOSUPERUSER")
+            try:
+                for function_name in (
+                    "sentica_pending_counts",
+                    "sentica_pending_queue_counts",
+                ):
+                    procedure = "memory." + function_name + "()"
+                    denied = owner.execute(
+                        "SELECT has_function_privilege(%s, %s::regprocedure, "
+                        + "'EXECUTE')",
+                        ("m2_no_execute", procedure),
+                    ).fetchone()
+                    allowed = owner.execute(
+                        "SELECT has_function_privilege(%s, %s::regprocedure, "
+                        + "'EXECUTE')",
+                        (runtime_role, procedure),
+                    ).fetchone()
+                    assert denied == (False,)
+                    assert allowed == (True,)
+            finally:
+                owner.execute("DROP ROLE IF EXISTS m2_no_execute")
 
 
 _READ_ENGINES: dict[int, AsyncEngine] = {}
@@ -252,7 +278,11 @@ def _app_dsn(worker_id: str, db_engine: AsyncEngine | None = None) -> str:
     )
 
 
-def _bind_unit_db(monkeypatch: pytest.MonkeyPatch, db_engine: AsyncEngine) -> None:
+def _bind_unit_db(
+    monkeypatch: pytest.MonkeyPatch,
+    db_engine: AsyncEngine,
+    request: pytest.FixtureRequest | None = None,
+) -> None:
     """Point tracked_db at the per-test engine and pin the workspace GUC on it."""
     if rls_job():
         return
@@ -290,12 +320,23 @@ def _bind_unit_db(monkeypatch: pytest.MonkeyPatch, db_engine: AsyncEngine) -> No
         for name in (
             "src.dependencies",
             "src.reconciler.scheduler",
+            "src.reconciler.sync_vectors",
+            "src.reconciler.backfill",
             "src.backlog",
             "src.deriver.enqueue",
+            "src.deriver.queue_manager",
         )
     ]
     for module in modules:
-        monkeypatch.setattr(module, "tracked_db", _tracked)
+        if hasattr(module, "tracked_db"):
+            monkeypatch.setattr(module, "tracked_db", _tracked)
+
+    def _cleanup() -> None:
+        scope.remove_workspace_scope(db_engine, read)
+        _READ_ENGINES.pop(id(db_engine), None)
+
+    if request is not None:
+        request.addfinalizer(_cleanup)
 
 
 def _install_counts(worker_id: str, db_engine: AsyncEngine | None = None) -> bool:
@@ -303,14 +344,16 @@ def _install_counts(worker_id: str, db_engine: AsyncEngine | None = None) -> boo
     if rls_job():
         return False
     from src.config import settings
-    from src.sentica.workspace_scope import pending_counts_function_sql
+    from src.sentica.workspace_scope import (
+        pending_counts_function_sql,
+        pending_queue_counts_function_sql,
+    )
 
     schema = settings.DB.SCHEMA
     with psycopg.connect(_app_dsn(worker_id, db_engine), autocommit=True) as conn:
-        _exec(
-            conn,
-            "DROP FUNCTION IF EXISTS " + '"' + schema + '".sentica_pending_counts()',
-        )
+        for name in ("sentica_pending_counts", "sentica_pending_queue_counts"):
+            _exec(conn, "DROP FUNCTION IF EXISTS " + '"' + schema + '".' + name + "()")
+        _exec(conn, pending_queue_counts_function_sql(schema))
         _exec(conn, pending_counts_function_sql(schema))
     return True
 
@@ -320,10 +363,8 @@ def _drop_counts(worker_id: str, db_engine: AsyncEngine | None = None) -> None:
 
     schema = settings.DB.SCHEMA
     with psycopg.connect(_app_dsn(worker_id, db_engine), autocommit=True) as conn:
-        _exec(
-            conn,
-            "DROP FUNCTION IF EXISTS " + '"' + schema + '".sentica_pending_counts()',
-        )
+        for name in ("sentica_pending_counts", "sentica_pending_queue_counts"):
+            _exec(conn, "DROP FUNCTION IF EXISTS " + '"' + schema + '".' + name + "()")
 
 
 async def test_reconciler_gate_enqueues_one_row_per_workspace(
@@ -331,6 +372,7 @@ async def test_reconciler_gate_enqueues_one_row_per_workspace(
     worker_id: str,
     db_engine: object,
     monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
 ) -> None:
     """Each gate enqueues only the workspaces whose own count is non-zero."""
     from starlette.testclient import TestClient
@@ -341,7 +383,7 @@ async def test_reconciler_gate_enqueues_one_row_per_workspace(
 
     assert isinstance(client, TestClient)
     assert isinstance(db_engine, AsyncEngine)
-    _bind_unit_db(monkeypatch, db_engine)
+    _bind_unit_db(monkeypatch, db_engine, request)
     names = {
         "embed": "e" + uuid.uuid4().hex[:8],
         "backfill": "b" + uuid.uuid4().hex[:8],
@@ -486,6 +528,7 @@ async def test_due_dream_is_reported_and_triggered(
     worker_id: str,
     db_engine: object,
     monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
 ) -> None:
     """The runtime role reports a due dream and the api poll enqueues it."""
     from datetime import UTC, datetime, timedelta
@@ -499,7 +542,7 @@ async def test_due_dream_is_reported_and_triggered(
 
     assert isinstance(client, TestClient)
     assert isinstance(db_engine, AsyncEngine)
-    _bind_unit_db(monkeypatch, db_engine)
+    _bind_unit_db(monkeypatch, db_engine, request)
     name = "d" + uuid.uuid4().hex[:8]
     installed = _install_counts(worker_id, db_engine)
     schema = settings.DB.SCHEMA
@@ -518,7 +561,6 @@ async def test_due_dream_is_reported_and_triggered(
         return await real_list(db)
 
     monkeypatch.setattr("src.backlog.list_due_dreams", _wrapped)
-    monkeypatch.setattr(settings.DREAM, "DOCUMENT_THRESHOLD", 1)
     monkeypatch.setattr(settings.DERIVER, "SCHEDULER", "api")
     try:
         authorize(client, [name])
@@ -530,29 +572,38 @@ async def test_due_dream_is_reported_and_triggered(
             f"/v3/workspaces/{name}/peers", json={"name": "p1"}
         ).status_code in (200, 201)
         assert client.post(
+            f"/v3/workspaces/{name}/peers", json={"name": "p2"}
+        ).status_code in (200, 201)
+        assert client.post(
             f"/v3/workspaces/{name}/sessions", json={"id": "s1"}
         ).status_code in (200, 201)
         created = datetime.now(UTC) - timedelta(days=2)
+        recent = datetime.now(UTC)
+        threshold = settings.DREAM.DOCUMENT_THRESHOLD
         with psycopg.connect(_app_dsn(worker_id, db_engine)) as conn:
             _exec(conn, "BEGIN")
             _exec(conn, "SELECT set_config('sentica.workspace', %s, true)", (name,))
-            _exec(
-                conn,
-                "INSERT INTO "
-                + schema
-                + ".collections (id, observer, observed, workspace_name) "
-                + "VALUES (%s, 'p1', 'p1', %s)",
-                ("k" + uuid.uuid4().hex[:20], name),
-            )
-            _exec(
-                conn,
-                "INSERT INTO "
-                + schema
-                + ".documents (id, content, observer, observed, workspace_name, "
-                + "session_name, level, created_at) "
-                + "VALUES (%s, %s, 'p1', 'p1', %s, 's1', 'explicit', %s)",
-                ("d" + uuid.uuid4().hex[:20], "dream note", name, created),
-            )
+            for observer in ("p1", "p2"):
+                _exec(
+                    conn,
+                    "INSERT INTO "
+                    + schema
+                    + ".collections (id, observer, observed, workspace_name) "
+                    + "VALUES (%s, %s, %s, %s)",
+                    ("k" + uuid.uuid4().hex[:20], observer, observer, name),
+                )
+            for observer, stamp in (("p1", created), ("p2", recent)):
+                _exec(
+                    conn,
+                    "INSERT INTO "
+                    + schema
+                    + ".documents (id, content, observer, observed, "
+                    + "workspace_name, session_name, level, created_at) "
+                    + "SELECT 'd' || substr(md5(%s || g::text), 1, 20), "
+                    + "'dream note', %s, %s, %s, 's1', 'explicit', %s "
+                    + "FROM generate_series(1, %s) AS g",
+                    (observer + name, observer, observer, name, stamp, threshold),
+                )
             _exec(conn, "COMMIT")
         from sqlalchemy import text
 
@@ -573,7 +624,8 @@ async def test_due_dream_is_reported_and_triggered(
                 )
             ).all()
         assert present is not None, due_rows
-        assert any(row[0] == name and int(row[1]) >= 1 for row in due_rows), due_rows
+        matched = [row for row in due_rows if row[0] == name]
+        assert matched and int(matched[0][1]) == 1, due_rows
         poller = DeriverMetricsPoller()
         await poller.refresh()
         assert any(item[0] == name for item in seen), seen
@@ -581,16 +633,305 @@ async def test_due_dream_is_reported_and_triggered(
         with psycopg.connect(_app_dsn(worker_id, db_engine)) as conn:
             _exec(conn, "BEGIN")
             _exec(conn, "SELECT set_config('sentica.workspace', %s, true)", (name,))
-            row = _exec(
+            rows = _exec(
                 conn,
                 "SELECT payload::text FROM "
                 + schema
                 + ".queue WHERE workspace_name = %s AND task_type = 'dream'",
                 (name,),
-            ).fetchone()
+            ).fetchall()
             _exec(conn, "COMMIT")
-        assert row is not None
-        assert "api_poll" in row[0]
+        assert len(rows) == 1
+        payload = rows[0][0]
+        assert "api_poll" in payload
+        assert '"observed": "p1"' in payload or '"observed":"p1"' in payload
     finally:
         if installed:
             _drop_counts(worker_id, db_engine)
+
+
+def _two_workspaces(client: Any) -> tuple[str, str]:
+    from tests.sentica.rls_job import authorize
+
+    left = "x" + uuid.uuid4().hex[:8]
+    right = "y" + uuid.uuid4().hex[:8]
+    authorize(client, [left, right])
+    for name in (left, right):
+        assert client.post("/v3/workspaces", json={"name": name}).status_code in (
+            200,
+            201,
+        )
+        assert client.post(
+            f"/v3/workspaces/{name}/peers", json={"name": "p1"}
+        ).status_code in (200, 201)
+        assert client.post(
+            f"/v3/workspaces/{name}/sessions", json={"id": "s1"}
+        ).status_code in (200, 201)
+    return left, right
+
+
+def _workspace_sql(
+    worker_id: str,
+    db_engine: AsyncEngine,
+    name: str,
+    statement: str,
+    params: tuple[Any, ...],
+) -> None:
+    from src.config import settings
+
+    del settings
+    with psycopg.connect(_app_dsn(worker_id, db_engine)) as conn:
+        _exec(conn, "BEGIN")
+        _exec(conn, "SELECT set_config('sentica.workspace', %s, true)", (name,))
+        _exec(conn, statement, params)
+        _exec(conn, "COMMIT")
+
+
+async def test_later_test_has_no_workspace_guard(
+    db_engine: object,
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> None:
+    """Removing the per-test listeners leaves the next transaction unguarded."""
+    from sqlalchemy import text
+
+    import src.sentica.workspace_scope as scope
+
+    assert isinstance(db_engine, AsyncEngine)
+    if rls_job():
+        before = list(scope._listener_targets)  # pyright: ignore[reportPrivateUsage]
+        scope.remove_workspace_scope()
+        after = list(scope._listener_targets)  # pyright: ignore[reportPrivateUsage]
+        assert after == before
+        return
+    _bind_unit_db(monkeypatch, db_engine, request)
+    read = _READ_ENGINES[id(db_engine)]
+    scope.remove_workspace_scope(db_engine, read)
+    token = scope.set_workspace("left")
+    try:
+        async with db_engine.begin() as conn:
+            await conn.execute(text("SELECT 1"))
+            scope.reset_workspace(token)
+            token = scope.set_workspace("right")
+            await conn.execute(text("SELECT 1"))
+    finally:
+        scope.reset_workspace(token)
+
+
+async def test_sync_vectors_leaves_the_other_workspace(
+    client: object,
+    worker_id: str,
+    db_engine: object,
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> None:
+    from starlette.testclient import TestClient
+
+    from src.config import settings
+    from src.reconciler.sync_vectors import run_vector_reconciliation_cycle
+    from src.sentica.workspace_scope import reset_workspace, set_workspace
+
+    assert isinstance(client, TestClient)
+    assert isinstance(db_engine, AsyncEngine)
+    _bind_unit_db(monkeypatch, db_engine, request)
+    left, right = _two_workspaces(client)
+    schema = settings.DB.SCHEMA
+    width = settings.EMBEDDING.VECTOR_DIMENSIONS
+
+    async def _vectors(
+        texts: list[str], *_args: object, **_kwargs: object
+    ) -> list[list[float]]:
+        return [[0.1] * width for _text in texts]
+
+    monkeypatch.setattr(
+        "src.reconciler.sync_vectors.embedding_client.simple_batch_embed", _vectors
+    )
+    for name in (left, right):
+        public_id = "m" + uuid.uuid4().hex[:20]
+        _workspace_sql(
+            worker_id,
+            db_engine,
+            name,
+            "INSERT INTO "
+            + schema
+            + ".messages (public_id, session_name, content, token_count, "
+            + "seq_in_session, peer_name, workspace_name) "
+            + "VALUES (%s, 's1', %s, 1, 1, 'p1', %s)",
+            (public_id, "embed " + name, name),
+        )
+        _workspace_sql(
+            worker_id,
+            db_engine,
+            name,
+            "INSERT INTO "
+            + schema
+            + ".message_embeddings (content, message_id, workspace_name, "
+            + "session_name, peer_name, sync_state) "
+            + "VALUES (%s, %s, %s, 's1', 'p1', 'pending')",
+            ("embed " + name, public_id, name),
+        )
+    token = set_workspace(left)
+    try:
+        await run_vector_reconciliation_cycle()
+    finally:
+        reset_workspace(token)
+    with psycopg.connect(_app_dsn(worker_id, db_engine)) as conn:
+        states: dict[str, str] = {}
+        for name in (left, right):
+            _exec(conn, "BEGIN")
+            _exec(conn, "SELECT set_config('sentica.workspace', %s, true)", (name,))
+            found = _exec(
+                conn,
+                "SELECT sync_state FROM "
+                + schema
+                + ".message_embeddings WHERE workspace_name = %s",
+                (name,),
+            ).fetchone()
+            _exec(conn, "COMMIT")
+            assert found is not None
+            states[name] = str(found[0])
+    assert states[left] == "synced"
+    assert states[right] == "pending"
+
+
+async def test_cleanup_leaves_the_other_workspace(
+    client: object,
+    worker_id: str,
+    db_engine: object,
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from starlette.testclient import TestClient
+
+    from src.config import settings
+    from src.reconciler.sync_vectors import run_document_cleanup
+    from src.sentica.workspace_scope import reset_workspace, set_workspace
+
+    assert isinstance(client, TestClient)
+    assert isinstance(db_engine, AsyncEngine)
+    _bind_unit_db(monkeypatch, db_engine, request)
+    left, right = _two_workspaces(client)
+    schema = settings.DB.SCHEMA
+    deleted_at = datetime.now(UTC) - timedelta(minutes=10)
+    ids: dict[str, str] = {}
+    for name in (left, right):
+        doc_id = "d" + uuid.uuid4().hex[:20]
+        ids[name] = doc_id
+        _workspace_sql(
+            worker_id,
+            db_engine,
+            name,
+            "INSERT INTO "
+            + schema
+            + ".collections (id, observer, observed, workspace_name) "
+            + "VALUES (%s, 'p1', 'p1', %s)",
+            ("k" + uuid.uuid4().hex[:20], name),
+        )
+        _workspace_sql(
+            worker_id,
+            db_engine,
+            name,
+            "INSERT INTO "
+            + schema
+            + ".documents (id, content, observer, observed, workspace_name, "
+            + "session_name, level, deleted_at) "
+            + "VALUES (%s, %s, 'p1', 'p1', %s, 's1', 'explicit', %s)",
+            (doc_id, "old " + name, name, deleted_at),
+        )
+    token = set_workspace(left)
+    try:
+        cleaned = await run_document_cleanup()
+    finally:
+        reset_workspace(token)
+    assert cleaned == 1
+    with psycopg.connect(_app_dsn(worker_id, db_engine)) as conn:
+        for name, expected in ((left, None), (right, ids[right])):
+            _exec(conn, "BEGIN")
+            _exec(conn, "SELECT set_config('sentica.workspace', %s, true)", (name,))
+            found = _exec(
+                conn,
+                "SELECT id FROM " + schema + ".documents WHERE id = %s",
+                (ids[name],),
+            ).fetchone()
+            _exec(conn, "COMMIT")
+            if expected is None:
+                assert found is None
+            else:
+                assert found == (expected,)
+
+
+async def test_backfill_leaves_the_other_workspace(
+    client: object,
+    worker_id: str,
+    db_engine: object,
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> None:
+    from starlette.testclient import TestClient
+
+    from src.config import settings
+    from src.reconciler.backfill import BACKFILLS, run_backfill_cycle
+    from src.sentica.workspace_scope import reset_workspace, set_workspace
+
+    assert isinstance(client, TestClient)
+    assert isinstance(db_engine, AsyncEngine)
+    _bind_unit_db(monkeypatch, db_engine, request)
+    left, right = _two_workspaces(client)
+    schema = settings.DB.SCHEMA
+    source = "a" * 21
+    ids: dict[str, str] = {}
+    for name in (left, right):
+        doc_id = "d" + uuid.uuid4().hex[:20]
+        ids[name] = doc_id
+        _workspace_sql(
+            worker_id,
+            db_engine,
+            name,
+            "INSERT INTO "
+            + schema
+            + ".collections (id, observer, observed, workspace_name) "
+            + "VALUES (%s, 'p1', 'p1', %s)",
+            ("k" + uuid.uuid4().hex[:20], name),
+        )
+        _workspace_sql(
+            worker_id,
+            db_engine,
+            name,
+            "INSERT INTO "
+            + schema
+            + ".documents (id, content, observer, observed, workspace_name, "
+            + "session_name, level, source_ids) "
+            + "VALUES (%s, %s, 'p1', 'p1', %s, 's1', 'explicit', %s::jsonb)",
+            (doc_id, "link " + name, name, '["' + source + '"]'),
+        )
+    token = set_workspace(left)
+    try:
+        await run_backfill_cycle(BACKFILLS["document_sources"])
+    finally:
+        reset_workspace(token)
+    with psycopg.connect(_app_dsn(worker_id, db_engine)) as conn:
+        for name in (left, right):
+            _exec(conn, "BEGIN")
+            _exec(conn, "SELECT set_config('sentica.workspace', %s, true)", (name,))
+            doc = _exec(
+                conn,
+                "SELECT source_ids IS NULL FROM " + schema + ".documents WHERE id = %s",
+                (ids[name],),
+            ).fetchone()
+            edge = _exec(
+                conn,
+                "SELECT source_id FROM "
+                + schema
+                + ".document_sources WHERE derived_id = %s",
+                (ids[name],),
+            ).fetchone()
+            _exec(conn, "COMMIT")
+            assert doc is not None
+            if name == left:
+                assert doc[0] is True
+                assert edge == (source,)
+            else:
+                assert doc[0] is False
+                assert edge is None

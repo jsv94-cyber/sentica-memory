@@ -19,6 +19,7 @@ from src.config import settings
 from src.sentica.workspace_scope import (
     ddl_select_policy_sql,
     pending_counts_function_sql,
+    pending_queue_counts_function_sql,
 )
 
 revision: str = "c4e8b1a2d6f0"
@@ -80,16 +81,26 @@ def upgrade() -> None:
     op.execute(sa.text(f"ALTER TABLE {quoted}.queue ENABLE ROW LEVEL SECURITY"))
     op.execute(sa.text(f"ALTER TABLE {quoted}.queue FORCE ROW LEVEL SECURITY"))
     op.alter_column("queue", "workspace_name", nullable=False, schema=schema)
+    op.execute(sa.text(pending_queue_counts_function_sql(schema)))
     op.execute(sa.text(pending_counts_function_sql(schema)))
+    op.create_index(
+        "ix_documents_soft_deleted_cleanup",
+        "documents",
+        ["workspace_name", "deleted_at"],
+        schema=schema,
+        postgresql_where=sa.text("deleted_at IS NOT NULL"),
+    )
+    current = bind.execute(sa.text("SELECT current_user")).scalar()
+    if not isinstance(current, str) or not current.endswith("_ddl"):
+        raise RuntimeError("Refusing to migrate: the migrating role must end in _ddl")
     runtime = _runtime_role(bind)
     if runtime is None:
-        return
+        raise RuntimeError("Refusing to migrate: the runtime role does not exist")
     role = _quote(runtime)
     op.execute(sa.text(f"GRANT USAGE ON SCHEMA {quoted} TO {role}"))
     op.execute(
         sa.text(
-            f"GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES "
-            f"IN SCHEMA {quoted} TO {role}"
+            f"GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {quoted} TO {role}"
         )
     )
     op.execute(
@@ -101,14 +112,16 @@ def upgrade() -> None:
         )
     )
     op.execute(sa.text(f"GRANT SELECT ON {quoted}.alembic_version TO {role}"))
-    op.execute(
-        sa.text(f"REVOKE ALL ON FUNCTION {quoted}.sentica_pending_counts() FROM PUBLIC")
-    )
-    op.execute(
-        sa.text(
-            f"GRANT EXECUTE ON FUNCTION {quoted}.sentica_pending_counts() TO {role}"
+    for function_name in (
+        "sentica_pending_queue_counts",
+        "sentica_pending_counts",
+    ):
+        op.execute(
+            sa.text(f"REVOKE ALL ON FUNCTION {quoted}.{function_name}() FROM PUBLIC")
         )
-    )
+        op.execute(
+            sa.text(f"GRANT EXECUTE ON FUNCTION {quoted}.{function_name}() TO {role}")
+        )
     current = bind.execute(sa.text("SELECT current_user")).scalar()
     if isinstance(current, str):
         # The function is SECURITY DEFINER and owned by this role. FORCE RLS
@@ -141,4 +154,12 @@ def downgrade() -> None:
         table = quoted + "." + _quote(table_name)
         op.execute(sa.text(f"DROP POLICY IF EXISTS sentica_ddl_read ON {table}"))
     op.execute(sa.text(f"DROP FUNCTION IF EXISTS {quoted}.sentica_pending_counts()"))
+    op.execute(
+        sa.text(f"DROP FUNCTION IF EXISTS {quoted}.sentica_pending_queue_counts()")
+    )
+    op.drop_index(
+        "ix_documents_soft_deleted_cleanup",
+        table_name="documents",
+        schema=schema,
+    )
     op.alter_column("queue", "workspace_name", nullable=True, schema=schema)

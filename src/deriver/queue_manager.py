@@ -341,10 +341,10 @@ class QueueManager:
         async with tracked_db("get_available_work_units_plan", read_only=True) as db:
             from src.sentica.workspace_scope import (
                 fair_workspace_order,
-                fetch_pending_counts,
+                fetch_pending_queue_counts,
             )
 
-            counts = await fetch_pending_counts(db)
+            counts = await fetch_pending_queue_counts(db)
             if counts is None:
                 names = list(await db.scalars(select(models.Workspace.name)))
             else:

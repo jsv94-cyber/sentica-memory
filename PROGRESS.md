@@ -152,10 +152,12 @@ Built:
   and transaction pooling are both safe. Search, context, chat,
   representation, and cards query one workspace at a time and re-check the
   token for each one.
-- Queue rows require a workspace. Pending work is counted by a
-  security-definer function that returns only the workspace name and the
-  five gate counts (pending queue, pending embeddings, pending backfills,
-  soft-deleted documents, dreams due). The deriver and the reconciler do
+- Queue rows require a workspace. The claim loop reads
+  `sentica_pending_queue_counts()`, which returns only the workspace name
+  and the pending queue count. The reconciler reads
+  `sentica_pending_counts()`, which adds pending embeddings, pending
+  backfills, soft-deleted documents, and dreams due. Neither function
+  returns message or document text. The deriver and the reconciler do
   that work one workspace per transaction.
 - A workspace that is not in the token set is refused. An ambiguous token
   is refused. Production allows only the pgvector store.
@@ -164,15 +166,16 @@ Built:
 Tables without `workspace_name` are `workspaces`, `active_queue_sessions`,
 and `alembic_version`. See `.review/M2-summary.md`.
 
-Test counts on 2026-10-14, against the local Postgres on host port 5433,
+Test counts on 2026-10-15, against the local Postgres on host port 5433,
 with `SENTICA_MODE=test`:
 
 - `uv run pytest --ignore=tests/sentica/test_m1_stack.py -q --tb=line`:
-  **3254 passed, 53 skipped, 0 failed** (102.95s). The 53 skips are the
+  **3263 passed, 53 skipped, 0 failed** (104.58s). The 53 skips are the
   upstream live-llm tests and two pagination cases.
   `test_runtime_role_lockdown` is not collected here.
 - `uv run pytest tests/sentica/test_m1_stack.py -n0 -q --tb=line`:
-  **24 passed, 0 skipped, 0 failed** (175.26s).
+  **24 passed, 0 skipped, 0 failed** (171.22s).
 - Runtime-role job (`SENTICA_MODE=production`, app engine as `tenant_rls`):
-  **53 passed, 0 skipped, 0 failed** (15.89s). See `.review/M2-summary.md`.
+  the pin in `tests/sentica/rls_job.py` lists 59 tests. See
+  `.review/M2-summary.md`.
 

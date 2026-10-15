@@ -39,7 +39,7 @@ REQUIRED_CITATIONS: tuple[tuple[str, int, str], ...] = (
     ("src/dialectic/core.py", 589, "honcho_llm_call"),
     ("src/utils/summarizer.py", 279, "honcho_llm_call"),
     ("src/dreamer/specialists.py", 402, "honcho_llm_call"),
-    ("src/embedding_client.py", 360, "embeddings.create"),
+    ("src/embedding_client.py", 351, "embeddings.create"),
     ("src/deriver/prompts.py", 46, "minimal_deriver_prompt"),
     ("src/dialectic/prompts.py", 119, "agent_system_prompt"),
     ("src/dialectic/prompts.py", 350, "workspace_agent_system_prompt"),

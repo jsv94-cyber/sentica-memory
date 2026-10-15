@@ -1703,22 +1703,38 @@ def test_posted_message_embedding_leaves_pending(stack: Path) -> None:
     assert "enqueued True" in ran.stdout
     deadline = time.monotonic() + 90
     state = "pending"
-    while time.monotonic() < deadline and state == "pending":
+    queue_ok = False
+    row: tuple[object, ...] | None = None
+    queued: tuple[object, ...] | None = None
+    while time.monotonic() < deadline and (state != "synced" or not queue_ok):
         with (
             _connect(PROXY_A, stack, "tenant_a", "tenant_a", "tenant_a") as conn,
             conn.cursor() as cur,
         ):
             _bind_workspace(cur, workspace)
             cur.execute(
-                "SELECT sync_state FROM memory.message_embeddings WHERE content = %s",
+                "SELECT sync_state, embedding::text "
+                "FROM memory.message_embeddings WHERE content = %s",
                 (content,),
             )
             row = cur.fetchone()
+            cur.execute(
+                "SELECT processed, error IS NULL FROM memory.queue "
+                "WHERE work_unit_key = %s",
+                ("reconciler:sync_vectors:" + workspace,),
+            )
+            queued = cur.fetchone()
         assert row is not None
         state = str(row[0])
-        if state == "pending":
+        queue_ok = queued is not None and queued[0] is True and queued[1] is True
+        if state != "synced" or not queue_ok:
             time.sleep(1)
-    assert state != "pending"
+    assert state == "synced", (state, row, queued)
+    assert row is not None
+    vector = str(row[1])
+    assert vector.startswith("[")
+    assert not vector.startswith("[0,0,")
+    assert queue_ok
 
 
 def test_api_refuses_a_stale_schema_and_a_runtime_cert_as_ddl(stack: Path) -> None:
