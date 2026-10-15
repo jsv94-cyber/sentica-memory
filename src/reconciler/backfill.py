@@ -145,7 +145,7 @@ async def record_backfill_pending() -> None:
 
     ``document_sources`` is the ``pending_backfills`` column, so that gauge
     is the sum of the column. Any other backfill counts one workspace at a
-    time and skips a workspace whose count is zero.
+    time and skips a workspace whose count is zero without opening it.
     """
     if not settings.METRICS.ENABLED:
         return
@@ -168,6 +168,8 @@ async def record_backfill_pending() -> None:
             total = 0
             try:
                 for row in counts:
+                    if row.pending_backfills == 0:
+                        continue
                     token = set_workspace(row.workspace_name)
                     try:
                         async with tracked_db(

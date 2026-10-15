@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import importlib.util
 import os
 import uuid
@@ -29,6 +30,7 @@ from sqlalchemy.ext.asyncio import (
 
 from src.config import settings
 from tests.sentica import cdb74439_sql
+from tests.sentica.cdb74439_sql_sha256 import FROZEN_SQL_SHA256
 
 ROOT = Path(__file__).resolve().parents[2]
 VERSIONS = ROOT / "migrations" / "versions"
@@ -36,8 +38,11 @@ VERSIONS = ROOT / "migrations" / "versions"
 # settings.DB.SCHEMA is the schema name constant. src.config does not generate SQL.
 _SCHEMA_IMPORT = ("src.config", "settings")
 _SCHEMA_IMPORT_REASON = (
-    "settings.DB.SCHEMA is the schema name. src.config does not generate SQL."
+    "settings.DB.SCHEMA is the schema name. src.config does not generate SQL. "
+    "No other attribute of settings is allowed, and migrations/utils.py is "
+    "checked so a version file cannot reach src through it."
 )
+_DYNAMIC_IMPORTS = frozenset({"import_module", "__import__"})
 
 
 def _load(path: Path) -> Any:
@@ -49,28 +54,74 @@ def _load(path: Path) -> Any:
     return module
 
 
+def _parents(tree: ast.AST) -> dict[ast.AST, ast.AST]:
+    parents: dict[ast.AST, ast.AST] = {}
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            parents[child] = parent
+    return parents
+
+
+def _call_name(node: ast.Call) -> str | None:
+    func = node.func
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return None
+
+
+def _literal(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return None
+
+
+def _check_migration_file(path: Path) -> None:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    parents = _parents(tree)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module is not None:
+            if not node.module.startswith("src"):
+                continue
+            names = [alias.name for alias in node.names]
+            if (
+                node.module == _SCHEMA_IMPORT[0]
+                and names == [_SCHEMA_IMPORT[1]]
+                and all(alias.asname is None for alias in node.names)
+            ):
+                continue
+            raise AssertionError(
+                path.name + " imports " + node.module + " " + repr(names)
+            )
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "src" or alias.name.startswith("src."):
+                    raise AssertionError(path.name + " imports " + alias.name)
+        if isinstance(node, ast.Name) and node.id == "settings":
+            db = parents.get(node)
+            schema = parents.get(db) if db is not None else None
+            if not (
+                isinstance(db, ast.Attribute)
+                and db.attr == "DB"
+                and isinstance(schema, ast.Attribute)
+                and schema.attr == "SCHEMA"
+                and not isinstance(parents.get(schema), ast.Attribute)
+            ):
+                raise AssertionError(path.name + " uses settings beyond DB.SCHEMA")
+        if isinstance(node, ast.Call) and _call_name(node) in _DYNAMIC_IMPORTS:
+            target = _literal(node.args[0]) if node.args else None
+            if target is None or target == "src" or target.startswith("src."):
+                raise AssertionError(path.name + " dynamically imports src")
+
+
 def test_migrations_do_not_import_sql_from_src() -> None:
-    """A version file may import the schema-name constant and nothing else from src."""
+    """A version file may read the schema name and nothing else from src."""
     assert "schema name" in _SCHEMA_IMPORT_REASON
+    assert "migrations/utils.py" in _SCHEMA_IMPORT_REASON
     for path in sorted(VERSIONS.glob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module is not None:
-                if not node.module.startswith("src"):
-                    continue
-                names = [alias.name for alias in node.names]
-                if (node.module, names[0] if len(names) == 1 else None) == (
-                    _SCHEMA_IMPORT[0],
-                    _SCHEMA_IMPORT[1],
-                ):
-                    continue
-                raise AssertionError(
-                    path.name + " imports " + node.module + " " + repr(names)
-                )
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    if alias.name == "src" or alias.name.startswith("src."):
-                        raise AssertionError(path.name + " imports " + alias.name)
+        _check_migration_file(path)
+    _check_migration_file(ROOT / "migrations" / "utils.py")
 
 
 def test_frozen_sql_matches_main_cdb74439(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -82,20 +133,34 @@ def test_frozen_sql_matches_main_cdb74439(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(settings.DREAM, "MIN_HOURS_BETWEEN_DREAMS", 8)
     policy = _load(VERSIONS / "a9c1e3f5b7d2_workspace_row_level_security.py")
     counts = _load(VERSIONS / "c4e8b1a2d6f0_runtime_role_and_pending_counts.py")
+    pinned: list[tuple[str, str, str]] = []
     for schema, table in (("memory", "messages"), ("public", "queue")):
-        assert policy.workspace_policy_sql(schema, table) == (
-            cdb74439_sql.workspace_policy_sql(schema, table)
-        )
+        migrated = policy.workspace_policy_sql(schema, table)
+        historical = cdb74439_sql.workspace_policy_sql(schema, table)
+        assert migrated == historical
+        pinned.append((f"workspace_policy:{schema}:{table}", migrated, historical))
     for schema in ("memory", "public"):
-        assert counts.pending_queue_counts_function_sql(schema) == (
-            cdb74439_sql.pending_queue_counts_function_sql(schema)
+        migrated_queue = counts.pending_queue_counts_function_sql(schema)
+        historical_queue = cdb74439_sql.pending_queue_counts_function_sql(schema)
+        assert migrated_queue == historical_queue
+        pinned.append((f"pending_queue:{schema}", migrated_queue, historical_queue))
+        migrated_counts = counts.pending_counts_function_sql(schema)
+        historical_counts = cdb74439_sql.pending_counts_function_sql(schema)
+        assert migrated_counts == historical_counts
+        pinned.append((f"pending_counts:{schema}", migrated_counts, historical_counts))
+        migrated_ddl = counts.ddl_select_policy_sql(
+            schema, "documents", "tenant_rls_ddl"
         )
-        assert counts.pending_counts_function_sql(schema) == (
-            cdb74439_sql.pending_counts_function_sql(schema)
+        historical_ddl = cdb74439_sql.ddl_select_policy_sql(
+            schema, "documents", "tenant_rls_ddl"
         )
-        assert counts.ddl_select_policy_sql(schema, "documents", "tenant_rls_ddl") == (
-            cdb74439_sql.ddl_select_policy_sql(schema, "documents", "tenant_rls_ddl")
-        )
+        assert migrated_ddl == historical_ddl
+        pinned.append((f"ddl_select:{schema}", migrated_ddl, historical_ddl))
+    assert set(FROZEN_SQL_SHA256) == {key for key, _migrated, _historical in pinned}
+    for key, migrated, historical in pinned:
+        digest = FROZEN_SQL_SHA256[key]
+        assert hashlib.sha256(migrated.encode()).hexdigest() == digest
+        assert hashlib.sha256(historical.encode()).hexdigest() == digest
     frozen = counts.pending_counts_function_sql("memory")
     monkeypatch.setattr(settings.DREAM, "ENABLED", False)
     monkeypatch.setattr(settings.DREAM, "DOCUMENT_THRESHOLD", 1)
@@ -121,6 +186,35 @@ def test_dreams_migration_matches_the_runtime_superset() -> None:
     assert "from src.sentica" not in text
 
 
+def test_rls_job_does_not_grant_function_execute() -> None:
+    """The runtime-role job must get EXECUTE from the migrations, not the workflow."""
+    workflow = (ROOT / ".github" / "workflows" / "unittest.yml").read_text(
+        encoding="utf-8"
+    )
+    job = workflow.split("test-m2-rls:", 1)[1].split("\n  test-status:", 1)[0]
+    assert "GRANT EXECUTE ON FUNCTION" not in job
+    assert "alembic upgrade head" in job
+
+
+def test_dreams_migration_names_a_role_that_does_not_end_in_ddl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A role without the _ddl suffix is refused with that reason."""
+    migration = _load(VERSIONS / "e6b2d8f04a17_dreams_due_superset.py")
+
+    class _Result:
+        def scalar(self) -> str:
+            return "tenant_rls"
+
+    class _Bind:
+        def execute(self, *_args: object, **_kwargs: object) -> _Result:
+            return _Result()
+
+    monkeypatch.setattr(migration.op, "get_bind", lambda: _Bind())
+    with pytest.raises(RuntimeError, match="must end in _ddl"):
+        migration.upgrade()
+
+
 def _admin_url() -> Any:
     raw = settings.DB.CONNECTION_URI
     if not raw:
@@ -130,6 +224,18 @@ def _admin_url() -> Any:
 
 def _sync(url: Any) -> str:
     return url.set(drivername="postgresql").render_as_string(hide_password=False)
+
+
+def _dreams_due(url: str, schema: str, workspace: str) -> int:
+    with psycopg.connect(url, autocommit=True) as conn:
+        due = conn.execute(
+            sql.SQL(
+                "SELECT dreams_due FROM {}.sentica_pending_counts() WHERE workspace_name = %s"
+            ).format(sql.Identifier(schema)),
+            (workspace,),
+        ).fetchone()
+    assert due is not None
+    return int(due[0])
 
 
 async def test_upgrade_from_merged_head_ignores_dream_settings(
@@ -255,6 +361,13 @@ async def test_upgrade_from_merged_head_ignores_dream_settings(
                 (name,),
             ).fetchone()
         assert due is not None and int(due[0]) == 2, due
+        runtime_sync = _sync(created.set(username=runtime_role, password=password))
+        ddl_sync = _sync(created.set(username=ddl_role, password=password))
+        assert _dreams_due(runtime_sync, schema, name) == 2
+        command.downgrade(cfg, "c4e8b1a2d6f0")
+        assert _dreams_due(runtime_sync, schema, name) == 0
+        assert _dreams_due(ddl_sync, schema, name) == 0
+        command.upgrade(cfg, "head")
         monkeypatch.setattr(settings.DREAM, "ENABLED", True)
         monkeypatch.setattr(settings.DREAM, "DOCUMENT_THRESHOLD", 1)
         monkeypatch.setattr(settings.DREAM, "ENABLED_TYPES", ["omni"])

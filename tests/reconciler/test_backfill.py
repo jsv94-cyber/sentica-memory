@@ -492,4 +492,4 @@ async def test_document_sources_gauge_opens_no_per_workspace_transaction(
     await backfill_module.record_backfill_pending()
 
     assert calls == [("document_sources", 4), ("other", 3)]
-    assert opened == ["left", "right"]
+    assert opened == ["left"]
