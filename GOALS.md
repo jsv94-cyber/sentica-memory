@@ -22,6 +22,12 @@ sentica-memory is Sentica's memory service: a public fork of plastic-labs/honcho
 
 **Self-review checklist (in every PR description):** every acceptance item mapped to the test that proves it; upstream suite green; `FORK_CHANGES.md` updated; no secrets or content in logs; fail-closed paths tested; `PROGRESS.md` updated.
 
+## Upstream sync
+
+Triage at each upstream release. Cherry-pick, never merge upstream main. Self-merge a sync only when no change touches src/db.py, auth or tokens, the deriver queue, migrations, src/sentica/ or the leak harness; otherwise stop for review.
+
+The current triage is `.review/upstream-triage.md`.
+
 ---
 
 ## M0. Baseline and map
