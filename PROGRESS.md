@@ -188,3 +188,15 @@ Follow-up on 2026-10-15, same local Postgres:
   **24 passed, 0 skipped, 0 failed** (182.93s).
 - The runtime-role pin stays 59 tests.
 
+Review round 1 on 2026-10-15, same local Postgres:
+
+- `uv run pytest --ignore=tests/sentica/test_m1_stack.py -q --tb=line`:
+  **3272 passed, 53 skipped, 0 failed** (118.17s). Six new tests cover the
+  frozen migration SQL, the import guard, the dreams-function match, the
+  upgrade from the merged head, the document_sources gauge, and the
+  soft-deleted explicit document count.
+- `uv run pytest tests/sentica/test_m1_stack.py -n0 -q --tb=line`:
+  **24 passed, 0 skipped, 0 failed** (174.62s).
+- The runtime-role pin stays 59 tests. The new tests are not in
+  `tests/sentica/test_m2_*.py`.
+

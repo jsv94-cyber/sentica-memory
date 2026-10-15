@@ -128,20 +128,21 @@ behavior is removed.
   any prompt before they dispatch (`tests/sentica/test_m2_partitions.py:955`).
   Each captured path has its own counter, incremented only inside that
   path's mock: deriver, `simple_batch_embed`, induction, deduction, stream,
-  conclusions, and dialectic. The summarizer is counted in `_complete`
-  when the track name is `Short Summary`. `batch_embed` must stay at zero.
-  `tests/sentica/test_m2_partitions.py:1194` asserts the other counters
-  are greater than zero, and `:1195` requires at least two deduction calls
+  conclusions, and dialectic. The summarizer is counted by a spy on
+  `honcho_llm_call` when the track name is `Short Summary`.
+  `batch_embed` must stay at zero.
+  `tests/sentica/test_m2_partitions.py:1208` asserts the other counters
+  are greater than zero, and `:1209` requires at least two deduction calls
   and two induction calls. The deriver capture contains the posted text
-  `local hello` (`:1197`). The scripted model issues search tool calls
+  `local hello` (`:1212`). The scripted model issues search tool calls
   for the canary and R's names on the first round of every chat.
-  `tests/sentica/test_m2_partitions.py:1187` asserts the tool-round count
+  `tests/sentica/test_m2_partitions.py:1201` asserts the tool-round count
   equals the number of chats, and that each tool result reached the next
   model call. Deduction and induction are mocked at
   `src.llm.executor.execute_completion`
-  (`tests/sentica/test_m2_partitions.py:1027`), below their tool loops, so
-  those tool calls run (`tests/sentica/test_m2_partitions.py:1159` and
-  `:1166`). Deriver exceptions are not swallowed. The canary is absent
+  (`tests/sentica/test_m2_partitions.py:1028`), below their tool loops, so
+  those tool calls run (`tests/sentica/test_m2_partitions.py:1173` and
+  `:1180`). Deriver exceptions are not swallowed. The canary is absent
   from A's responses.
   `test_harness_flags_the_canary_when_the_request_includes_its_workspace`
   is the positive control. `test_membership_noop_lets_the_canary_through`
@@ -259,7 +260,7 @@ restores row-level security on `peers` in `finally` after
   `simple_batch_embed` is spied (`tests/sentica/test_m2_partitions.py:1010`)
   and does not call `batch_embed`. A scrub of a tool argument named `text`
   still leaves a content block visible
-  (`tests/sentica/test_m2_partitions.py:1206`).
+  (`tests/sentica/test_m2_partitions.py:1221`).
 - Production startup refuses the local dummy key on every provider
   (`src/sentica/runtime.py:301`). The stack embedding service is
   `docker/sentica/fake_embeddings.py`.
@@ -304,15 +305,39 @@ restores row-level security on `peers` in `finally` after
   scoped dreams count of 1.
 - The leak test keeps the real `create_short_summary`
   (`tests/sentica/test_m2_partitions.py:14`) and uses it as the mock side
-  effect (`:1094`). The prompt reaches `_complete`, which counts the
-  summarizer by the track name `Short Summary` (`:967`).
-- `tests/sentica/test_m2_partitions.py:1190` asserts `batch_embed` is 0.
+  effect (`:1095`). A spy on `src.utils.summarizer.honcho_llm_call`
+  (`:1099`) counts track name `Short Summary` and calls the real function.
+  `_complete` tags that capture (`:969`). The tagged line contains
+  `local hello` (`:1216`).
+- `tests/sentica/test_m2_partitions.py:1204` asserts `batch_embed` is 0.
   `src/models.py:553` declares `ix_documents_soft_deleted_cleanup`.
   `tests/reconciler/test_backfill.py:403`
   `test_record_backfill_pending_gives_each_gauge_its_own_count` gives
   each gauge its own count. `tests/sentica/test_m2_rls.py:174` checks
   the queue-counts function catalog. `_bind_unit_db` requires `request`
   (`tests/sentica/test_m2_rls.py:301`).
+
+## Review round 1
+
+- `src/llm/executor.py` and `src/llm/request_builder.py` match main. The
+  leak test spies on `src.utils.summarizer.honcho_llm_call`
+  (`tests/sentica/test_m2_partitions.py:1099`
+  `test_canary_written_only_to_r_stays_out_of_other_workspaces`).
+- `migrations/versions/e6b2d8f04a17_dreams_due_superset.py:161` replaces
+  `sentica_pending_counts()` with the dreams superset and restates the
+  grants (`:152`). `a9c1e3f5b7d2` and `c4e8b1a2d6f0` now hold literal SQL.
+  `tests/sentica/test_migration_freeze.py:76`
+  `test_frozen_sql_matches_main_cdb74439`,
+  `tests/sentica/test_migration_freeze.py:52`
+  `test_migrations_do_not_import_sql_from_src`, and
+  `tests/sentica/test_migration_freeze.py:135`
+  `test_upgrade_from_merged_head_ignores_dream_settings`.
+- `src/reconciler/backfill.py:164` sets the `document_sources` gauge from
+  `pending_backfills`. `tests/reconciler/test_backfill.py:448`
+  `test_document_sources_gauge_opens_no_per_workspace_transaction`.
+- `tests/dreamer/test_dream_due.py:135`
+  `test_soft_deleted_explicit_documents_count`. `src/embedding_client.py`
+  matches pre-M2 main.
 
 ## Deferred to M9
 

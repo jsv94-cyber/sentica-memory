@@ -12,6 +12,7 @@ sentica-memory is Sentica's memory service: a public fork of plastic-labs/honcho
 6. **Tests prove each goal.** Every acceptance item has an automated test that would fail if the behavior regressed. No skipped tests, no tests that assert on mocks the code no longer calls. The upstream test suite stays green.
 7. **Commits and PRs.** One branch and one pull request per milestone (`m0-baseline`, `m1-single-tenant`, ...). Plain commit messages, no co-author, Claude or Cursor trailer of any kind. Docs in plain English, no em dashes.
 8. **Progress log.** Keep `PROGRESS.md`: per milestone, what was built, decisions taken, deviations from this file and why, test counts, and open questions.
+9. **Migrations.** A migration on main is never edited; changes ship as a new migration. Migrations contain literal SQL and never import SQL from src.
 
 ## How you work without waiting on Jose
 

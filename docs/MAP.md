@@ -238,7 +238,7 @@ Dialectic is reached from `POST /v3/.../peers/{peer_id}/chat`
 `agentic_chat`. The agent builds its prompt in `src/dialectic/core.py:122`
 and then loops on tools until it can answer.
 
-Embeddings do not use `honcho_llm_call`. `src/embedding_client.py:706`
+Embeddings do not use `honcho_llm_call`. `src/embedding_client.py:710`
 `EmbeddingClient` wraps `src/embedding_client.py:196` `_EmbeddingClient`.
 `src/embedding_client.py:308` `embed` calls the provider.
 The default transport is OpenAI `text-embedding-3-small`

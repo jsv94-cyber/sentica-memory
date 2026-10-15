@@ -141,7 +141,12 @@ async def run_backfill_cycle(backfill: Backfill) -> BackfillCycleResult:
 
 
 async def record_backfill_pending() -> None:
-    """Set each ``backfill_pending`` gauge from that backfill's own count."""
+    """Set each ``backfill_pending`` gauge from that backfill's own count.
+
+    ``document_sources`` is the ``pending_backfills`` column, so that gauge
+    is the sum of the column. Any other backfill counts one workspace at a
+    time and skips a workspace whose count is zero.
+    """
     if not settings.METRICS.ENABLED:
         return
     from src.sentica.workspace_scope import fetch_pending_counts
@@ -156,6 +161,10 @@ async def record_backfill_pending() -> None:
         from src.sentica.workspace_scope import reset_workspace, set_workspace
 
         for backfill in BACKFILLS.values():
+            if backfill.name == "document_sources":
+                total = sum(row.pending_backfills for row in counts)
+                prometheus_metrics.set_backfill_pending(task=backfill.name, count=total)
+                continue
             total = 0
             try:
                 for row in counts:
@@ -164,9 +173,12 @@ async def record_backfill_pending() -> None:
                         async with tracked_db(
                             "backfill_pending_count", read_only=True
                         ) as db:
-                            total += await backfill.count_pending(db)
+                            count = await backfill.count_pending(db)
                     finally:
                         reset_workspace(token)
+                    if count == 0:
+                        continue
+                    total += count
             except Exception:
                 logger.warning(
                     "Failed to record backfill_pending for %s",

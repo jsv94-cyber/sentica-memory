@@ -959,14 +959,15 @@ async def test_canary_written_only_to_r_stays_out_of_other_workspaces(
         if prompt is not None:
             recorded.append("capture:" + kind + ":prompt:" + str(prompt))
 
+    summary_capture = {"on": False}
+
     async def _complete(
         _backend: object, _config: object, **kwargs: object
     ) -> CompletionResult:
         _capture_call("complete", kwargs)
-        telemetry = kwargs.get("telemetry")
-        if getattr(telemetry, "track_name", None) == "Short Summary":
-            counters["summarizer"] += 1
         messages = kwargs.get("messages")
+        if summary_capture["on"] and "local hello" in repr(messages):
+            recorded.append("capture:summarizer:" + repr(messages))
         names = _tool_names(kwargs.get("tools"))
         if kwargs.get("response_format") is PromptRepresentation:
             recorded.append("capture:deriver:" + repr(messages))
@@ -1092,6 +1093,19 @@ async def test_canary_written_only_to_r_stays_out_of_other_workspaces(
         session = await crud.get_session(db, session_name="s1", workspace_name=left)
         configuration = get_configuration(None, session, workspace)
     mock_llm_call_functions["short_summary"].side_effect = _real_create_short_summary
+    import src.utils.summarizer as summarizer_module
+    from src.llm.api import honcho_llm_call as real_honcho_llm_call
+
+    async def _summary_call(*args: Any, **kwargs: Any) -> Any:
+        if kwargs["telemetry"].track_name == "Short Summary":
+            counters["summarizer"] += 1
+            summary_capture["on"] = True
+        try:
+            return await real_honcho_llm_call(*args, **kwargs)
+        finally:
+            summary_capture["on"] = False
+
+    monkeypatch.setattr(summarizer_module, "honcho_llm_call", _summary_call)
     bound = set_workspace(left)
     try:
         await summarize_if_needed(
@@ -1196,6 +1210,10 @@ async def test_canary_written_only_to_r_stays_out_of_other_workspaces(
     assert counters["induction"] >= 2
     assert any(
         line.startswith("capture:deriver:") and "local hello" in line
+        for line in recorded
+    )
+    assert any(
+        line.startswith("capture:summarizer:") and "local hello" in line
         for line in recorded
     )
     # The tool argument is {"text": canary}. A content block uses "content".
