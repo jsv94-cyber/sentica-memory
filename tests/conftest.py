@@ -1102,6 +1102,7 @@ def mock_tracked_db(request: pytest.FixtureRequest):
     tracked_db_targets = [
         "src.dependencies.tracked_db",
         "src.sentica.retrieval.tracked_db",
+        "src.sentica.dreams.tracked_db",
         "src.deriver.queue_manager.tracked_db",
         "src.deriver.consumer.tracked_db",
         "src.deriver.deriver.tracked_db",

@@ -247,6 +247,26 @@ async def get_queue_status(
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
+@router.put(
+    "/{workspace_id}/synthesis",
+    response_model=schemas.SynthesisState,
+    dependencies=[Depends(require_auth(workspace_name="workspace_id"))],
+)
+async def set_workspace_synthesis(
+    workspace_id: str = Path(...),
+    body: schemas.SynthesisUpdate = Body(
+        ...,
+        description="Whether this workspace may create new dreams",
+    ),
+) -> schemas.SynthesisState:
+    """Turn synthesis on or off. Earlier dreams are kept."""
+    from src.sentica.dreams import set_synthesis_enabled
+
+    async with tracked_db("workspaces.synthesis") as db:
+        await set_synthesis_enabled(db, workspace_id, body.enabled)
+    return schemas.SynthesisState(enabled=body.enabled)
+
+
 @router.post(
     "/{workspace_id}/schedule_dream",
     status_code=204,

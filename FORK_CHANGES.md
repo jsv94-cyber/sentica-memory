@@ -69,5 +69,8 @@ release v3.3.0 (`608aec8a928da13c540262ed980c569448fb53ab`).
 | `migrations/versions/b8e3c1a94d20_conclusion_keyword_index.py` | Full-text index on conclusion content. | M6 |
 | `src/routers/peers.py` | `POST /peers/{peer_id}/brief`. | M6 |
 | `tests/sentica/test_m6_retrieval.py` | Synonym retrieval, filters, the token budget, and latency. | M6 |
+| `src/sentica/dreams.py` | Daily digests and weekly insights inside one workspace. | M7 |
+| `src/routers/workspaces.py` | `PUT /workspaces/{id}/synthesis` turns new dreams off. | M7 |
+| `tests/sentica/test_m7_dreams.py` | Weekly cites digests, isolation, the banned filter, and the off switch. | M7 |
 | `.review/M2-summary.md` | Review notes for M2, including the M9 deferrals. | M2 |
 

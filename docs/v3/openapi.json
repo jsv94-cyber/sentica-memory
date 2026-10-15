@@ -460,6 +460,65 @@
         }
       }
     },
+    "/v3/workspaces/{workspace_id}/synthesis": {
+      "put": {
+        "tags": [
+          "workspaces"
+        ],
+        "summary": "Set Workspace Synthesis",
+        "description": "Turn synthesis on or off. Earlier dreams are kept.",
+        "operationId": "set_workspace_synthesis_v3_workspaces__workspace_id__synthesis_put",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Workspace Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SynthesisUpdate",
+                "description": "Whether this workspace may create new dreams"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SynthesisState"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v3/workspaces/{workspace_id}/schedule_dream": {
       "post": {
         "tags": [
@@ -7954,6 +8013,33 @@
         },
         "type": "object",
         "title": "SummaryConfiguration"
+      },
+      "SynthesisState": {
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled"
+          }
+        },
+        "type": "object",
+        "required": [
+          "enabled"
+        ],
+        "title": "SynthesisState"
+      },
+      "SynthesisUpdate": {
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled"
+          }
+        },
+        "type": "object",
+        "required": [
+          "enabled"
+        ],
+        "title": "SynthesisUpdate",
+        "description": "Turn workspace synthesis on or off without deleting earlier dreams."
       },
       "ValidationError": {
         "properties": {

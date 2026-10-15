@@ -151,6 +151,16 @@ class WorkspaceUpdate(WorkspaceBase):
     configuration: WorkspaceConfiguration | None = None
 
 
+class SynthesisUpdate(BaseModel):
+    """Turn workspace synthesis on or off without deleting earlier dreams."""
+
+    enabled: bool
+
+
+class SynthesisState(BaseModel):
+    enabled: bool
+
+
 class Workspace(WorkspaceBase):
     name: str = Field(serialization_alias="id")
     h_metadata: dict[str, Any] = Field(
