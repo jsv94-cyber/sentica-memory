@@ -60,6 +60,14 @@ class DocumentMetadata(BaseModel):
         default=None,
         description="Confidence level (high, medium, low) -- only applicable for inductive documents",
     )
+    message_public_ids: list[str] | None = Field(
+        default=None,
+        description="Public ids of the messages this document was derived from",
+    )
+    source_trust: str | None = Field(
+        default=None,
+        description="external when every source message was external",
+    )
 
 
 class DocumentCreate(DocumentBase):

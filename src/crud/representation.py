@@ -137,6 +137,19 @@ class RepresentationManager:
             logger.debug("No non-empty observations to save")
             return empty_result
 
+        from src.sentica.safety import keep_conclusion
+
+        kept_observations: list[ExplicitObservation | DeductiveObservation] = []
+        for obs in all_observations:
+            if await keep_conclusion(
+                _observation_text(obs), workspace_name=self.workspace_name
+            ):
+                kept_observations.append(obs)
+        all_observations = kept_observations
+        if not all_observations:
+            logger.debug("No observations left after the safety filter")
+            return empty_result
+
         # Batch embed all observations
         batch_embed_start = time.perf_counter()
 

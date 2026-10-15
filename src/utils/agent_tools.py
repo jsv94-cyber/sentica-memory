@@ -870,6 +870,17 @@ async def create_observations(
         logger.info("No non-empty observations to create")
         return ObservationsCreatedResult(created_count=0, created_levels=[], failed=[])
 
+    from src.sentica.safety import keep_conclusion
+
+    screened: list[schemas.ObservationInput] = []
+    for obs in normalized_observations:
+        if await keep_conclusion(obs.content, workspace_name=workspace_name):
+            screened.append(obs)
+    normalized_observations = screened
+    if not normalized_observations:
+        logger.info("No observations left after the safety filter")
+        return ObservationsCreatedResult(created_count=0, created_levels=[], failed=[])
+
     # Ground cited source_ids against real documents before persistence —
     # fabricated ids are stripped and observations left without the required
     # real sources are rejected (see _filter_ungrounded_source_ids).

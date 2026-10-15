@@ -51,5 +51,15 @@ release v3.3.0 (`608aec8a928da13c540262ed980c569448fb53ab`).
 | `src/embedding_client.py` | When gateway mode is on, embed through the gateway and do not construct a provider client. | M3 |
 | `src/exceptions.py` | `GatewayBudgetExceeded` (429) and `GatewayUnavailable` (503). | M3 |
 | `tests/sentica/test_m3_gateway.py` | Mock-gateway proof for headers, budget, outage, and fail-closed configuration. | M3 |
+| `src/sentica/safety.py` | Rules that drop sensitive inferences, plus an optional second model check. | M4 |
+| `migrations/versions/f3c8a1d94e27_message_source_trust.py` | `messages.source_trust` for owner, staff, external, and system. | M4 |
+| `src/models.py` | Message `source_trust`, and conclusion public message ids plus the external flag. | M4 |
+| `src/schemas/api.py` | Message and conclusion responses expose `source_trust`. Conclusions expose `message_ids`. | M4 |
+| `src/crud/document.py` | Drop banned conclusions and record the messages they came from. | M4 |
+| `src/crud/representation.py` | Screen deriver observations before they are embedded or stored. | M4 |
+| `src/utils/agent_tools.py` | Screen dream observations before they are embedded or stored. | M4 |
+| `src/crud/peer_card.py` | Leave banned text and external-only conclusions out of the peer card. | M4 |
+| `src/deriver/prompts.py`, `src/utils/summarizer.py`, `src/dreamer/specialists.py` | Tell the model not to infer the banned categories. | M4 |
+| `tests/sentica/test_m4_safety.py` | Category fixtures, provenance, the external card rule, and the optional model check. | M4 |
 | `.review/M2-summary.md` | Review notes for M2, including the M9 deferrals. | M2 |
 

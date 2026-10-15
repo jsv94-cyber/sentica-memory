@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Any, cast
 
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -87,6 +87,26 @@ async def set_peer_card(
         [observed],
         action="No peer card is ever formed about a scope.",
     )
+
+    from src.sentica.safety import banned_category
+
+    external_rows = (
+        await db.execute(
+            select(models.Document.content).where(
+                models.Document.workspace_name == workspace_name,
+                models.Document.observer == observer,
+                models.Document.observed == observed,
+                models.Document.deleted_at.is_(None),
+                models.Document.internal_metadata["source_trust"].astext == "external",
+            )
+        )
+    ).scalars()
+    blocked = {row.strip() for row in external_rows}
+    peer_card = [
+        line
+        for line in peer_card
+        if banned_category(line) is None and line.strip() not in blocked
+    ]
 
     # Ensure the peer exists (get-or-create)
     peers_result = await get_or_create_peers(

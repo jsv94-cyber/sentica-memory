@@ -232,6 +232,7 @@ class Message(Base):
     )
     token_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     seq_in_session: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    source_trust: Mapped[str | None] = mapped_column(TEXT, nullable=True)
 
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), index=True
@@ -246,6 +247,10 @@ class Message(Base):
         CheckConstraint("length(public_id) = 21", name="public_id_length"),
         CheckConstraint("public_id ~ '^[A-Za-z0-9_-]+$'", name="public_id_format"),
         CheckConstraint("length(content) <= 65535", name="content_length"),
+        CheckConstraint(
+            "source_trust IS NULL OR source_trust IN ('owner', 'staff', 'external', 'system')",
+            name="messages_source_trust_valid",
+        ),
         # Composite foreign key constraint for sessions
         ForeignKeyConstraint(
             ["session_name", "workspace_name"],
@@ -474,6 +479,23 @@ class Document(Base):
                     if isinstance(sid, str) and SOURCE_ID_RE.match(sid)
                 ]
                 return ids or None
+        return None
+
+    @property
+    def message_ids(self) -> list[str]:
+        """Public ids of the messages this conclusion came from."""
+        raw = (self.internal_metadata or {}).get("message_public_ids")
+        if not isinstance(raw, list):
+            return []
+        values = cast(list[object], raw)
+        return [item for item in values if isinstance(item, str)]
+
+    @property
+    def source_trust(self) -> str | None:
+        """``external`` when every source message was external."""
+        raw = (self.internal_metadata or {}).get("source_trust")
+        if raw in {"owner", "staff", "external", "system"}:
+            return str(raw)
         return None
 
     @source_ids.setter

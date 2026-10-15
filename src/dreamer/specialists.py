@@ -27,6 +27,7 @@ from src.exceptions import ValidationException
 from src.llm import HonchoLLMCallResponse, honcho_llm_call
 from src.llm.types import LLMTelemetryContext
 from src.schemas import ResolvedConfiguration
+from src.sentica.safety import PROMPT_RULES
 from src.telemetry import prometheus_metrics
 from src.telemetry.events import DreamSpecialistEvent, emit
 from src.telemetry.logging import accumulate_metric, log_performance_metrics
@@ -617,7 +618,8 @@ class DeductionSpecialist(BaseSpecialist):
         if peer_card_enabled:
             peer_card_section = PEER_CARD_SYSTEM_SECTION
 
-        return f"""You are a deductive reasoning agent analyzing observations about the target observee.
+        return (
+            f"""You are a deductive reasoning agent analyzing observations about the target observee.
 
 ## YOUR JOB
 
@@ -676,6 +678,9 @@ Use `create_observations_deductive`.
 6. Delete outdated observations - don't leave duplicates
 7. Quality over quantity - fewer good deductions beat many weak ones
 8. When you are finished, do not output a summary of what you did - output only the token DONE"""
+            + "\n"
+            + PROMPT_RULES
+        )
 
     def build_user_prompt(
         self,
@@ -747,7 +752,8 @@ class InductionSpecialist(BaseSpecialist):
     ) -> str:
         _ = observed
         _ = peer_card_enabled
-        return """You are an inductive reasoning agent identifying patterns about the target observee.
+        return (
+            """You are an inductive reasoning agent identifying patterns about the target observee.
 
 ## YOUR JOB
 
@@ -809,6 +815,9 @@ Use `create_observations_inductive`.
 6. Copy source_ids exactly from the [id:xxx] shown in observation results - `search_messages` results have no ID and cannot be cited; invented IDs are discarded
 7. Empty or missing source_ids will be rejected
 8. When you are finished, do not output a summary of what you did - output only the token DONE"""
+            + "\n"
+            + PROMPT_RULES
+        )
 
     def build_user_prompt(
         self,
@@ -906,7 +915,8 @@ class CardRefreshSpecialist(BaseSpecialist):
 
 The existing peer card is deliberately NOT shown to you: it may contain entries whose supporting observations have since been removed. Build the card solely from the observations you find in the collection right now. Do not carry over or guess at prior card content — if an identity marker is not supported by a current observation, it does not go on the card."""
 
-        return f"""You are a peer-card maintenance agent for the target observee.
+        return (
+            f"""You are a peer-card maintenance agent for the target observee.
 
 ## YOUR JOB
 
@@ -920,6 +930,9 @@ Refresh the peer card and nothing else. You cannot create or delete observations
 
 Keep it short — a handful of tool calls at most.{rebuild_section}
 {PEER_CARD_SYSTEM_SECTION}"""
+            + "\n"
+            + PROMPT_RULES
+        )
 
     def build_user_prompt(
         self,

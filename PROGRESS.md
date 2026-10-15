@@ -252,3 +252,34 @@ with `SENTICA_MODE=test`:
 - The runtime-role pin stays 59 tests. No `tests/sentica/test_m2_*` file,
   `tests/sentica/rls_job.py`, or the `test-m2-rls` job changed.
 
+## M4. Safe inference and provenance
+
+Built:
+
+- Deriver, summary, and dream prompts tell the model not to infer health,
+  sexual orientation or activity, religion, politics, immigration status,
+  criminal history, or personal finances. Leave is dates only.
+- `banned_category` drops those conclusions before they are stored and
+  counts the drop per tenant. The low-sugar meals plus insulin pumps
+  fixture is a health inference.
+- An optional second check, `SENTICA_SAFETY_MODEL_CHECK`, asks the summary
+  model. A failure drops the conclusion. It is off unless set, so the
+  upstream suite does not call a provider.
+- Messages can carry `source_trust`. A conclusion built only from
+  `external` messages is returned with that flag and is omitted from the
+  peer card. A missing value stays unknown. It is not stored as `owner`.
+  Requiring the field on every existing production post would break the
+  runtime-role job, which does not send it.
+- Conclusions return the public ids of the messages they came from.
+
+Decisions:
+
+- The peer card is the instruction field. External-only conclusion text is
+  removed there. The conclusion list still returns the row, with the flag,
+  so Sentica can see it and not treat it as an instruction.
+- The optional model check runs before the write. `create_documents` only
+  applies the rules, because it already holds a database session.
+- Local unit tests: 3295 passed, 53 skipped. The runtime-role pin stays 59.
+  No `tests/sentica/test_m2_*` file, `tests/sentica/rls_job.py`, or the
+  `test-m2-rls` job changed.
+

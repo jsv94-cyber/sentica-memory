@@ -36,3 +36,17 @@ process, per tenant, per purpose, and resets at UTC midnight.
 `SENTICA_GATEWAY_RETRY_ATTEMPTS` defaults to 3.
 `SENTICA_GATEWAY_RETRY_WAIT_SECONDS` defaults to 0.05. A failed attempt
 retries the same URL and model. It does not fall back to another provider.
+
+## Message source trust
+
+A message may set `source_trust` to `owner`, `staff`, `external`, or
+`system`. A missing value is stored as unknown. It is not treated as
+`owner`. A conclusion whose source messages are all `external` is returned
+with `source_trust` `external`, and that text is left out of the peer card.
+
+## Safety model check
+
+`SENTICA_SAFETY_MODEL_CHECK` is off unless it is `1`, `true`, `yes`, or
+`on`. When it is on, a conclusion that passes the rules is checked again
+by the summary model. A yes answer, a missing workspace, or a failed call
+drops the conclusion. The check does not switch to another model.
