@@ -937,6 +937,86 @@ async def get_peer_context(
 
 
 @router.post(
+    "/{peer_id}/brief",
+    response_model=schemas.PeerBrief | schemas.PeerBriefList,
+)
+async def get_peer_brief(
+    workspace_id: str = Path(...),
+    peer_id: str = Path(..., description="ID of the peer the call is about"),
+    body: schemas.BriefRequest = Body(
+        ...,
+        description="Token budget and optional query, subject, and recency filters",
+    ),
+    jwt_params: JWTParams = Depends(
+        require_auth(workspace_name="workspace_id", peer_name="peer_id")
+    ),
+) -> schemas.PeerBrief | list[schemas.PeerBrief]:
+    """Return a bounded package for a peer before a call is answered.
+
+    The package is the card, the top conclusions, the recent summary, and
+    open stale flags, trimmed to ``token_budget``. A workspace set is read
+    one workspace at a time.
+    """
+    from src.embedding_client import EmbeddingTokenLimitError
+    from src.sentica.retrieval import prepare_brief
+    from src.sentica.workspace_scope import (
+        enforce_targets,
+        open_workspace,
+        reset_workspace,
+        token_allowed,
+    )
+    from src.telemetry.events import EmbeddingCallPurpose
+    from src.utils.types import embedding_call_purpose
+
+    embedding: list[float] | None = None
+    if body.query and body.query.strip():
+        try:
+            with embedding_call_purpose(
+                EmbeddingCallPurpose.SEARCH_MEMORY.value,
+                workspace_name=workspace_id,
+                parent_category="api",
+            ):
+                embedding = await embedding_client.embed(body.query)
+        except EmbeddingTokenLimitError as exc:
+            raise ValidationException(
+                "Query exceeds maximum token limit of "
+                + f"{settings.EMBEDDING.MAX_INPUT_TOKENS}."
+            ) from exc
+
+    allowed = token_allowed(jwt_params)
+    targets = enforce_targets(workspace_id, body.workspaces, allowed)
+    if body.workspaces and len(targets) > 1:
+        briefs: list[schemas.PeerBrief] = []
+        for name in targets:
+            token = await open_workspace(name, jwt_params, peer_name=peer_id)
+            try:
+                one = await prepare_brief(
+                    name,
+                    peer_id,
+                    token_budget=body.token_budget,
+                    query=body.query,
+                    subject_ref=body.subject_ref,
+                    since=body.since,
+                    top_k=body.top_k,
+                    embedding=embedding,
+                )
+            finally:
+                reset_workspace(token)
+            briefs.append(one)
+        return briefs
+    return await prepare_brief(
+        workspace_id,
+        peer_id,
+        token_budget=body.token_budget,
+        query=body.query,
+        subject_ref=body.subject_ref,
+        since=body.since,
+        top_k=body.top_k,
+        embedding=embedding,
+    )
+
+
+@router.post(
     "/{peer_id}/search",
     response_model=list[schemas.Message],
 )

@@ -731,6 +731,62 @@ class ConclusionQuery(BaseModel):
     )
 
 
+class BriefRequest(BaseModel):
+    """Bounded package Sentica loads from caller ID before a call is answered."""
+
+    token_budget: int = Field(
+        ge=1,
+        le=8000,
+        description="Maximum tokens across the card, conclusions, summary, and stale flags.",
+    )
+    query: str | None = Field(
+        default=None,
+        description="Optional words or a paraphrase. Keyword and vector results are merged.",
+    )
+    subject_ref: str | None = Field(
+        default=None,
+        description="Only conclusions about this subject, such as customer:123.",
+    )
+    since: datetime.datetime | None = Field(
+        default=None,
+        description="Only conclusions created at or after this time.",
+    )
+    top_k: int = Field(
+        default=10,
+        ge=1,
+        le=50,
+        description="How many conclusions to consider before the token budget.",
+    )
+    workspaces: list[str] | None = Field(
+        default=None,
+        description="Workspaces to read. Each one is queried on its own.",
+    )
+
+
+class StaleFlag(BaseModel):
+    """A conclusion whose subject changed and has not been replaced."""
+
+    id: str
+    subject_ref: str | None = None
+    content: str
+
+
+class PeerBrief(BaseModel):
+    """Card, conclusions, recent summary, and open stale flags for one peer."""
+
+    peer_id: str
+    card: list[str]
+    conclusions: list[Conclusion]
+    summary: str | None = None
+    stale: list[StaleFlag]
+    tokens_used: int
+    workspace_id: str
+
+
+class PeerBriefList(RootModel[list[PeerBrief]]):
+    """Briefs, one for each requested workspace."""
+
+
 class ConclusionCreate(BaseModel):
     """Schema for creating a single conclusion."""
 

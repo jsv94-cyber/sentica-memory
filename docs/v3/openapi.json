@@ -1579,6 +1579,84 @@
         }
       }
     },
+    "/v3/workspaces/{workspace_id}/peers/{peer_id}/brief": {
+      "post": {
+        "tags": [
+          "peers"
+        ],
+        "summary": "Get Peer Brief",
+        "description": "Return a bounded package for a peer before a call is answered.\n\nThe package is the card, the top conclusions, the recent summary, and\nopen stale flags, trimmed to ``token_budget``. A workspace set is read\none workspace at a time.",
+        "operationId": "get_peer_brief_v3_workspaces__workspace_id__peers__peer_id__brief_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Workspace Id"
+            }
+          },
+          {
+            "name": "peer_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "ID of the peer the call is about",
+              "title": "Peer Id"
+            },
+            "description": "ID of the peer the call is about"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BriefRequest",
+                "description": "Token budget and optional query, subject, and recency filters"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/PeerBrief"
+                    },
+                    {
+                      "$ref": "#/components/schemas/PeerBriefList"
+                    }
+                  ],
+                  "title": "Response Get Peer Brief V3 Workspaces  Workspace Id  Peers  Peer Id  Brief Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v3/workspaces/{workspace_id}/peers/{peer_id}/search": {
       "post": {
         "tags": [
@@ -4841,6 +4919,83 @@
         ],
         "title": "Body_create_messages_with_file_v3_workspaces__workspace_id__sessions__session_id__messages_upload_post"
       },
+      "BriefRequest": {
+        "properties": {
+          "token_budget": {
+            "type": "integer",
+            "maximum": 8000.0,
+            "minimum": 1.0,
+            "title": "Token Budget",
+            "description": "Maximum tokens across the card, conclusions, summary, and stale flags."
+          },
+          "query": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Query",
+            "description": "Optional words or a paraphrase. Keyword and vector results are merged."
+          },
+          "subject_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject Ref",
+            "description": "Only conclusions about this subject, such as customer:123."
+          },
+          "since": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Since",
+            "description": "Only conclusions created at or after this time."
+          },
+          "top_k": {
+            "type": "integer",
+            "maximum": 50.0,
+            "minimum": 1.0,
+            "title": "Top K",
+            "description": "How many conclusions to consider before the token budget.",
+            "default": 10
+          },
+          "workspaces": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workspaces",
+            "description": "Workspaces to read. Each one is queried on its own."
+          }
+        },
+        "type": "object",
+        "required": [
+          "token_budget"
+        ],
+        "title": "BriefRequest",
+        "description": "Bounded package Sentica loads from caller ID before a call is answered."
+      },
       "Conclusion": {
         "properties": {
           "id": {
@@ -6514,6 +6669,73 @@
         ],
         "title": "Peer"
       },
+      "PeerBrief": {
+        "properties": {
+          "peer_id": {
+            "type": "string",
+            "title": "Peer Id"
+          },
+          "card": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Card"
+          },
+          "conclusions": {
+            "items": {
+              "$ref": "#/components/schemas/Conclusion"
+            },
+            "type": "array",
+            "title": "Conclusions"
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Summary"
+          },
+          "stale": {
+            "items": {
+              "$ref": "#/components/schemas/StaleFlag"
+            },
+            "type": "array",
+            "title": "Stale"
+          },
+          "tokens_used": {
+            "type": "integer",
+            "title": "Tokens Used"
+          },
+          "workspace_id": {
+            "type": "string",
+            "title": "Workspace Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "peer_id",
+          "card",
+          "conclusions",
+          "stale",
+          "tokens_used",
+          "workspace_id"
+        ],
+        "title": "PeerBrief",
+        "description": "Card, conclusions, recent summary, and open stale flags for one peer."
+      },
+      "PeerBriefList": {
+        "items": {
+          "$ref": "#/components/schemas/PeerBrief"
+        },
+        "type": "array",
+        "title": "PeerBriefList",
+        "description": "Briefs, one for each requested workspace."
+      },
       "PeerCardConfiguration": {
         "properties": {
           "use": {
@@ -7590,6 +7812,36 @@
         },
         "type": "object",
         "title": "SessionUpdate"
+      },
+      "StaleFlag": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "subject_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject Ref"
+          },
+          "content": {
+            "type": "string",
+            "title": "Content"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "content"
+        ],
+        "title": "StaleFlag",
+        "description": "A conclusion whose subject changed and has not been replaced."
       },
       "SubjectChanged": {
         "properties": {
