@@ -565,9 +565,7 @@ async def _stamp_message_provenance(
 ) -> list[schemas.DocumentCreate]:
     """Attach public message ids and the external-only flag."""
     message_ids = [
-        message_id
-        for doc in documents
-        for message_id in doc.metadata.message_ids
+        message_id for doc in documents for message_id in doc.metadata.message_ids
     ]
     if not message_ids:
         return documents
