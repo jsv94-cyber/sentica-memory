@@ -7,8 +7,11 @@ if [ ! -s /secret/password ]; then
     dd if=/dev/urandom bs=24 count=1 status=none | od -An -tx1 | tr -d ' \n' > /secret/password
 fi
 chown redis:redis /secret /data /secret/password
-chmod 700 /secret /data
-chmod 600 /secret/password
+# The API runs as a different user and reads this file. 711 lets it open the
+# known path without listing the directory. Redis data stays private.
+chmod 711 /secret
+chmod 700 /data
+chmod 644 /secret/password
 password=$(tr -d '\n' < /secret/password)
 exec su redis -s /bin/sh -c \
     "exec redis-server --save '' --appendonly no --requirepass '$password'"

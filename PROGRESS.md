@@ -394,7 +394,11 @@ Built:
   sample used the default runtime.
 - PgBouncer verifies Postgres with `server_tls_sslmode = verify-full`
   against the test CA. Redis replaces its entry process with the `redis`
-  user. Networks `db`, `net-a`, and `net-b` are internal.
+  user. The password file stays readable by the API user. Networks `db`,
+  `net-a`, and `net-b` are internal. Docker does not publish ports from an
+  internal network, so `publish-a` and `publish-b` forward `127.0.0.1` to
+  the API and the proxy. The image carries the tiktoken encodings, because
+  those networks have no route to the internet.
 - `docs/DEPLOY.md` has the run flags, the network rules, and the sample:
   0.24% CPU and 249 MiB idle, 0.27% CPU and 251 MiB at 1,000 messages per
   hour. `docs/CONFIG.md` lists every Sentica setting. `SECURITY.md` states

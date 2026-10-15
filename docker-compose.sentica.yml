@@ -12,7 +12,9 @@
 # deriver environments have no database password. Postgres data and Redis
 # data are tmpfs and disappear when the containers stop. Logs use the none
 # driver so Docker does not write them to the host disk.
-# Published ports bind 127.0.0.1 for this local proof only.
+# Published ports bind 127.0.0.1 for this local proof only. Docker does not
+# publish a port from an internal network, so publish-a and publish-b forward
+# those ports. The API, deriver, proxy, and database are not on that network.
 
 name: sentica-m1
 
@@ -116,8 +118,6 @@ services:
     depends_on:
       database:
         condition: service_healthy
-    ports:
-      - "127.0.0.1:${SENTICA_PROXY_A_PORT:-6433}:6432"
     volumes:
       - ./docker/sentica/pgbouncer-entry.sh:/pgbouncer-entry.sh:ro
       - ./docker/sentica/pgbouncer-a.ini:/etc/pgbouncer/pgbouncer.ini:ro
@@ -147,8 +147,6 @@ services:
     depends_on:
       database:
         condition: service_healthy
-    ports:
-      - "127.0.0.1:${SENTICA_PROXY_B_PORT:-6434}:6432"
     volumes:
       - ./docker/sentica/pgbouncer-entry.sh:/pgbouncer-entry.sh:ro
       - ./docker/sentica/pgbouncer-b.ini:/etc/pgbouncer/pgbouncer.ini:ro
@@ -291,8 +289,6 @@ services:
         condition: service_healthy
       redis-a:
         condition: service_healthy
-    ports:
-      - "127.0.0.1:${SENTICA_API_A_PORT:-8101}:8000"
     tmpfs:
       - /tmp
     environment:
@@ -342,8 +338,6 @@ services:
         condition: service_healthy
       redis-b:
         condition: service_healthy
-    ports:
-      - "127.0.0.1:${SENTICA_API_B_PORT:-8102}:8000"
     tmpfs:
       - /tmp
     environment:
@@ -456,7 +450,56 @@ services:
     networks:
       - net-b
 
+  publish-a:
+    image: python:3.13-slim
+    logging: *no-disk-logs
+    depends_on:
+      api-a:
+        condition: service_healthy
+      pgbouncer-a:
+        condition: service_healthy
+    command:
+      [
+        "python",
+        "/publish.py",
+        "8000=172.28.10.10:8000",
+        "6432=172.28.10.13:6432",
+      ]
+    ports:
+      - "127.0.0.1:${SENTICA_API_A_PORT:-8101}:8000"
+      - "127.0.0.1:${SENTICA_PROXY_A_PORT:-6433}:6432"
+    volumes:
+      - ./docker/sentica/publish.py:/publish.py:ro
+    networks:
+      - proof
+      - net-a
+
+  publish-b:
+    image: python:3.13-slim
+    logging: *no-disk-logs
+    depends_on:
+      api-b:
+        condition: service_healthy
+      pgbouncer-b:
+        condition: service_healthy
+    command:
+      [
+        "python",
+        "/publish.py",
+        "8000=172.28.11.10:8000",
+        "6432=172.28.11.13:6432",
+      ]
+    ports:
+      - "127.0.0.1:${SENTICA_API_B_PORT:-8102}:8000"
+      - "127.0.0.1:${SENTICA_PROXY_B_PORT:-6434}:6432"
+    volumes:
+      - ./docker/sentica/publish.py:/publish.py:ro
+    networks:
+      - proof
+      - net-b
+
 networks:
+  proof:
   db:
     internal: true
     ipam:

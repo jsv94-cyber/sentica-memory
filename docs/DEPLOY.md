@@ -65,7 +65,10 @@ Sentica applies these rules. The compose file makes the first three
 structural.
 
 - Networks `db`, `net-a`, and `net-b` are `internal: true`. They have no
-  route to the internet.
+  route to the internet. Docker does not publish a port from an internal
+  network, so the local proof uses `publish-a` and `publish-b` to forward
+  `127.0.0.1` to the API and the proxy. Those forwarders are not part of
+  the instance.
 - Postgres accepts TCP only from the PgBouncer addresses (`pg_hba.conf`).
   The proxy connects to Postgres with `server_tls_sslmode = verify-full`
   and the test CA. Clients of the instance reach Postgres only through

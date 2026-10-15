@@ -77,8 +77,10 @@ release v3.3.0 (`608aec8a928da13c540262ed980c569448fb53ab`).
 | `eval/BASELINE.md` | First-run recall, latency, and the zero-leak line CI guards. | M8 |
 | `src/sentica/ops_metrics.py` | Counters for filtered conclusions, decay, and prune. | M9 |
 | `src/main.py` | `/ready` checks the database and stays a probe. | M9 |
-| `docker-compose.sentica.yml` | Read-only API and deriver, internal networks, proxy `verify-full`. | M9 |
-| `docker/sentica/redis-entry.sh` | Redis server runs as the `redis` user. | M9 |
+| `docker-compose.sentica.yml` | Read-only API and deriver, internal networks, proxy `verify-full`, and proof forwarders for the local ports. | M9 |
+| `docker/sentica/publish.py` | Forwards the local proof ports onto the internal networks. | M9 |
+| `Dockerfile` | Bakes the tiktoken encodings so startup does not use the internet. | M9 |
+| `docker/sentica/redis-entry.sh` | Redis server runs as the `redis` user. The API can still read the password file. | M9 |
 | `docs/DEPLOY.md` | Run flags, network rules, and the resource sample. | M9 |
 | `docs/UPSTREAM_SYNC.md` | Cherry-pick upstream. Do not merge upstream main. | M9 |
 | `docs/CONFIG.md` | Every Sentica setting and the upstream setting groups. | M9 |

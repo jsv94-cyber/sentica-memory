@@ -99,8 +99,9 @@ def test_deploy_flags_and_internal_networks() -> None:
     assert "- ALL" in compose
     assert "no-new-privileges:true" in compose
     assert "internal: true" in compose
-    for name in ("db:", "net-a:", "net-b:"):
+    for name in ("db:", "net-a:", "net-b:", "publish-a:", "publish-b:"):
         assert name in compose
+    assert "publish.py" in compose
     assert "runtime: runsc" in _text("docker-compose.gvisor.yml")
     for relative in (
         "docker/sentica/pgbouncer-a.ini",
@@ -109,8 +110,12 @@ def test_deploy_flags_and_internal_networks() -> None:
         ini = _text(relative)
         assert "server_tls_sslmode = verify-full" in ini
         assert "server_tls_ca_file = /certs/ca.crt" in ini
-    assert "su redis" in _text("docker/sentica/redis-entry.sh")
-    assert "USER ${SENTICA_UID}:${SENTICA_GID}" in _text("Dockerfile")
+    redis_entry = _text("docker/sentica/redis-entry.sh")
+    assert "su redis" in redis_entry
+    assert "chmod 644 /secret/password" in redis_entry
+    dockerfile = _text("Dockerfile")
+    assert "USER ${SENTICA_UID}:${SENTICA_GID}" in dockerfile
+    assert "TIKTOKEN_CACHE_DIR=/app/tiktoken-cache" in dockerfile
 
 
 def test_upstream_sync_and_vulnerability_report() -> None:

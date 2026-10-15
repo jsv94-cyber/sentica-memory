@@ -80,6 +80,13 @@ RUN if [ "$SENTICA_BAKE_PRODUCTION_MARKER" = "true" ]; then \
     && chmod 755 /app/docker/entrypoint.sh /app/docker/migrate-entrypoint.sh \
     && chmod 755 /app/docker/sentica/postgres-entry.sh /app/docker/sentica/20-passwords.sh
 
+# The instance networks have no route to the public internet. tiktoken would
+# otherwise download o200k_base the first time the API imports it.
+ENV TIKTOKEN_CACHE_DIR=/app/tiktoken-cache
+RUN mkdir -p /app/tiktoken-cache \
+    && python -c 'import tiktoken; tiktoken.get_encoding("o200k_base"); tiktoken.get_encoding("cl100k_base")' \
+    && chown -R "${SENTICA_UID}:${SENTICA_GID}" /app/tiktoken-cache
+
 USER ${SENTICA_UID}:${SENTICA_GID}
 
 EXPOSE 8000
