@@ -358,3 +358,25 @@ Decisions:
   No `tests/sentica/test_m2_*` file, `tests/sentica/rls_job.py`, or the
   `test-m2-rls` job changed.
 
+## M8. Evaluation harness
+
+Built:
+
+- Seeded conclusions for two businesses, Harbor Glass and Northline Diesel.
+  Questions cover information extraction, multi-session reasoning, temporal
+  reasoning, knowledge updates, and abstention. Recall at 5 and at 10 is the
+  share of gold conclusions in the top k. Nothing is scored by a model.
+- `eval/BASELINE.md` records the first run. A category that falls more than
+  2 points fails CI. The isolation red-team searches across the two
+  workspaces, refuses a token aimed at the other workspace, and refuses a
+  queue task for another tenant. Any leak fails CI.
+
+Decisions:
+
+- The harness calls the same retrieval function the brief uses. It does not
+  add a table or a migration. Latency on that corpus was 7.1 ms cold and
+  7.0 ms warm p95.
+- Local unit tests: 3320 passed, 53 skipped. The runtime-role pin stays 59.
+  No `tests/sentica/test_m2_*` file, `tests/sentica/rls_job.py`, or the
+  `test-m2-rls` job changed.
+
