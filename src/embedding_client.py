@@ -427,8 +427,6 @@ class _EmbeddingClient:
             prepared_texts.append(text)
             token_counts.append(tokens)
 
-        # Positional ids keep the result in input order. This does not call
-        # batch_embed; callers of that method are counted on their own.
         text_chunks: dict[str, list[tuple[str, int]]] = {
             str(i): [(prepared_texts[i], token_counts[i])]
             for i in range(len(prepared_texts))

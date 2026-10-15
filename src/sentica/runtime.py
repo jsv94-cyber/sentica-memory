@@ -111,6 +111,23 @@ def production_enabled() -> bool:
     return mode() == PRODUCTION_MODE
 
 
+def _llm_api_key_env_names() -> tuple[str, ...]:
+    """Every provider key the process can see, including ones added later."""
+    from src.config import settings
+
+    names = {
+        "LLM_" + field_name
+        for field_name in type(settings.LLM).model_fields
+        if field_name.endswith("_API_KEY")
+    }
+    names.update(
+        name
+        for name in os.environ
+        if name.startswith("LLM_") and name.endswith("_API_KEY")
+    )
+    return tuple(sorted(names))
+
+
 def _fingerprint() -> tuple[tuple[str, str | None], ...]:
     names = (
         "SENTICA_MODE",
@@ -119,7 +136,7 @@ def _fingerprint() -> tuple[tuple[str, str | None], ...]:
         "DB_SQL_DEBUG",
         "COLLECT_METRICS_LOCAL",
         "REASONING_TRACES_FILE",
-        "LLM_OPENAI_API_KEY",
+        *_llm_api_key_env_names(),
         "METRICS_ENABLED",
         "SENTICA_DB_CALL_TIMEOUT_SECONDS",
         *REQUIRED_SETTINGS,
@@ -274,13 +291,15 @@ def _refuse_unsafe_runtime() -> None:
         raise SenticaStartupError(
             "Refusing to start: an external vector store is not allowed in production"
         )
-    openai_key = os.environ.get("LLM_OPENAI_API_KEY")
-    if openai_key is None:
-        openai_key = settings.LLM.OPENAI_API_KEY
-    if openai_key == "sentica-local-dummy":
-        raise SenticaStartupError(
-            "Refusing to start: LLM_OPENAI_API_KEY is the local dummy key"
-        )
+    for env_name in _llm_api_key_env_names():
+        field_name = env_name.removeprefix("LLM_")
+        value = os.environ.get(env_name)
+        if value is None:
+            value = getattr(settings.LLM, field_name, None)
+        if value == "sentica-local-dummy":
+            raise SenticaStartupError(
+                "Refusing to start: " + env_name + " is the local dummy key"
+            )
     metrics_on = _truthy("METRICS_ENABLED") or settings.METRICS.ENABLED
     labeled = any(
         _workspace_labeled(metric)

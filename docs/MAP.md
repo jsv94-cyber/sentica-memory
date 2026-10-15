@@ -120,7 +120,7 @@ is observation or document.
   HNSW), `session_name`, `deleted_at`, and vector sync columns. `level` is
   `explicit`, `deductive`, `inductive`, or `contradiction`
   (`src/utils/types.py:294`).
-- `src/models.py:556` `document_sources`: reasoning-tree edges
+- `src/models.py:562` `document_sources`: reasoning-tree edges
   `(derived_id, source_id, position)`.
 
 `src/crud/collection.py:134` `get_or_create_collection` opens the pair's
@@ -172,10 +172,10 @@ calls. Surprisal sampling, when enabled, is `src/dreamer/surprisal.py`.
 
 ## Deriver queue
 
-The queue is the Postgres table `queue` (`src/models.py:583` `QueueItem`):
+The queue is the Postgres table `queue` (`src/models.py:589` `QueueItem`):
 `task_type`, JSONB `payload`, `work_unit_key`, `workspace_name`, optional
 `session_id` and `message_id`, `processed`, `error`.
-`src/models.py:642` `active_queue_sessions` is the claim lock, one row per
+`src/models.py:648` `active_queue_sessions` is the claim lock, one row per
 work unit key.
 
 `src/deriver/enqueue.py:27` `enqueue` inserts representation and summary rows
@@ -190,7 +190,7 @@ Payload shapes are `src/utils/queue_payload.py`. Task types: `representation`,
 The representation payload includes the message text
 (`src/utils/queue_payload.py:28` `content: str`). Summary, dream, scope, and
 deletion payloads do not. Every payload is written only to the Postgres
-`queue.payload` column (`src/models.py:594`) by the inserts in
+`queue.payload` column (`src/models.py:600`) by the inserts in
 `src/deriver/enqueue.py`. Redis is the cache (`src/cache/client.py`), not a
 copy of the queue. The message text in that column is in the database, which
 is the store.
@@ -238,7 +238,7 @@ Dialectic is reached from `POST /v3/.../peers/{peer_id}/chat`
 `agentic_chat`. The agent builds its prompt in `src/dialectic/core.py:122`
 and then loops on tools until it can answer.
 
-Embeddings do not use `honcho_llm_call`. `src/embedding_client.py:708`
+Embeddings do not use `honcho_llm_call`. `src/embedding_client.py:706`
 `EmbeddingClient` wraps `src/embedding_client.py:196` `_EmbeddingClient`.
 `src/embedding_client.py:308` `embed` calls the provider.
 The default transport is OpenAI `text-embedding-3-small`

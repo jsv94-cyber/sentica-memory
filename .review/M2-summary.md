@@ -99,9 +99,9 @@ behavior is removed.
   `src/reconciler/scheduler.py:89` gates each reconciler task on its own
   count. `src/reconciler/scheduler.py:295` enqueues one row per workspace
   that needs that task and sets the workspace before the insert.
-  `src/sentica/workspace_scope.py:356` is `sentica_pending_queue_counts()`.
+  `src/sentica/workspace_scope.py:293` is `sentica_pending_queue_counts()`.
   The claim loop reads only the workspace name and the pending queue count.
-  `src/sentica/workspace_scope.py:382` is `sentica_pending_counts()`. The
+  `src/sentica/workspace_scope.py:319` is `sentica_pending_counts()`. The
   reconciler gates read that function. Both take no arguments, pin
   `search_path`, and return no message or document text. The full function
   also returns pending embeddings, pending backfills, soft-deleted
@@ -110,7 +110,7 @@ behavior is removed.
   representation, and peer cards loop the allowed workspaces, query each,
   and set `workspace_id` on the returned item. Messages already serialize
   `workspace_name` as `workspace_id`. Scope sessions are resolved inside
-  each workspace (`tests/sentica/test_m2_partitions.py:1350`
+  each workspace (`tests/sentica/test_m2_partitions.py:1325`
   `test_search_scope_is_resolved_per_workspace`). Workspace A's scope
   membership would hide B's canary if that membership were reused for B.
 - Cache. `src/crud/peer.py:39` includes `workspace_name` in the peer cache
@@ -119,39 +119,40 @@ behavior is removed.
 - Token removal. `test_removing_a_workspace_from_the_token_refuses_the_next_request`
   sends one request with R in the token and the next request without R.
   The second request is 401 `workspace is outside the token set`.
-- Vectors. `src/sentica/runtime.py:273` allows only `pgvector` in
+- Vectors. `src/sentica/runtime.py:290` allows only `pgvector` in
   production. Test: `test_production_refuses_external_vector_stores`,
   including `turbopuffer`.
-- Leak. `tests/sentica/test_m2_partitions.py:768`
+- Leak. `tests/sentica/test_m2_partitions.py:769`
   `test_canary_written_only_to_r_stays_out_of_other_workspaces` writes a
   canary only in R. `_complete` and `_stream` record `repr(messages)` and
-  any prompt before they dispatch (`tests/sentica/test_m2_partitions.py:954`).
+  any prompt before they dispatch (`tests/sentica/test_m2_partitions.py:955`).
   Each captured path has its own counter, incremented only inside that
   path's mock: deriver, `simple_batch_embed`, induction, deduction, stream,
-  conclusions, dialectic, and summarizer. `batch_embed` is recorded if it
-  is called. `tests/sentica/test_m2_partitions.py:1216` asserts the other
-  counters are greater than zero, and `:1216` requires at least two
-  deduction calls and two induction calls. The deriver capture contains
-  the posted text `local hello` (`:1219`). The scripted model issues
-  search tool calls for the canary and R's names on the first round of
-  every chat. `tests/sentica/test_m2_partitions.py:1213` asserts the
-  tool-round count equals the number of chats, and that each tool result
-  reached the next model call. Deduction and induction are mocked at
+  conclusions, and dialectic. The summarizer is counted in `_complete`
+  when the track name is `Short Summary`. `batch_embed` must stay at zero.
+  `tests/sentica/test_m2_partitions.py:1194` asserts the other counters
+  are greater than zero, and `:1195` requires at least two deduction calls
+  and two induction calls. The deriver capture contains the posted text
+  `local hello` (`:1197`). The scripted model issues search tool calls
+  for the canary and R's names on the first round of every chat.
+  `tests/sentica/test_m2_partitions.py:1187` asserts the tool-round count
+  equals the number of chats, and that each tool result reached the next
+  model call. Deduction and induction are mocked at
   `src.llm.executor.execute_completion`
-  (`tests/sentica/test_m2_partitions.py:1023`), below their tool loops, so
-  those tool calls run (`tests/sentica/test_m2_partitions.py:1185` and
-  `:1192`). Deriver exceptions are not swallowed. The canary is absent
+  (`tests/sentica/test_m2_partitions.py:1027`), below their tool loops, so
+  those tool calls run (`tests/sentica/test_m2_partitions.py:1159` and
+  `:1166`). Deriver exceptions are not swallowed. The canary is absent
   from A's responses.
   `test_harness_flags_the_canary_when_the_request_includes_its_workspace`
   is the positive control. `test_membership_noop_lets_the_canary_through`
   shows a no-op membership check returns the canary. Two API proofs:
-  `tests/sentica/test_m2_partitions.py:1847`
+  `tests/sentica/test_m2_partitions.py:1822`
   `test_crud_filter_removed_rls_still_hides_the_canary` removes the CRUD
   workspace filter on messages while row-level security stays on, and the
-  leak test stays clean. `tests/sentica/test_m2_partitions.py:1857`
+  leak test stays clean. `tests/sentica/test_m2_partitions.py:1832`
   `test_crud_filter_removed_disabled_rls_shows_the_canary` does the same
   after the migration role disables that table's row-level security, and
-  the harness sees the canary. `tests/sentica/test_m2_partitions.py:1576`
+  the harness sees the canary. `tests/sentica/test_m2_partitions.py:1551`
   `test_body_workspaces_outside_the_token_are_refused` returns 401 for
   search, chat, representation, card, and context when the body names a
   workspace the token does not allow, including a peer-scoped member of
@@ -210,15 +211,15 @@ restores row-level security on `peers` in `finally` after
 ## Round 2
 
 - Peer cards open one read transaction per target workspace
-  (`src/routers/peers.py:693`). `tests/sentica/test_m2_partitions.py:1407`
+  (`src/routers/peers.py:693`). `tests/sentica/test_m2_partitions.py:1382`
   `test_cold_cache_returns_each_peer_card` returns both cards from a cold
   cache.
 - Due dreams are listed and enqueued per workspace
   (`src/backlog.py:155`, `src/backlog.py:210`).
-  `tests/sentica/test_m2_rls.py:529`
+  `tests/sentica/test_m2_rls.py:545`
   `test_due_dream_is_reported_and_triggered` runs as the runtime role.
 - The reconciler gate enqueues one row per workspace that needs the task.
-  `tests/sentica/test_m2_rls.py:373`
+  `tests/sentica/test_m2_rls.py:389`
   `test_reconciler_gate_enqueues_one_row_per_workspace` covers
   `sync_vectors`, a backfill, and cleanup.
 - A representation read error on the read-only engine rolls the transaction
@@ -253,42 +254,65 @@ restores row-level security on `peers` in `finally` after
 ## Round 3
 
 - Model calls record `repr(messages)` and any prompt before dispatch
-  (`tests/sentica/test_m2_partitions.py:954`). The summarizer counter
-  increments only in `_short_summary`
-  (`tests/sentica/test_m2_partitions.py:1093`). Single-text embeds are
-  recorded in `_zero_embed` (`tests/sentica/test_m2_partitions.py:999`).
-  `simple_batch_embed` is spied (`tests/sentica/test_m2_partitions.py:1006`)
+  (`tests/sentica/test_m2_partitions.py:955`). Single-text embeds are
+  recorded in `_zero_embed` (`tests/sentica/test_m2_partitions.py:1003`).
+  `simple_batch_embed` is spied (`tests/sentica/test_m2_partitions.py:1010`)
   and does not call `batch_embed`. A scrub of a tool argument named `text`
   still leaves a content block visible
-  (`tests/sentica/test_m2_partitions.py:1231`).
-- Production startup refuses the local dummy OpenAI key
-  (`src/sentica/runtime.py:282`). The stack embedding service is
+  (`tests/sentica/test_m2_partitions.py:1206`).
+- Production startup refuses the local dummy key on every provider
+  (`src/sentica/runtime.py:301`). The stack embedding service is
   `docker/sentica/fake_embeddings.py`.
-  `tests/sentica/test_m1_startup.py:340` and
-  `tests/sentica/test_m1_startup.py:356` cover the refusal and the
+  `tests/sentica/test_m1_startup.py:346` and
+  `tests/sentica/test_m1_startup.py:359` cover the refusal and the
   deterministic non-zero vectors.
 - `src/sentica/workspace_scope.py:203` `remove_workspace_scope` drops the
-  per-test listeners. `tests/sentica/test_m2_rls.py:693`
+  per-test listeners. `tests/sentica/test_m2_rls.py:713`
   `test_later_test_has_no_workspace_guard` changes the workspace inside
   one transaction after those listeners are gone.
 - One workspace is processed and the other stays pending:
-  `tests/sentica/test_m2_rls.py:724`
+  `tests/sentica/test_m2_rls.py:744`
   `test_sync_vectors_leaves_the_other_workspace`,
-  `tests/sentica/test_m2_rls.py:800`
+  `tests/sentica/test_m2_rls.py:820`
   `test_cleanup_leaves_the_other_workspace`, and
-  `tests/sentica/test_m2_rls.py:868`
+  `tests/sentica/test_m2_rls.py:888`
   `test_backfill_leaves_the_other_workspace`.
-- `tests/sentica/test_m2_fix.py:825`
+- `tests/sentica/test_m2_fix.py:850`
   `test_claim_loop_uses_the_queue_counts_function` reads only the queue
-  counts function. `tests/sentica/test_m2_fix.py:850`
+  counts function. `tests/sentica/test_m2_fix.py:875`
   `test_migration_refuses_a_role_that_does_not_end_in_ddl` fails the
   migration when the role name does not end in `_ddl`.
-  `tests/sentica/test_m2_rls.py:255` checks `has_function_privilege` for
-  both functions. `src/reconciler/backfill.py:156` sets the backfill gauge
-  from `pending_backfills`. `src/routers/deriver_metrics.py:49` scopes
-  dreams due to the token's workspaces.
-  `src/sentica/workspace_scope.py:447` `apply_per_workspace` commits each
+  `tests/sentica/test_m2_rls.py:200` checks `has_function_privilege` for
+  both functions. `src/reconciler/backfill.py:167` sets each backfill gauge
+  from that backfill's own count. `src/routers/deriver_metrics.py:49`
+  counts dreams by calling `list_due_dreams` for each workspace in the
+  token. `src/sentica/workspace_scope.py:384` `apply_per_workspace` commits each
   workspace.
+
+## Follow-up
+
+- `src/sentica/workspace_scope.py:267` `_dreams_due_sql` counts collections
+  whose explicit document count exceeds `last_dream_document_count`. It
+  bakes in no settings and does not parse `work_unit_key`.
+  `list_due_dreams` applies the runtime thresholds.
+  `tests/sentica/test_m2_rls.py:545`
+  `test_due_dream_is_reported_and_triggered` lowers
+  `DOCUMENT_THRESHOLD` and enables dreams after the function exists, and
+  the poller still enqueues the due dream.
+  `tests/sentica/test_m2_fix.py:396`
+  `test_deriver_metrics_are_limited_to_the_token_workspaces` asserts a
+  scoped dreams count of 1.
+- The leak test keeps the real `create_short_summary`
+  (`tests/sentica/test_m2_partitions.py:14`) and uses it as the mock side
+  effect (`:1094`). The prompt reaches `_complete`, which counts the
+  summarizer by the track name `Short Summary` (`:967`).
+- `tests/sentica/test_m2_partitions.py:1190` asserts `batch_embed` is 0.
+  `src/models.py:553` declares `ix_documents_soft_deleted_cleanup`.
+  `tests/reconciler/test_backfill.py:403`
+  `test_record_backfill_pending_gives_each_gauge_its_own_count` gives
+  each gauge its own count. `tests/sentica/test_m2_rls.py:174` checks
+  the queue-counts function catalog. `_bind_unit_db` requires `request`
+  (`tests/sentica/test_m2_rls.py:301`).
 
 ## Deferred to M9
 

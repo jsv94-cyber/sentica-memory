@@ -549,6 +549,12 @@ class Document(Base):
                 "source_ids IS NOT NULL OR internal_metadata ?| ARRAY['source_ids', 'premise_ids']"  # noqa: E501
             ),
         ),
+        Index(
+            "ix_documents_soft_deleted_cleanup",
+            "workspace_name",
+            "deleted_at",
+            postgresql_where=text("deleted_at IS NOT NULL"),
+        ),
     )
 
 

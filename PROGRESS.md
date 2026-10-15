@@ -179,3 +179,12 @@ with `SENTICA_MODE=test`:
   the pin in `tests/sentica/rls_job.py` lists 59 tests. See
   `.review/M2-summary.md`.
 
+Follow-up on 2026-10-15, same local Postgres:
+
+- `uv run pytest --ignore=tests/sentica/test_m1_stack.py -q --tb=line`:
+  **3266 passed, 53 skipped, 0 failed** (108.96s). The three extra passes
+  are the Anthropic, Gemini, and unknown-provider dummy-key cases.
+- `uv run pytest tests/sentica/test_m1_stack.py -n0 -q --tb=line`:
+  **24 passed, 0 skipped, 0 failed** (182.93s).
+- The runtime-role pin stays 59 tests.
+

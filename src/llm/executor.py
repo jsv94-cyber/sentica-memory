@@ -481,6 +481,7 @@ async def honcho_llm_call_inner(
             response_format=response_model,
             cache_policy=effective_config.cache_policy,
             extra_params=call_extras,
+            telemetry=telemetry,
         )
         return completion_result_to_response(backend_result)
     except BaseException as exc:

@@ -155,7 +155,10 @@ async def execute_completion(
     stop: list[str] | None = None,
     cache_policy: PromptCachePolicy | None = None,
     extra_params: dict[str, Any] | None = None,
+    telemetry: object | None = None,
 ) -> CompletionResult:
+    # Callers may pass telemetry. The provider request does not include it.
+    del telemetry
     # Preserve 0 as an explicit "disable thinking" value (used by Gemini);
     # only convert to None when the field is truly unset.
     effective_max_tokens = config.max_output_tokens or max_tokens

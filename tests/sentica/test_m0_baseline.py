@@ -25,7 +25,7 @@ REQUIRED_CITATIONS: tuple[tuple[str, int, str], ...] = (
     ("src/models.py", 213, "class Message"),
     ("src/models.py", 352, "class Collection"),
     ("src/models.py", 400, "class Document"),
-    ("src/models.py", 583, "class QueueItem"),
+    ("src/models.py", 589, "class QueueItem"),
     ("src/utils/scopes.py", 33, "SCOPE_PEER_PREFIX"),
     ("src/routers/conclusions.py", 22, "APIRouter"),
     ("src/crud/representation.py", 84, "class RepresentationManager"),

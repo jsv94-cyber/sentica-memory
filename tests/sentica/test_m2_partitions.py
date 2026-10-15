@@ -11,6 +11,7 @@ import pytest
 from src.crud.peer import peer_cache_key
 from src.sentica.runtime import SenticaStartupError, load_instance
 from src.sentica.workspace_scope import require_workspace, workspace_policy_sql
+from src.utils.summarizer import create_short_summary as _real_create_short_summary
 
 
 def _sync_dsn(worker_id: str) -> str:
@@ -915,8 +916,8 @@ async def test_canary_written_only_to_r_stays_out_of_other_workspaces(
             recorded.append("tool-result:" + repr(messages))
 
     async def _deriver(**kwargs: object) -> CompletionResult:
+        del kwargs
         counters["deriver"] += 1
-        recorded.append("capture:deriver:" + str(kwargs.get("prompt")))
         return CompletionResult(
             content=PromptRepresentation(
                 explicit=[ExplicitObservationBase(content="local hello")]
@@ -962,6 +963,9 @@ async def test_canary_written_only_to_r_stays_out_of_other_workspaces(
         _backend: object, _config: object, **kwargs: object
     ) -> CompletionResult:
         _capture_call("complete", kwargs)
+        telemetry = kwargs.get("telemetry")
+        if getattr(telemetry, "track_name", None) == "Short Summary":
+            counters["summarizer"] += 1
         messages = kwargs.get("messages")
         names = _tool_names(kwargs.get("tools"))
         if kwargs.get("response_format") is PromptRepresentation:
@@ -1087,37 +1091,7 @@ async def test_canary_written_only_to_r_stays_out_of_other_workspaces(
         workspace = await crud.get_workspace(db, workspace_name=left)
         session = await crud.get_session(db, session_name="s1", workspace_name=left)
         configuration = get_configuration(None, session, workspace)
-    from src.llm.types import HonchoLLMCallResponse
-    from src.utils.summarizer import SUMMARY_TARGET_RATIO, short_summary_prompt
-
-    def _short_summary(
-        formatted_messages: str,
-        input_tokens: int,
-        previous_summary: str | None = None,
-        custom_instructions: str | None = None,
-        *,
-        telemetry: object = None,
-    ) -> HonchoLLMCallResponse[str]:
-        del telemetry
-        counters["summarizer"] += 1
-        previous = (
-            previous_summary
-            or "There is no previous summary -- the messages are the beginning of the conversation."
-        )
-        target = int(
-            min(input_tokens, settings.SUMMARY.MAX_TOKENS_SHORT) * SUMMARY_TARGET_RATIO
-        )
-        recorded.append(
-            "capture:summarizer:"
-            + short_summary_prompt(
-                formatted_messages, target, previous, custom_instructions
-            )
-        )
-        return HonchoLLMCallResponse(
-            content="local summary", output_tokens=1, finish_reasons=["stop"]
-        )
-
-    mock_llm_call_functions["short_summary"].side_effect = _short_summary
+    mock_llm_call_functions["short_summary"].side_effect = _real_create_short_summary
     bound = set_workspace(left)
     try:
         await summarize_if_needed(
@@ -1213,6 +1187,7 @@ async def test_canary_written_only_to_r_stays_out_of_other_workspaces(
     assert tool_rounds["n"] == chats
     assert tool_results["n"] == chats
     assert stream_saw_tool_result["ok"]
+    assert counters["batch_embed"] == 0
     for name, count in counters.items():
         if name == "batch_embed":
             continue
