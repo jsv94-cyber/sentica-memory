@@ -31,19 +31,19 @@ def _quote(name: str) -> str:
     return '"' + name + '"'
 
 
-def _runtime_role(bind: sa.Connection) -> str | None:
+def _runtime_role(bind: sa.Connection) -> str:
     current = bind.execute(sa.text("SELECT current_user")).scalar()
     if not isinstance(current, str) or not current.endswith("_ddl"):
-        return None
+        raise RuntimeError("Refusing to migrate: the migrating role must end in _ddl")
     runtime = current[: -len("_ddl")]
     if not runtime.replace("_", "").isalnum():
-        return None
+        raise RuntimeError("Refusing to migrate: the migrating role must end in _ddl")
     exists = bind.execute(
         sa.text("SELECT 1 FROM pg_roles WHERE rolname = :name"),
         {"name": runtime},
     ).scalar()
     if exists is None:
-        return None
+        raise RuntimeError("Refusing to migrate: the runtime role does not exist")
     return runtime
 
 
@@ -162,8 +162,6 @@ def upgrade() -> None:
     schema = settings.DB.SCHEMA
     bind = op.get_bind()
     runtime = _runtime_role(bind)
-    if runtime is None:
-        raise RuntimeError("Refusing to migrate: the runtime role does not exist")
     op.execute(sa.text(pending_counts_function_sql(schema)))
     _grant(schema, runtime)
 
@@ -172,7 +170,5 @@ def downgrade() -> None:
     schema = settings.DB.SCHEMA
     bind = op.get_bind()
     runtime = _runtime_role(bind)
-    if runtime is None:
-        raise RuntimeError("Refusing to migrate: the runtime role does not exist")
     op.execute(sa.text(_frozen_counts_sql(schema)))
     _grant(schema, runtime)

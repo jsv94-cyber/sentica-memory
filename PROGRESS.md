@@ -200,3 +200,14 @@ Review round 1 on 2026-10-15, same local Postgres:
 - The runtime-role pin stays 59 tests. The new tests are not in
   `tests/sentica/test_m2_*.py`.
 
+Part B on 2026-10-15, same local Postgres:
+
+- `uv run pytest --ignore=tests/sentica/test_m1_stack.py -q --tb=line`:
+  **3276 passed, 53 skipped, 0 failed** (115.61s). Four new tests cover
+  the workflow grant, the `_ddl` role message, the provider allow-list,
+  and row-level security on every memory-schema table.
+- The stack suite was not re-run locally. This change does not touch it.
+  The last local stack count is 24 passed.
+- The runtime-role pin stays 59 tests. The runtime-role job no longer
+  grants EXECUTE itself. Upstream triage is `.review/upstream-triage.md`.
+
