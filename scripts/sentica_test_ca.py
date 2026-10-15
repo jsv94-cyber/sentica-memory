@@ -145,6 +145,7 @@ def main() -> None:
     shutil.copyfile(out / "ca.crt", out / "client-ca.crt")
     _server(out, ca_key, ca_name, "pgbouncer-a")
     _server(out, ca_key, ca_name, "pgbouncer-b")
+    _server(out, ca_key, ca_name, "database")
     _token_key(out, "tenant-a")
     _token_key(out, "tenant-b")
     # Touch a file so an empty directory cannot be mistaken for a finished CA.

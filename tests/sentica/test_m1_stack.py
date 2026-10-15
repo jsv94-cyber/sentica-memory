@@ -407,7 +407,7 @@ def test_tokens_and_isolation(stack: Path) -> None:
     for path, method in targets:
         if method not in {"get", "post", "put", "patch", "delete"}:
             continue
-        if path in {"/health", "/metrics"}:
+        if path in {"/health", "/ready", "/metrics"}:
             continue
         url = API_A + path.replace("{", "x").replace("}", "")
         response = httpx.request(

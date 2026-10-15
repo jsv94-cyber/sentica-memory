@@ -231,7 +231,7 @@ app.include_router(deriver_metrics.router)
 app.add_route("/metrics", metrics_endpoint, methods=["GET"])
 
 # Probes only. Every other path in production requires a broker token.
-_SENTICA_PROBE_PATHS = frozenset({"/health", "/metrics"})
+_SENTICA_PROBE_PATHS = frozenset({"/health", "/ready", "/metrics"})
 
 
 @app.middleware("http")
@@ -282,6 +282,22 @@ async def sentica_workspace_scope(
 async def health_check():
     """Health check endpoint for monitoring and container orchestration."""
     return {"status": "ok"}
+
+
+@app.get("/ready")
+async def ready_check() -> JSONResponse:
+    """Readiness. The process can serve traffic only when the database answers."""
+    from sqlalchemy import text
+
+    from src.dependencies import tracked_db
+
+    try:
+        async with tracked_db("ready") as db:
+            await db.execute(text("SELECT 1"))
+    except Exception as exc:
+        logger.error("readiness failed: %s", exc.__class__.__name__)
+        return JSONResponse(status_code=503, content={"status": "unavailable"})
+    return JSONResponse(status_code=200, content={"status": "ok"})
 
 
 # Global exception handlers

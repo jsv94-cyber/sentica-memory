@@ -180,9 +180,10 @@ async def run_dreams(
             + lines
         )
         text, spent = await _complete(workspace_name, "dream.daily", prompt)
-        if banned_category(text) is not None:
-            logger.info("Dropped a conclusion category=%s", banned_category(text))
-            note_drop()
+        category = banned_category(text)
+        if category is not None:
+            logger.info("Dropped a conclusion category=%s", category)
+            note_drop(category)
         elif text:
             record = await _save(
                 workspace_name,
@@ -210,9 +211,10 @@ async def run_dreams(
             + lines
         )
         text, spent = await _complete(workspace_name, "dream.weekly", prompt)
-        if banned_category(text) is not None:
-            logger.info("Dropped a conclusion category=%s", banned_category(text))
-            note_drop()
+        category = banned_category(text)
+        if category is not None:
+            logger.info("Dropped a conclusion category=%s", category)
+            note_drop(category)
         elif text:
             record = await _save(
                 workspace_name,

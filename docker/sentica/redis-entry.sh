@@ -2,9 +2,13 @@
 # Generate this instance's Redis password on a tmpfs mount. The file is the
 # only copy. It is not written to the image or the compose file.
 set -eu
-mkdir -p /secret
+mkdir -p /secret /data
 if [ ! -s /secret/password ]; then
     dd if=/dev/urandom bs=24 count=1 status=none | od -An -tx1 | tr -d ' \n' > /secret/password
-    chmod 644 /secret/password
 fi
-exec redis-server --save "" --appendonly no --requirepass "$(tr -d '\n' < /secret/password)"
+chown redis:redis /secret /data /secret/password
+chmod 700 /secret /data
+chmod 600 /secret/password
+password=$(tr -d '\n' < /secret/password)
+exec su redis -s /bin/sh -c \
+    "exec redis-server --save '' --appendonly no --requirepass '$password'"

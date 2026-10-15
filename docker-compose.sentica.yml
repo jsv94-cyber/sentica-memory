@@ -42,6 +42,14 @@ x-common-env: &common-env
   LLM_OPENAI_BASE_URL: http://embeddings:8080/v1
   EMBEDDING_MODEL_CONFIG__OVERRIDES__BASE_URL: http://embeddings:8080/v1
   LLM_GEMINI_API_KEY: sentica-stack-key
+  HOME: /tmp
+
+x-hardened: &hardened
+  read_only: true
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
 
 services:
   embeddings:
@@ -81,6 +89,8 @@ services:
       - ./docker/sentica/20-passwords.sh:/docker-entrypoint-initdb.d/20-passwords.sh:ro
       - ./docker/sentica/pg_hba.conf:/etc/sentica/pg_hba.conf:ro
       - ./docker/sentica/postgres-entry.sh:/postgres-entry.sh:ro
+      - ${CERT_DIR}/database.crt:/in/database.crt:ro
+      - ${CERT_DIR}/database.key:/in/database.key:ro
       - ${SECRET_DIR}/tenant-a:/secrets/tenant-a:ro
       - ${SECRET_DIR}/tenant-b:/secrets/tenant-b:ro
       - ${SECRET_DIR}/tenant-a-ddl:/secrets/tenant-a-ddl:ro
@@ -115,6 +125,7 @@ services:
       - ${CERT_DIR}/pgbouncer-a.crt:/in/server.crt:ro
       - ${CERT_DIR}/pgbouncer-a.key:/in/server.key:ro
       - ${CERT_DIR}/client-ca.crt:/certs/client-ca.crt:ro
+      - ${CERT_DIR}/ca.crt:/certs/ca.crt:ro
     tmpfs:
       - /tmp
     networks:
@@ -145,6 +156,7 @@ services:
       - ${CERT_DIR}/pgbouncer-b.crt:/in/server.crt:ro
       - ${CERT_DIR}/pgbouncer-b.key:/in/server.key:ro
       - ${CERT_DIR}/client-ca.crt:/certs/client-ca.crt:ro
+      - ${CERT_DIR}/ca.crt:/certs/ca.crt:ro
     tmpfs:
       - /tmp
     networks:
@@ -205,6 +217,7 @@ services:
       retries: 10
 
   migrate-a:
+    <<: *hardened
     build: *api-build
     logging: *no-disk-logs
     entrypoint: ["/app/docker/migrate-entrypoint.sh"]
@@ -223,6 +236,8 @@ services:
       SENTICA_CLIENT_KEY_PATH: /certs/tenant_a_ddl.key
       SENTICA_TOKEN_PUBLIC_KEY_PATH: /certs/tenant-a.token.pub
       SENTICA_BIND_HOST: 172.28.10.15
+    tmpfs:
+      - /tmp
     volumes:
       - ${CERT_DIR}/ca.crt:/certs/ca.crt:ro
       - ${CERT_DIR}/tenant_a_ddl.crt:/certs/tenant_a_ddl.crt:ro
@@ -233,6 +248,7 @@ services:
         ipv4_address: 172.28.10.15
 
   migrate-b:
+    <<: *hardened
     build: *api-build
     logging: *no-disk-logs
     entrypoint: ["/app/docker/migrate-entrypoint.sh"]
@@ -251,6 +267,8 @@ services:
       SENTICA_CLIENT_KEY_PATH: /certs/tenant_b_ddl.key
       SENTICA_TOKEN_PUBLIC_KEY_PATH: /certs/tenant-b.token.pub
       SENTICA_BIND_HOST: 172.28.11.15
+    tmpfs:
+      - /tmp
     volumes:
       - ${CERT_DIR}/ca.crt:/certs/ca.crt:ro
       - ${CERT_DIR}/tenant_b_ddl.crt:/certs/tenant_b_ddl.crt:ro
@@ -261,6 +279,7 @@ services:
         ipv4_address: 172.28.11.15
 
   api-a:
+    <<: *hardened
     build: *api-build
     logging: *no-disk-logs
     depends_on:
@@ -311,6 +330,7 @@ services:
       start_period: 40s
 
   api-b:
+    <<: *hardened
     build: *api-build
     logging: *no-disk-logs
     depends_on:
@@ -361,6 +381,7 @@ services:
       start_period: 40s
 
   deriver-a:
+    <<: *hardened
     build: *api-build
     logging: *no-disk-logs
     entrypoint: ["/app/docker/entrypoint.sh"]
@@ -398,6 +419,7 @@ services:
       - net-a
 
   deriver-b:
+    <<: *hardened
     build: *api-build
     logging: *no-disk-logs
     entrypoint: ["/app/docker/entrypoint.sh"]
@@ -436,14 +458,17 @@ services:
 
 networks:
   db:
+    internal: true
     ipam:
       config:
         - subnet: 172.28.12.0/24
   net-a:
+    internal: true
     ipam:
       config:
         - subnet: 172.28.10.0/24
   net-b:
+    internal: true
     ipam:
       config:
         - subnet: 172.28.11.0/24

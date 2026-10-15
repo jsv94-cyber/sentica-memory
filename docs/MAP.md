@@ -311,7 +311,8 @@ dream prompt builders. They are not separate files.
 
 `src/main.py` is the API. It serves HTTP, enqueues work, and runs the
 dialectic tool loop inside the request. `src/main.py:281` `/health` returns
-`{"status": "ok"}`. Metrics are `/metrics`.
+`{"status": "ok"}`. `src/main.py:288` `ready_check` answers after a database
+check. Metrics are `/metrics`.
 
 `src/deriver/__main__.py` is the worker. It consumes the queue, summarizes,
 dreams, and reconciles vectors. Compose runs both against one Postgres and

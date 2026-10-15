@@ -86,11 +86,14 @@ def _tenant() -> str:
     return raw or "unset"
 
 
-def note_drop() -> None:
+def note_drop(category: str = "unspecified") -> None:
     """Count one dropped conclusion for the current tenant."""
+    from src.sentica.ops_metrics import note_filtered
+
     tenant = _tenant()
     with _LOCK:
         _DROPS[tenant] = _DROPS.get(tenant, 0) + 1
+    note_filtered(category)
 
 
 def drops(tenant: str | None = None) -> int:
@@ -150,10 +153,10 @@ async def keep_conclusion(text: str, *, workspace_name: str | None) -> bool:
     category = banned_category(text)
     if category is not None:
         logger.info("Dropped a conclusion category=%s", category)
-        note_drop()
+        note_drop(category)
         return False
     if await model_check_bans(text, workspace_name=workspace_name):
         logger.info("Dropped a conclusion category=%s", "model")
-        note_drop()
+        note_drop("model")
         return False
     return True

@@ -1,5 +1,24 @@
 # Security Policy
 
+## Sentica fork
+
+This tree is a modified AGPL fork of plastic-labs/honcho. One instance
+serves one tenant. Workspaces are the partition inside that tenant. The
+API listens on the broker's private address. It is not exposed to the
+internet or to the agent container. The database is reachable only through
+the certificate proxy. The agent has no route to the instance or to that
+proxy.
+
+Report a vulnerability in this fork privately. Do not open a public issue,
+and do not include message text, certificates, or tokens.
+
+1. GitHub private vulnerability reporting on
+   `jsv94-cyber/sentica-memory`.
+2. If that channel is unavailable, email the maintainer listed on the
+   repository with `[SECURITY]` in the subject.
+
+The upstream policy below still describes plastic-labs/honcho.
+
 ## Supported Versions
 
 The `main` branch of this repo maps to the latest canary version of Honcho. To see which versions are supported please refer to the git tags in the repo or the [compatibility guide](https://honcho.dev/docs/changelog/compatibility-guide).

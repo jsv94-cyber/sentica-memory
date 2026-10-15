@@ -1,0 +1,17 @@
+# Optional runtime override. The Docker daemon must have runsc installed.
+#   docker compose -f docker-compose.sentica.yml -f docker-compose.gvisor.yml up -d --build
+# The agent container is not in this file and must not join db, net-a, or net-b.
+
+services:
+  migrate-a:
+    runtime: runsc
+  migrate-b:
+    runtime: runsc
+  api-a:
+    runtime: runsc
+  api-b:
+    runtime: runsc
+  deriver-a:
+    runtime: runsc
+  deriver-b:
+    runtime: runsc

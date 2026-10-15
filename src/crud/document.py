@@ -561,7 +561,7 @@ def _without_banned(
         category = banned_category(doc.content)
         if category is not None:
             logger.info("Dropped a conclusion category=%s", category)
-            note_drop()
+            note_drop(category)
             continue
         kept.append(doc)
     return kept

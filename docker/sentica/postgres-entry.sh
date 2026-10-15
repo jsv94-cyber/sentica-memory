@@ -16,7 +16,12 @@ if [ -s /secrets/tenant-a ] && [ -s /secrets/tenant-b ] \
     install -o postgres -g postgres -m 600 \
         /secrets/tenant-b-ddl /var/lib/postgresql/secrets/tenant-b-ddl
 fi
-if [ ! -s /var/lib/postgresql/certs/server.key ]; then
+if [ -s /in/database.crt ] && [ -s /in/database.key ]; then
+    install -o postgres -g postgres -m 644 \
+        /in/database.crt /var/lib/postgresql/certs/server.crt
+    install -o postgres -g postgres -m 600 \
+        /in/database.key /var/lib/postgresql/certs/server.key
+elif [ ! -s /var/lib/postgresql/certs/server.key ]; then
     openssl req -new -x509 -days 1 -nodes \
         -subj "/CN=database" \
         -keyout /var/lib/postgresql/certs/server.key \
