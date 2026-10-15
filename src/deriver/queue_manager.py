@@ -633,6 +633,17 @@ class QueueManager:
             work_unit_key: The work unit key for the queue items
             context: Context string describing what was being processed (e.g., "processing representation batch")
         """
+        from src.exceptions import GatewayBudgetExceeded, GatewayUnavailable
+
+        if isinstance(error, GatewayBudgetExceeded | GatewayUnavailable):
+            logger.warning(
+                "Gateway pause for work unit %s during %s: %s",
+                work_unit_key,
+                context,
+                error.__class__.__name__,
+            )
+            return True
+
         if is_retryable_error(error):
             try:
                 attempts = await self._get_work_unit_retry_attempts(work_unit_key) + 1

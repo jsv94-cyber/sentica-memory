@@ -189,6 +189,29 @@ async def honcho_llm_call(
         ValidationException: If streaming and tool calling are combined
                              without `stream_final_only=True`.
     """
+    if stream and tools and not stream_final_only:
+        raise ValidationException(
+            "Streaming is not supported with tool calling. "
+            + "Set stream=False when using tools, or use stream_final_only=True "
+            + "to stream only the final response after tool calls."
+        )
+
+    from src.sentica.gateway import complete_llm, gateway_enabled
+
+    if gateway_enabled():
+        return await complete_llm(
+            prompt=prompt,
+            max_tokens=max_tokens,
+            response_model=response_model,
+            stream=stream,
+            tools=tools,
+            tool_choice=tool_choice,
+            tool_executor=tool_executor,
+            max_tool_iterations=max_tool_iterations,
+            messages=messages,
+            telemetry=telemetry,
+        )
+
     runtime_model_config = resolve_runtime_model_config(model_config)
 
     # Caller kwargs left at None are resolved downstream by
@@ -197,13 +220,6 @@ async def honcho_llm_call(
     # runtime_model_config would clobber a fallback config's own
     # temperature/thinking params on the final retry, so we deliberately
     # keep the locals as the caller supplied them.
-
-    if stream and tools and not stream_final_only:
-        raise ValidationException(
-            "Streaming is not supported with tool calling. "
-            + "Set stream=False when using tools, or use stream_final_only=True "
-            + "to stream only the final response after tool calls."
-        )
 
     # tenacity uses 1-indexed attempts.
     current_attempt.set(1)

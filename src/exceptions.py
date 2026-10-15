@@ -84,6 +84,22 @@ class ValidationException(HonchoException):
 
 
 @final
+class GatewayBudgetExceeded(HonchoException):
+    """The tenant's daily token budget is spent. Background work must pause."""
+
+    status_code = 429
+    detail = "token budget exhausted"
+
+
+@final
+class GatewayUnavailable(HonchoException):
+    """The model gateway did not answer. Stored work stays in place."""
+
+    status_code = 503
+    detail = "model gateway unavailable"
+
+
+@final
 class ConflictException(HonchoException):
     """Exception raised when there's a resource conflict."""
 

@@ -41,10 +41,15 @@ release v3.3.0 (`608aec8a928da13c540262ed980c569448fb53ab`).
 | `src/sentica/workspace_scope.py` | Bind each database transaction to one workspace. A workspace outside the token set is refused. | M2 |
 | `migrations/versions/a9c1e3f5b7d2_workspace_row_level_security.py` | Enable and force row-level security on every table that has `workspace_name`. The app role does not own those tables and cannot bypass the policy. | M2 |
 | `src/routers/peers.py`, `src/routers/sessions.py`, `src/routers/workspaces.py` | Search, context, chat, representation, and card reads run one workspace at a time and tag each returned item. | M2 |
-| `src/deriver/queue_manager.py` | Claim and run each deriver, summary, and dream task under that task's workspace. | M2 |
+| `src/deriver/queue_manager.py` | Claim and run each deriver, summary, and dream task under that task's workspace. A gateway budget or outage leaves the queue item unprocessed. | M2, M3 |
 | `src/reconciler/scheduler.py` | Enqueue reconciler work once per workspace so the row is visible under row-level security. | M2 |
 | `src/sentica/runtime.py` | Production refuses LanceDB, Qdrant, and Chroma. pgvector is the production vector store. | M2 |
 | `tests/sentica/test_m2_partitions.py` | Row-level security proof, canary leak test, cache key test, and the next-request token test. | M2 |
-| `docs/CONFIG.md` | `SENTICA_MIGRATION_TIMEOUT_SECONDS` and the rule that it must be greater than the lock wait. | M1 carry-over |
+| `docs/CONFIG.md` | `SENTICA_MIGRATION_TIMEOUT_SECONDS` and the rule that it must be greater than the lock wait. Gateway mode, per-function URL and model, and the daily token budget. | M1 carry-over, M3 |
+| `src/sentica/gateway.py` | One OpenAI-compatible client for deriver, summary, dialectic, dream, and embed calls when gateway mode is on. | M3 |
+| `src/llm/api.py` | When gateway mode is on, return before provider resolution so a call cannot fall back to another model. | M3 |
+| `src/embedding_client.py` | When gateway mode is on, embed through the gateway and do not construct a provider client. | M3 |
+| `src/exceptions.py` | `GatewayBudgetExceeded` (429) and `GatewayUnavailable` (503). | M3 |
+| `tests/sentica/test_m3_gateway.py` | Mock-gateway proof for headers, budget, outage, and fail-closed configuration. | M3 |
 | `.review/M2-summary.md` | Review notes for M2, including the M9 deferrals. | M2 |
 

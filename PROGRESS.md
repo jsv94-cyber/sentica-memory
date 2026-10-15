@@ -211,3 +211,44 @@ Part B on 2026-10-15, same local Postgres:
 - The runtime-role pin stays 59 tests. The runtime-role job no longer
   grants EXECUTE itself. Upstream triage is `.review/upstream-triage.md`.
 
+## M3. Model gateway
+
+Built:
+
+- `src/sentica/gateway.py` posts chat and embedding calls to an
+  OpenAI-compatible URL. Gateway mode is off unless `SENTICA_GATEWAY_MODE`
+  is true, so the local stack and the upstream suite keep the provider SDKs.
+- Each function has its own model and an optional base URL. Headers are
+  tenant, workspace, purpose, and request id. The request id is the
+  telemetry span id when that is set, and the same id is reused for retries.
+- The daily token budget is in memory, per process, per tenant, per purpose.
+  A spent budget raises `GatewayBudgetExceeded` (429, `token budget
+  exhausted`) before the HTTP call. An outage, after retries of the same
+  model, raises `GatewayUnavailable` (503). The deriver leaves the queue
+  item unprocessed.
+- Provider SDK imports stay on the Part B allow-list because gateway mode
+  off still uses them. The M3 proof is that those constructors are not
+  called while gateway mode is on.
+
+Decisions:
+
+- The budget is not shared across the API and the deriver. Each process
+  enforces the configured number on its own. A shared counter would need
+  another store, and the host must not keep memory content.
+- A gateway HTTP 429 is an outage retry, not the local budget. The local
+  budget never sends the request.
+
+Test counts on 2026-10-15, against the local Postgres on host port 5433,
+with `SENTICA_MODE=test`:
+
+- `uv run pytest --ignore=tests/sentica/test_m1_stack.py -q --tb=line`:
+  **3281 passed, 53 skipped, 0 failed** (112.35s). Five new tests cover
+  gateway headers, the same model on a tool round, the budget stop, an
+  outage that leaves messages in place, and a missing tenant, workspace,
+  or model.
+- The stack suite was not re-run locally. Gateway mode stays off unless
+  `SENTICA_GATEWAY_MODE` is set, so the stack still uses the provider path.
+  The last local stack count is 24 passed.
+- The runtime-role pin stays 59 tests. No `tests/sentica/test_m2_*` file,
+  `tests/sentica/rls_job.py`, or the `test-m2-rls` job changed.
+
