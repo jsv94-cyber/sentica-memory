@@ -140,6 +140,13 @@ async def query_conclusions(
             max_distance=body.distance,
             top_k=body.top_k,
         )
+    ids = [document.id for document in documents]
+    if ids:
+        from src.dependencies import tracked_db
+        from src.sentica.freshness import note_retrieved
+
+        async with tracked_db("conclusion_retrieved") as write_db:
+            await note_retrieved(write_db, ids, workspace_name=workspace_id)
     return [schemas.Conclusion.model_validate(doc) for doc in documents]
 
 
