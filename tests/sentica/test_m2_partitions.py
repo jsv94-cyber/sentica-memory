@@ -1974,10 +1974,15 @@ async def test_run_dreams_stays_inside_the_callers_workspace(
     apply_gateway_env(monkeypatch, gateway.start())
     forbid_provider_sdks(monkeypatch)
     from src.sentica.dreams import run_dreams
+    from src.sentica.workspace_scope import reset_workspace, set_workspace
 
+    # dreams_due sets the workspace before run_dreams. Without that setting,
+    # row-level security hides the workspace and the dream never calls the model.
+    bound = set_workspace(left)
     try:
         created = await run_dreams(left, now=datetime(2026, 10, 15, tzinfo=UTC))
     finally:
+        reset_workspace(bound)
         gateway.close()
     blob = repr(created) + _captured(gateway)
     assert "local hello" in blob
