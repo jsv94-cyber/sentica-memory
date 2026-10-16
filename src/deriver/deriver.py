@@ -7,7 +7,7 @@ from src import crud
 from src.config import ConfiguredModelSettings, settings
 from src.crud.representation import RepresentationManager
 from src.dependencies import tracked_db
-from src.exceptions import RepresentationSaveError
+from src.exceptions import RepresentationSaveError, ResourceNotFoundException
 from src.llm import honcho_llm_call
 from src.llm.types import LLMTelemetryContext
 from src.models import Message
@@ -214,6 +214,21 @@ async def process_representation_tasks_batch(
         latest_message.session_name,
         latest_message.created_at,
     )
+    from src.sentica.dreams import inference_enabled
+    from src.sentica.taint import bind_run_trust, messages_run_trust
+
+    try:
+        async with tracked_db("deriver.synthesis", read_only=True) as db:
+            workspace_row = await crud.get_workspace(
+                db, workspace_name=latest_message.workspace_name
+            )
+            synthesis_on = inference_enabled(workspace_row.configuration)
+    except ResourceNotFoundException:
+        synthesis_on = False
+    if not synthesis_on:
+        observations.deductive = []
+        observations.inductive = []
+    run_trust = messages_run_trust([message.source_trust for message in messages])
 
     agg_representation_result = crud.CreateDocumentsResult()
     successful_observer_count = 0
@@ -227,42 +242,48 @@ async def process_representation_tasks_batch(
             latest_message.session_name,
         )
     else:
-        # Save to all observer collections
-        for observer in observers:
-            representation_manager = RepresentationManager(
-                workspace_name=latest_message.workspace_name,
-                observer=observer,
-                observed=observed,
-            )
+        # Save to all observer collections. The batch trust covers every
+        # conclusion, including one that cites only a clean message.
+        with bind_run_trust(run_trust):
+            for observer in observers:
+                representation_manager = RepresentationManager(
+                    workspace_name=latest_message.workspace_name,
+                    observer=observer,
+                    observed=observed,
+                )
 
-            try:
-                representation_result = (
-                    await representation_manager.save_representation(
-                        observations,
-                        message_ids,
-                        latest_message.session_name,
-                        latest_message.created_at,
-                        message_level_configuration,
+                try:
+                    representation_result = (
+                        await representation_manager.save_representation(
+                            observations,
+                            message_ids,
+                            latest_message.session_name,
+                            latest_message.created_at,
+                            message_level_configuration,
+                        )
                     )
-                )
-                agg_representation_result.exact_dup_existing_count += (
-                    representation_result.exact_dup_existing_count
-                )
-                agg_representation_result.exact_dup_in_batch_count += (
-                    representation_result.exact_dup_in_batch_count
-                )
-                agg_representation_result.semantic_dup_rejected_count += (
-                    representation_result.semantic_dup_rejected_count
-                )
-                agg_representation_result.semantic_dup_replaced_count += (
-                    representation_result.semantic_dup_replaced_count
-                )
-                successful_observer_count += 1
-            except Exception as e:  # noqa: BLE001
-                logger.exception(
-                    "Failed to save representation for observer %s", observer
-                )
-                save_errors.append((observer, e))
+                    agg_representation_result.exact_dup_existing_count += (
+                        representation_result.exact_dup_existing_count
+                    )
+                    agg_representation_result.exact_dup_in_batch_count += (
+                        representation_result.exact_dup_in_batch_count
+                    )
+                    agg_representation_result.semantic_dup_rejected_count += (
+                        representation_result.semantic_dup_rejected_count
+                    )
+                    agg_representation_result.semantic_dup_replaced_count += (
+                        representation_result.semantic_dup_replaced_count
+                    )
+                    successful_observer_count += 1
+                except Exception as e:  # noqa: BLE001
+                    from src.sentica.safety import is_safety_outage
+
+                    if is_safety_outage(e):
+                        raise
+                    logger.exception(
+                        "Failed to save representation for observer %s", observer
+                    )
+                    save_errors.append((observer, e))
 
     # Log metrics
     overall_duration = (time.perf_counter() - overall_start) * 1000

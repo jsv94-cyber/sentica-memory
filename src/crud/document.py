@@ -596,12 +596,10 @@ async def _stamp_message_provenance(
         updates: dict[str, Any] = {}
         if public_ids:
             updates["message_public_ids"] = public_ids
-        if (
-            ids
-            and len(trusts) == len(ids)
-            and all(trust == "external" for trust in trusts)
-        ):
+        if any(trust is None or trust == "external" for trust in trusts):
             updates["source_trust"] = "external"
+        elif trusts and all(isinstance(trust, str) and trust for trust in trusts):
+            updates["source_trust"] = trusts[0]
         if updates:
             stamped.append(
                 doc.model_copy(
@@ -610,6 +608,78 @@ async def _stamp_message_provenance(
             )
         else:
             stamped.append(doc)
+    return stamped
+
+
+async def _inherit_document_taint(
+    db: AsyncSession,
+    documents: list[schemas.DocumentCreate],
+    workspace_name: str,
+) -> list[schemas.DocumentCreate]:
+    """A derived conclusion is external when any premise is external."""
+    parent_ids = [
+        source_id for document in documents for source_id in (document.source_ids or [])
+    ]
+    if not parent_ids:
+        return documents
+    rows = (
+        await db.execute(
+            select(models.Document.id, models.Document.internal_metadata).where(
+                models.Document.workspace_name == workspace_name,
+                models.Document.id.in_(sorted(set(parent_ids))),
+            )
+        )
+    ).all()
+    tainted: set[str] = set()
+    for row in rows:
+        raw_meta: Any = row.internal_metadata
+        meta = cast(dict[str, Any], raw_meta) if isinstance(raw_meta, dict) else {}
+        if meta.get("source_trust") is None or meta.get("source_trust") == "external":
+            tainted.add(str(row.id))
+    if not tainted:
+        return documents
+    inherited: list[schemas.DocumentCreate] = []
+    for document in documents:
+        sources = document.source_ids or []
+        if any(source_id in tainted for source_id in sources):
+            inherited.append(
+                document.model_copy(
+                    update={
+                        "metadata": document.metadata.model_copy(
+                            update={"source_trust": "external"}
+                        )
+                    }
+                )
+            )
+        else:
+            inherited.append(document)
+    return inherited
+
+
+def _apply_run_trust(
+    documents: list[schemas.DocumentCreate],
+) -> list[schemas.DocumentCreate]:
+    """Stamp the active run's trust on every conclusion it produces."""
+    from src.sentica.taint import current_run_trust
+
+    label = current_run_trust()
+    if label is None:
+        return documents
+    stamped: list[schemas.DocumentCreate] = []
+    for document in documents:
+        current = document.metadata.source_trust
+        if label == "external" or current is None:
+            stamped.append(
+                document.model_copy(
+                    update={
+                        "metadata": document.metadata.model_copy(
+                            update={"source_trust": label}
+                        )
+                    }
+                )
+            )
+        else:
+            stamped.append(document)
     return stamped
 
 
@@ -720,6 +790,8 @@ async def create_documents(
     # Provenance reads messages after any external vector call, so that call
     # is not held open on this session.
     documents = await _stamp_message_provenance(db, documents)
+    documents = await _inherit_document_taint(db, documents, workspace_name)
+    documents = _apply_run_trust(documents)
 
     # exact-content dedup (independent of `deduplicate`): pre-fetch
     # existing live documents whose normalized content matches anything in this
@@ -1156,6 +1228,8 @@ async def create_observations(
     db: AsyncSession,
     observations: Sequence[schemas.ConclusionCreate],
     workspace_name: str,
+    *,
+    already_checked: bool = False,
 ) -> list[models.Document]:
     """
     Create multiple observations (documents) from user input.
@@ -1178,15 +1252,16 @@ async def create_observations(
     if not observations:
         return []
 
-    from src.sentica.safety import keep_conclusion
+    if not already_checked:
+        from src.sentica.safety import keep_conclusion
 
-    retained: list[schemas.ConclusionCreate] = []
-    for obs in observations:
-        if await keep_conclusion(obs.content, workspace_name=workspace_name):
-            retained.append(obs)
-    observations = retained
-    if not observations:
-        return []
+        retained: list[schemas.ConclusionCreate] = []
+        for obs in observations:
+            if await keep_conclusion(obs.content, workspace_name=workspace_name):
+                retained.append(obs)
+        observations = retained
+        if not observations:
+            return []
 
     # Collect unique sessions and peer pairs to validate
     sessions_to_validate: set[str] = set()
@@ -1263,7 +1338,7 @@ async def create_observations(
                 content=obs.content,
                 level="explicit",  # Manually created observations are always explicit
                 times_derived=1,
-                internal_metadata={},  # No message_ids since not derived from messages
+                internal_metadata={"source_trust": "owner"},
                 session_name=obs.session_id,
                 embedding=embedding,
             )
@@ -1275,7 +1350,7 @@ async def create_observations(
                 content=obs.content,
                 level="explicit",  # Manually created observations are always explicit
                 times_derived=1,
-                internal_metadata={},  # No message_ids since not derived from messages
+                internal_metadata={"source_trust": "owner"},
                 session_name=obs.session_id,
             )
         doc.subject_ref = obs.subject_ref
@@ -1871,6 +1946,7 @@ def get_child_observations(
     linked = (
         select(literal(1))
         .where(
+            models.DocumentSource.workspace_name == workspace_name,
             models.DocumentSource.derived_id == models.Document.id,
             models.DocumentSource.source_id == parent_id,
         )

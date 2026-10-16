@@ -578,8 +578,19 @@ async def execute_tool_loop(
                 set_last_tool_metadata({})
                 set_last_tool_error(False)
 
+                offered = {
+                    name
+                    for tool in tools
+                    if isinstance((name := tool.get("name")), str)
+                }
                 try:
-                    tool_result = await tool_executor(tool_name, tool_input)
+                    if tool_name not in offered:
+                        from src.utils.agent_tools import unoffered_tool_refusal
+
+                        tool_result = unoffered_tool_refusal(tool_name)
+                        set_last_tool_error(True)
+                    else:
+                        tool_result = await tool_executor(tool_name, tool_input)
                     # Stash ToolResult.metadata on all_tool_calls so
                     # specialist rollups can read created/deleted observation
                     # counts without round-tripping through the event store.
@@ -604,6 +615,10 @@ async def execute_tool_loop(
                         }
                     )
                 except Exception as e:
+                    from src.sentica.safety import is_safety_outage
+
+                    if is_safety_outage(e):
+                        raise
                     logger.error(f"Tool execution failed for {tool_name}: {e}")
                     tool_results.append(
                         {

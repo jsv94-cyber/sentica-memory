@@ -49,6 +49,7 @@ class _Gateway(ThreadingHTTPServer):
     omit_usage: bool
     delay: float
     scripted: dict[str, str] | None
+    replies: list[str] | None
 
     def __init__(self) -> None:
         super().__init__(("127.0.0.1", 0), _Handler)
@@ -59,6 +60,7 @@ class _Gateway(ThreadingHTTPServer):
         self.omit_usage = False
         self.delay = 0.0
         self.scripted = None
+        self.replies = None
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -95,6 +97,18 @@ class _Handler(BaseHTTPRequestHandler):
                     {"index": index, "embedding": [0.25, 0.5]} for index in range(count)
                 ],
                 "usage": {"prompt_tokens": 2, "completion_tokens": 0},
+            }
+        elif gateway.replies:
+            index = len(gateway.requests) - 1
+            content = gateway.replies[min(index, len(gateway.replies) - 1)]
+            payload = {
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": content},
+                    }
+                ],
+                "usage": {"prompt_tokens": 4, "completion_tokens": 2},
             }
         elif gateway.scripted is not None:
             message: dict[str, Any] = {
@@ -179,7 +193,7 @@ def gateway(monkeypatch: pytest.MonkeyPatch) -> Iterator[_Gateway]:
     monkeypatch.setenv("SENTICA_GATEWAY_BASE_URL", base)
     monkeypatch.setenv("SENTICA_TENANT_ID", "tenant-a")
     monkeypatch.setenv("SENTICA_GATEWAY_RETRY_ATTEMPTS", "3")
-    monkeypatch.setenv("SENTICA_GATEWAY_RETRY_WAIT_SECONDS", "0")
+    monkeypatch.setenv("SENTICA_GATEWAY_RETRY_WAIT_SECONDS", "0.001")
     monkeypatch.delenv("SENTICA_GATEWAY_DAILY_TOKEN_BUDGET", raising=False)
     for name, model in _ROUTES.items():
         monkeypatch.setenv(name, model)
@@ -333,7 +347,7 @@ async def test_budget_stop_does_not_switch_model(
         "wu",
         "summary",
     )
-    assert budget_pause._gateway_outage_pending is False  # pyright: ignore[reportPrivateUsage]
+    assert budget_pause._gateway_outage_pending is True  # pyright: ignore[reportPrivateUsage]
 
 
 async def test_gateway_outage_pauses_without_deleting_messages(
@@ -347,9 +361,68 @@ async def test_gateway_outage_pauses_without_deleting_messages(
     assert before == after
     assert len(gateway.requests) == 3
     assert {row["model"] for row in gateway.requests} == {"sentica-summary"}
-    assert len({row["request_id"] for row in gateway.requests}) == 1
+    request_ids = [str(row["request_id"]) for row in gateway.requests]
+    stems = {item.rsplit(":r", 1)[0] for item in request_ids}
+    assert len(stems) == 1
+    assert [item.rsplit(":a", 1)[-1] for item in request_ids] == ["1", "2", "3"]
     paused = await _pause(GatewayUnavailable("model gateway unavailable"))
     assert paused is True
+
+
+def _round_indexes(request_ids: list[str]) -> list[str]:
+    return [item.rsplit(":a", 1)[0].rsplit(":r", 1)[-1] for item in request_ids]
+
+
+async def test_each_round_gets_its_own_request_id(gateway: _Gateway) -> None:
+    """Structured-output retry and the final no-tools call use a new round."""
+    from pydantic import BaseModel
+
+    class _Line(BaseModel):
+        content: str
+
+    gateway.replies = ["not-json", '{"content":"kept"}']
+    parsed = await honcho_llm_call(
+        model_config=settings.SUMMARY.MODEL_CONFIG,
+        prompt="hello",
+        max_tokens=16,
+        response_model=_Line,
+        telemetry=LLMTelemetryContext(
+            workspace_name="left",
+            call_purpose="summary.short",
+            parent_category="summary",
+        ),
+    )
+    assert isinstance(parsed.content, _Line)
+    assert parsed.content.content == "kept"
+    structured_ids = [str(row["request_id"]) for row in gateway.requests]
+    assert _round_indexes(structured_ids) == ["1", "2"]
+    assert [item.rsplit(":a", 1)[-1] for item in structured_ids] == ["1", "1"]
+    assert len(set(structured_ids)) == len(structured_ids)
+
+    gateway.replies = None
+    gateway.requests.clear()
+    gateway.always_tools = True
+
+    async def _search(_name: str, _arguments: dict[str, Any]) -> str:
+        return "found"
+
+    await honcho_llm_call(
+        model_config=settings.SUMMARY.MODEL_CONFIG,
+        prompt="find it",
+        max_tokens=16,
+        tools=[{"type": "function", "function": {"name": "search_memory"}}],
+        tool_executor=_search,
+        max_tool_iterations=1,
+        telemetry=LLMTelemetryContext(
+            workspace_name="left",
+            call_purpose="dialectic.answer",
+            parent_category="dialectic",
+        ),
+    )
+    loop_ids = [str(row["request_id"]) for row in gateway.requests]
+    assert _round_indexes(loop_ids) == ["1", "2"]
+    assert [item.rsplit(":a", 1)[-1] for item in loop_ids] == ["1", "1"]
+    assert len(set(loop_ids)) == len(loop_ids)
 
 
 async def test_missing_tenant_workspace_or_model_does_not_call(
@@ -555,7 +628,7 @@ async def test_malformed_or_refused_output_fails_without_sentry_or_the_text(
 
     monkeypatch.setattr(sentry_sdk, "capture_exception", _capture)
     monkeypatch.setenv("SENTICA_GATEWAY_RETRY_ATTEMPTS", "2")
-    monkeypatch.setenv("SENTICA_GATEWAY_RETRY_WAIT_SECONDS", "0")
+    monkeypatch.setenv("SENTICA_GATEWAY_RETRY_WAIT_SECONDS", "0.001")
     gateway.scripted = {"content": "not-json SECRET-CANARY", "finish": "stop"}
     with pytest.raises(GatewayStructuredOutputError) as caught:
         await honcho_llm_call(
@@ -641,6 +714,7 @@ async def test_empty_capped_summary_is_not_replaced(
             SummaryType.SHORT,
             10,
             "m1",
+            1,
             1,
             "local hello",
             1,
@@ -769,3 +843,140 @@ async def test_gateway_outage_backs_off_before_the_next_claim(
     assert events[0] == ("sleep", 1.0)
     assert events[1][0] == "claim"
     assert manager._current_poll_interval == 2.0  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_budget_exhaustion_backs_off_before_the_next_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    from src.deriver import queue_manager as qm_mod
+
+    monkeypatch.setattr(settings.DERIVER, "POLLING_JITTER_RATIO", 0.0)
+    monkeypatch.setattr(settings.DERIVER, "POLLING_BACKOFF_ENABLED", True)
+    monkeypatch.setattr(settings.DERIVER, "POLLING_SLEEP_INTERVAL_SECONDS", 1.0)
+    monkeypatch.setattr(settings.DERIVER, "POLLING_BACKOFF_MULTIPLIER", 2.0)
+    monkeypatch.setattr(settings.DERIVER, "POLLING_SLEEP_MAX_INTERVAL_SECONDS", 30.0)
+    monkeypatch.setattr(settings.DERIVER, "SCHEDULER", "api")
+    manager = qm_mod.QueueManager()
+    flagged = await qm_mod.QueueManager._handle_processing_error(  # pyright: ignore[reportPrivateUsage]
+        manager,
+        GatewayBudgetExceeded("token budget exhausted"),
+        [],
+        "wu",
+        "summary",
+    )
+    assert flagged is True
+    assert manager._gateway_outage_pending is True  # pyright: ignore[reportPrivateUsage]
+    events: list[tuple[str, float]] = []
+
+    async def fake_claim() -> dict[str, str]:
+        events.append(("claim", manager._current_poll_interval))  # pyright: ignore[reportPrivateUsage]
+        manager.shutdown_event.set()
+        return {"representation:ws:s:p": "aqs"}
+
+    async def fake_sleep(seconds: float) -> None:
+        events.append(("sleep", seconds))
+
+    monkeypatch.setattr(manager, "get_and_claim_work_units", fake_claim)
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    await manager.polling_loop()
+    assert events[0] == ("sleep", 1.0)
+    assert events[1][0] == "claim"
+
+
+async def test_unavailable_statuses_and_a_charge_failure_keep_the_completion(
+    gateway: _Gateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.exceptions import GatewayUnavailable
+    from src.sentica.gateway import (
+        _tool_calls,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    for status in (401, 403, 404, 408):
+        gateway.status = status
+        gateway.requests.clear()
+        with pytest.raises(GatewayUnavailable):
+            await _call("summary.short", "summary")
+    gateway.status = 200
+    monkeypatch.setenv("SENTICA_GATEWAY_DAILY_TOKEN_BUDGET", "10")
+    monkeypatch.setattr("src.sentica.gateway._async_client", lambda: None)
+    with pytest.raises(GatewayUnavailable):
+        await _call("summary.short", "summary")
+    monkeypatch.delenv("SENTICA_GATEWAY_DAILY_TOKEN_BUDGET")
+
+    async def _charge_down(*_args: object, **_kwargs: object) -> None:
+        raise GatewayUnavailable("budget store down")
+
+    monkeypatch.setattr("src.sentica.gateway._charge", _charge_down)
+    response = await honcho_llm_call(
+        model_config=settings.SUMMARY.MODEL_CONFIG,
+        prompt="hello",
+        max_tokens=16,
+        telemetry=LLMTelemetryContext(
+            workspace_name="left",
+            call_purpose="summary.short",
+            parent_category="summary",
+        ),
+    )
+    assert response.content == "gateway ok"
+    parsed = _tool_calls(
+        {"tool_calls": [{"id": "1", "function": {"name": "search", "arguments": ""}}]}
+    )
+    assert parsed[0]["input"] == {}
+    with pytest.raises(ValidationException, match="malformed"):
+        _tool_calls({"tool_calls": [{"id": "1"}]})
+
+
+async def test_gateway_forwards_limits_dimensions_and_truncation(
+    gateway: _Gateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.llm.conversation import truncate_messages_to_fit
+    from src.sentica.workspace_scope import reset_workspace, set_workspace
+
+    seen: dict[str, int] = {}
+    real = truncate_messages_to_fit
+
+    def _wrapped(
+        messages: list[dict[str, Any]],
+        max_tokens: int,
+        preserve_system: bool = True,
+    ) -> list[dict[str, Any]]:
+        seen["max"] = max_tokens
+        return real(messages, max_tokens, preserve_system)
+
+    monkeypatch.setattr("src.llm.conversation.truncate_messages_to_fit", _wrapped)
+
+    def _send_dimensions(self: object) -> bool:
+        del self
+        return True
+
+    monkeypatch.setattr(
+        type(settings.EMBEDDING),
+        "resolve_send_dimensions",
+        _send_dimensions,
+    )
+    token = set_workspace("left")
+    try:
+        await honcho_llm_call(
+            model_config=settings.SUMMARY.MODEL_CONFIG,
+            prompt="hello",
+            max_tokens=16,
+            max_input_tokens=40,
+            telemetry=LLMTelemetryContext(
+                workspace_name="left",
+                call_purpose="summary.short",
+                parent_category="summary",
+            ),
+        )
+        from src.sentica.gateway import embed_texts
+
+        await embed_texts(["tea"])
+    finally:
+        reset_workspace(token)
+    assert seen["max"] == 40
+    bodies = [cast(dict[str, Any], row["body"]) for row in gateway.requests]
+    assert any(
+        body.get("dimensions") == settings.EMBEDDING.VECTOR_DIMENSIONS
+        for body in bodies
+    )

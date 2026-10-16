@@ -416,6 +416,11 @@ class DialecticAgent:
             agent_type="dialectic",
             parent_category="dialectic",
             evidence=self.evidence,
+            offered={
+                name
+                for tool in self._select_tools()
+                if isinstance((name := tool.get("name")), str)
+            },
         )
 
     def _prefetch_heading(self) -> str:

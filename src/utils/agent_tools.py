@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import weakref
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any, cast
@@ -20,7 +20,6 @@ from src.schemas import ResolvedConfiguration
 from src.telemetry.events import (
     AgentToolConclusionsCreatedEvent,
     AgentToolConclusionsDeletedEvent,
-    AgentToolPeerCardUpdatedEvent,
     EmbeddingCallPurpose,
     emit,
 )
@@ -45,7 +44,7 @@ logger = logging.getLogger(__name__)
 MAX_PEER_CARD_FACTS = 40
 
 # Identity-marker prefixes allowed on the peer card. Anything else is rejected
-# structurally — see `_validate_peer_card_entry`.
+# structurally. See `validate_peer_card_entry`.
 PEER_CARD_ALLOWED_PREFIXES: tuple[str, ...] = (
     "IDENTITY:",
     "ATTRIBUTE:",
@@ -57,7 +56,7 @@ PEER_CARD_ALLOWED_PREFIXES: tuple[str, ...] = (
 MAX_PEER_CARD_ENTRY_LENGTH = 200
 
 
-def _validate_peer_card_entry(line: str) -> bool:
+def validate_peer_card_entry(line: str) -> bool:
     """Structural validation for a single peer card entry.
 
     Returns True when the line starts with one of the allowed prefixes followed
@@ -377,37 +376,6 @@ TOOLS: dict[str, dict[str, Any]] = {
             "required": ["observations"],
         },
     },
-    "update_peer_card": {
-        "name": "update_peer_card",
-        "description": (
-            "Update the peer card with stable identity markers about the observed peer. "
-            "An identity marker distinguishes the peer from others of its kind and persists across interactions. "
-            "The peer may be any entity with identity that changes over time (human, agent, codebase, team, organization) — do not assume the peer is human. "
-            "Each entry must start with one of four prefixes: `IDENTITY:` (canonical name, kind, aliases, IDs), "
-            "`ATTRIBUTE:` (stable durable property, including explicitly stated standing preferences), "
-            "`RELATIONSHIP:` (durable link to another entity), or "
-            "`INSTRUCTION:` (standing rule of engagement the peer has explicitly stated). "
-            "Do not write `TRAIT:` or behavioral `PREFERENCE:` entries, one-off observations, transient state, "
-            "inferred facts not directly supported by evidence, evidence bundles / `e.g.` clauses, or entries about co-occurring peers. "
-            "Entries without an allowed prefix or that exceed the per-entry length cap are rejected."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "content": {
-                    "type": "array",
-                    "description": (
-                        "Complete deduplicated peer card list (max 40 entries). "
-                        "Each entry must start with one of the allowed prefixes "
-                        "(`IDENTITY: `, `ATTRIBUTE: `, `RELATIONSHIP: `, `INSTRUCTION: `) "
-                        "followed by one concise identity marker. Entries without an allowed prefix are rejected."
-                    ),
-                    "items": {"type": "string"},
-                },
-            },
-            "required": ["content"],
-        },
-    },
     "search_memory": {
         "name": "search_memory",
         "description": "Search for observations in memory using semantic similarity. Use this to find relevant information about the peer when you need to recall specific details.",
@@ -713,7 +681,6 @@ DEDUCTION_SPECIALIST_TOOLS: list[dict[str, Any]] = [
     # Action tools
     TOOLS["create_observations_deductive"],
     TOOLS["delete_observations"],
-    TOOLS["update_peer_card"],
 ]
 
 # Tools for the induction specialist (dreamer phase 2)
@@ -730,15 +697,14 @@ INDUCTION_SPECIALIST_TOOLS: list[dict[str, Any]] = [
 ]
 
 # Tools for the card-refresh specialist (card_refresh dream type).
-# Card-only maintenance: discovery plus update_peer_card. Deliberately
+# Card-only maintenance: discovery tools. The card is rebuilt afterwards. Deliberately
 # excludes every observation-mutating tool (create_observations*,
 # delete_observations) — a card refresh must never touch observations.
 CARD_REFRESH_SPECIALIST_TOOLS: list[dict[str, Any]] = [
-    # Discovery tools
+    # Discovery tools. The card is rebuilt from untainted conclusions
+    # after the run. The model does not write it.
     TOOLS["get_recent_observations"],
     TOOLS["search_memory"],
-    # Action tool
-    TOOLS["update_peer_card"],
 ]
 
 
@@ -1458,167 +1424,9 @@ async def _handle_create_observations_inductive(
     )
 
 
-async def _handle_update_peer_card(
-    ctx: ToolContext, tool_input: dict[str, Any]
-) -> "str | ToolResult":
-    """Handle update_peer_card tool."""
-    # Check if peer card creation is disabled via configuration
-    if ctx.configuration is not None and not ctx.configuration.peer_card.create:
-        logger.info(
-            "Peer card creation disabled for %s, skipping update",
-            ctx.workspace_name,
-        )
-        return (
-            "Peer card creation is disabled for this workspace/session configuration."
-        )
-
-    raw_peer_card_content = tool_input.get("content")
-
-    # Guard against None or empty content — keep the existing peer card.
-    if raw_peer_card_content is None:
-        logger.warning(
-            "Peer card update called with None content for %s, keeping existing card",
-            ctx.workspace_name,
-        )
-        return "Peer card content was empty, no update performed."
-
-    # Normalize, validate structure, and deduplicate to keep peer cards bounded
-    # and on-spec.
-    normalized_peer_card: list[str] = []
-    seen: set[str] = set()
-    rejected_count = 0
-    # Keep a small sample of rejected entries to surface back to the model so it
-    # can self-correct on a retry. Capped to avoid bloating the tool response.
-    rejected_samples: list[str] = []
-    _REJECTED_SAMPLE_CAP = 3
-    _REJECTED_SAMPLE_LINE_LIMIT = 120
-    items = (
-        cast(list[str], raw_peer_card_content)
-        if isinstance(raw_peer_card_content, list)
-        else [str(raw_peer_card_content)]
-    )
-    for item in items:
-        line = str(item).strip()
-        if not line:
-            continue
-
-        if not _validate_peer_card_entry(line):
-            rejected_count += 1
-            if len(rejected_samples) < _REJECTED_SAMPLE_CAP:
-                rejected_samples.append(line[:_REJECTED_SAMPLE_LINE_LIMIT])
-            logger.info(
-                "Rejecting peer card entry (no allowed prefix, empty body, or over length cap): %r",
-                line[:80],
-            )
-            continue
-
-        # Case-insensitive dedupe with whitespace normalization.
-        normalized_key = " ".join(line.lower().split())
-        if normalized_key in seen:
-            continue
-        seen.add(normalized_key)
-        normalized_peer_card.append(line)
-
-    if rejected_count:
-        logger.info(
-            "Peer card update for %s/%s/%s rejected %d structurally invalid entries",
-            ctx.workspace_name,
-            ctx.observer,
-            ctx.observed,
-            rejected_count,
-        )
-
-    def _format_rejection_feedback(scope: str) -> str:
-        """Build a self-correction hint for the model. `scope` is grammar glue:
-        either "all" (every entry rejected) or e.g. "3 of 12" (partial)."""
-        samples_block = ""
-        if rejected_samples:
-            sample_lines = "\n".join(f"  - {s!r}" for s in rejected_samples)
-            extra = (
-                f" (+{rejected_count - len(rejected_samples)} more)"
-                if rejected_count > len(rejected_samples)
-                else ""
-            )
-            samples_block = f" Examples of rejected entries{extra}:\n{sample_lines}"
-        return (
-            f"Rejected {scope} entries for failing structural validation. "
-            "Each entry must start with one of `IDENTITY: `, `ATTRIBUTE: `, "
-            "`RELATIONSHIP: `, or `INSTRUCTION: ` and stay under the per-entry "
-            f"length cap.{samples_block}"
-        )
-
-    # Don't clear the peer card if all content normalized to empty or every
-    # entry was structurally invalid.
-    if not normalized_peer_card:
-        logger.warning(
-            "Peer card update normalized to empty for %s (rejected=%d), keeping existing card",
-            ctx.workspace_name,
-            rejected_count,
-        )
-        if rejected_count:
-            return _format_rejection_feedback(f"all {rejected_count}")
-        return "Peer card content was empty after normalization, no update performed."
-
-    if len(normalized_peer_card) > MAX_PEER_CARD_FACTS:
-        logger.warning(
-            "Peer card update exceeded max facts (%s), truncating from %s to %s",
-            MAX_PEER_CARD_FACTS,
-            len(normalized_peer_card),
-            MAX_PEER_CARD_FACTS,
-        )
-        normalized_peer_card = normalized_peer_card[:MAX_PEER_CARD_FACTS]
-
-    async with ctx.db_lock, tracked_db("tool.update_peer_card") as db:
-        await crud.set_peer_card(
-            db,
-            workspace_name=ctx.workspace_name,
-            peer_card=normalized_peer_card,
-            observer=ctx.observer,
-            observed=ctx.observed,
-        )
-    logger.info(
-        f"Updated peer card for {ctx.workspace_name}/{ctx.observer}/{ctx.observed}"
-    )
-
-    # Emit telemetry event if context is available
-    if ctx.run_id and ctx.agent_type and ctx.parent_category:
-        # Count facts in peer card (content is a list of strings per tool schema)
-        emit(
-            AgentToolPeerCardUpdatedEvent(
-                run_id=ctx.run_id,
-                iteration=get_current_iteration(),
-                parent_category=ctx.parent_category,
-                agent_type=ctx.agent_type,
-                workspace_name=ctx.workspace_name,
-                observer=ctx.observer,
-                observed=ctx.observed,
-                facts_count=len(normalized_peer_card),
-            )
-        )
-
-    # signal a successful peer_card update so DreamSpecialistEvent
-    # can set its `peer_card_updated` flag without name-counting.
-    from src.utils.types import ToolResult
-
-    success_content = (
-        f"Updated peer card for {ctx.observed} by {ctx.observer} "
-        f"with {len(normalized_peer_card)} entries."
-    )
-    if rejected_count:
-        # Partial reject: surface the rejection so the model can re-emit the
-        # dropped entries (with correct prefixes) on a retry instead of
-        # silently losing them.
-        accepted = len(normalized_peer_card)
-        total = accepted + rejected_count
-        success_content = f"{success_content} {_format_rejection_feedback(f'{rejected_count} of {total}')}"
-    return ToolResult(
-        content=success_content,
-        metadata={
-            "peer_card_updated": True,
-            "facts_count": len(normalized_peer_card),
-            "rejected_count": rejected_count,
-        },
-    )
+def unoffered_tool_refusal(tool_name: str) -> str:
+    """Tell the model this run was not offered the tool. Nothing runs."""
+    return f"Refusing to call {tool_name}: it was not offered to this run."
 
 
 def _record_conclusion_evidence(
@@ -2341,7 +2149,6 @@ async def _handle_get_reasoning_chain(
 _TOOL_HANDLERS: dict[str, Callable[[ToolContext, dict[str, Any]], Any]] = {
     "create_observations_deductive": _handle_create_observations_deductive,
     "create_observations_inductive": _handle_create_observations_inductive,
-    "update_peer_card": _handle_update_peer_card,
     "search_memory": _handle_search_memory,
     "get_observation_context": _handle_get_observation_context,
     "search_messages": _handle_search_messages,
@@ -2368,6 +2175,7 @@ async def create_tool_executor(
     session_allowlist: list[str] | None = None,
     handler_resolver: Callable[[str], Any] | None = None,
     evidence: EvidenceAccumulator | None = None,
+    offered: Collection[str] | None = None,
 ) -> Callable[[str, dict[str, Any]], Any]:
     """
     Create a unified tool executor function for all agent operations.
@@ -2420,6 +2228,7 @@ async def create_tool_executor(
         parent_category=parent_category,
         evidence=evidence,
     )
+    offered_names = None if offered is None else frozenset(offered)
 
     async def execute_tool(tool_name: str, tool_input: dict[str, Any]) -> str:
         """
@@ -2457,7 +2266,14 @@ async def create_tool_executor(
         is_error: bool = False
 
         try:
-            handler = (handler_resolver or _TOOL_HANDLERS.get)(tool_name)
+            refused = offered_names is not None and tool_name not in offered_names
+            handler = None
+            if refused:
+                result_str = unoffered_tool_refusal(tool_name)
+                is_error = True
+                logger.warning(result_str)
+            else:
+                handler = (handler_resolver or _TOOL_HANDLERS.get)(tool_name)
             if handler:
                 handler_result = await handler(ctx, tool_input)
                 # Handlers return either a plain str (existing contract) or a
@@ -2481,7 +2297,7 @@ async def create_tool_executor(
                     len(result_str),
                     sorted(metadata.keys()),
                 )
-            else:
+            elif not refused:
                 result_str = f"Unknown tool: {tool_name}"
                 is_error = True
                 logger.warning(result_str)
@@ -2506,6 +2322,12 @@ async def create_tool_executor(
             is_error = True
             logger.warning(result_str)
         except Exception as e:
+            from src.sentica.safety import is_safety_outage
+
+            if is_safety_outage(e):
+                result_str = f"Tool {tool_name} paused: {type(e).__name__}"
+                is_error = True
+                raise
             # Unexpected errors - log with full traceback but still return to LLM
             # We don't re-raise because the LLM should be able to continue with other tools
             result_str = (
@@ -2897,6 +2719,7 @@ async def create_workspace_tool_executor(
     agent_type: str | None = None,
     parent_category: str | None = None,
     evidence: EvidenceAccumulator | None = None,
+    offered: Collection[str] | None = None,
 ) -> Callable[[str, dict[str, Any]], Any]:
     """Tool executor for workspace-level operations (no bound peer pair).
 
@@ -2919,4 +2742,5 @@ async def create_workspace_tool_executor(
         parent_category=parent_category,
         handler_resolver=_workspace_handler_resolver,
         evidence=evidence,
+        offered=offered,
     )

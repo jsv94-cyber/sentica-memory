@@ -237,7 +237,14 @@ async def _filter_dreams_enabled(
             sessions.get((due_dream.workspace_name, due_dream.session_name)),
             workspaces.get(due_dream.workspace_name),
         )
-        if configuration.dream.enabled:
+        from src.sentica.dreams import inference_enabled
+
+        workspace = workspaces.get(due_dream.workspace_name)
+        if (
+            workspace is not None
+            and configuration.dream.enabled
+            and inference_enabled(workspace.configuration)
+        ):
             enabled.append(due_dream)
     return enabled
 

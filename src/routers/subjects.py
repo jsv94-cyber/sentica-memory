@@ -1,9 +1,13 @@
 """Subject freshness and hard deletion."""
 
+import datetime
+
 from fastapi import APIRouter, Body, Depends, Path
 from pydantic import BaseModel, model_validator
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src import models
 from src.crud.peer import reject_scope_peers
 from src.dependencies import db
 from src.exceptions import ValidationException
@@ -31,6 +35,15 @@ class DeletionCreate(BaseModel):
         if (self.peer_id is None) == (self.subject_ref is None):
             raise ValueError("set peer_id or subject_ref, not both")
         return self
+
+
+class DigestRead(BaseModel):
+    id: str
+    kind: str
+    period: str
+    content: str
+    external: bool
+    created_at: datetime.datetime
 
 
 class DeletionResult(BaseModel):
@@ -89,3 +102,29 @@ async def create_deletion(
         embedding_count=record.embedding_count,
         summary_count=record.summary_count,
     )
+
+
+@router.get("/digests", response_model=list[DigestRead])
+async def list_digests(
+    workspace_id: str = Path(...),
+    db: AsyncSession = db,
+) -> list[DigestRead]:
+    """Read this workspace's digests. Another workspace's rows are not visible."""
+    rows = (
+        await db.scalars(
+            select(models.DreamDigest)
+            .where(models.DreamDigest.workspace_name == workspace_id)
+            .order_by(models.DreamDigest.created_at.asc(), models.DreamDigest.id.asc())
+        )
+    ).all()
+    return [
+        DigestRead(
+            id=row.id,
+            kind=row.kind,
+            period=row.period,
+            content=row.content,
+            external=row.external,
+            created_at=row.created_at,
+        )
+        for row in rows
+    ]

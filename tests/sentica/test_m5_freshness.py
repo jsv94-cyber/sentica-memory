@@ -236,8 +236,10 @@ async def test_decay_and_purge_follow_the_schedule(
         )
     ).one()
     await note_used(db_session, [used.id], workspace_name=workspace.name)
+    await db_session.refresh(used)
     now = datetime.now(UTC) + timedelta(days=30)
     used.last_used_at = now
+    used.decayed_at = now
     await db_session.commit()
     changed = await apply_decay(db_session, workspace_name=workspace.name, now=now)
     assert changed == 1
@@ -327,16 +329,25 @@ async def test_deletion_leaves_nothing_searchable(
     assert record.document_count == 1
     assert record.embedding_count == 1
     assert record.summary_count == 1
+    from src.sentica.freshness import identifier_hash
+
     saved = (
         await db_session.scalars(
             select(models.Workspace).where(models.Workspace.name == workspace.name)
         )
     ).one()
-    stored_records: Any = saved.internal_metadata.get("deletion_records")
-    assert isinstance(stored_records, list)
-    stored_last = cast(dict[str, Any], stored_records[-1])
-    assert stored_last["id"] == record.id
-    assert "content" not in stored_last
+    assert "deletion_records" not in (saved.internal_metadata or {})
+    stored = (
+        await db_session.scalars(
+            select(models.DeletionRecord).where(
+                models.DeletionRecord.workspace_name == workspace.name
+            )
+        )
+    ).one()
+    assert stored.id == record.id
+    assert stored.subject_hash == identifier_hash("customer:123")
+    assert stored.peer_hash is None
+    assert "customer:123" not in (stored.subject_hash or "")
     documents = (
         await db_session.scalars(
             select(models.Document).where(
@@ -378,3 +389,122 @@ async def test_deletion_leaves_nothing_searchable(
         top_k=5,
     )
     assert found == []
+
+
+async def test_deletion_hmac_differs_by_tenant_key(
+    client: TestClient,
+    db_session: AsyncSession,
+    sample_data: tuple[Workspace, Peer],
+    monkeypatch: Any,
+) -> None:
+    """POST /deletions. The same name hashes differently under two tenant keys."""
+    import hashlib
+    import hmac
+
+    workspace, peer = sample_data
+    left = "a" * 32
+    right = "b" * 32
+
+    def _mac(key: str) -> str:
+        return hmac.new(key.encode(), peer.name.encode(), hashlib.sha256).hexdigest()
+
+    monkeypatch.setenv("SENTICA_TENANT_HASH_KEY", left)
+    first = client.post(
+        f"/v3/workspaces/{workspace.name}/deletions",
+        json={"peer_id": peer.name},
+    )
+    assert first.status_code == 201, first.text
+    monkeypatch.setenv("SENTICA_TENANT_HASH_KEY", right)
+    second = client.post(
+        f"/v3/workspaces/{workspace.name}/deletions",
+        json={"peer_id": peer.name},
+    )
+    assert second.status_code == 201, second.text
+    rows = list(
+        (
+            await db_session.scalars(
+                select(models.DeletionRecord)
+                .where(models.DeletionRecord.workspace_name == workspace.name)
+                .order_by(models.DeletionRecord.created_at, models.DeletionRecord.id)
+            )
+        ).all()
+    )
+    assert [row.peer_hash for row in rows] == [_mac(left), _mac(right)]
+    plain = hashlib.sha256(peer.name.encode()).hexdigest()
+    assert plain not in {row.peer_hash for row in rows}
+    assert all(peer.name not in (row.peer_hash or "") for row in rows)
+    assert all(row.legacy is False for row in rows)
+
+
+async def test_decay_and_subject_change_do_not_deadlock(
+    db_session: AsyncSession,
+    db_engine: object,
+    sample_data: tuple[Workspace, Peer],
+) -> None:
+    """apply_decay and mark_subject_changed. One UPDATE, no row lock, no deadlock."""
+    import asyncio
+    import inspect
+
+    from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
+
+    from src.sentica.freshness import decay_interval, mark_subject_changed
+    from src.sentica.workspace_scope import reset_workspace, set_workspace
+
+    source = inspect.getsource(apply_decay)
+    assert "for update" not in source.lower()
+    workspace, peer = sample_data
+    workspace_name = workspace.name
+    await _ready(db_session, workspace, peer)
+    interval = decay_interval()
+    now = datetime.now(UTC)
+    await crud.create_documents(
+        db_session,
+        [
+            _document(f"fact {index}", subject_ref="booking", slot=index)
+            for index in range(8)
+        ],
+        workspace.name,
+        observer=peer.name,
+        observed=peer.name,
+    )
+    rows = (
+        await db_session.scalars(
+            select(models.Document).where(
+                models.Document.workspace_name == workspace.name
+            )
+        )
+    ).all()
+    for row in rows:
+        row.created_at = now - (interval * 3)
+    await db_session.commit()
+    assert isinstance(db_engine, AsyncEngine)
+    factory = async_sessionmaker(bind=db_engine, expire_on_commit=False)
+
+    async def _decay() -> None:
+        token = set_workspace(workspace.name)
+        try:
+            async with factory() as db:
+                await apply_decay(db, workspace_name=workspace.name, now=now)
+        finally:
+            reset_workspace(token)
+
+    async def _stale() -> None:
+        token = set_workspace(workspace.name)
+        try:
+            async with factory() as db:
+                await mark_subject_changed(db, workspace.name, "booking")
+        finally:
+            reset_workspace(token)
+
+    await asyncio.wait_for(asyncio.gather(_decay(), _stale()), timeout=15)
+    db_session.expire_all()
+    checked = (
+        await db_session.scalars(
+            select(models.Document).where(
+                models.Document.workspace_name == workspace_name
+            )
+        )
+    ).all()
+    assert checked
+    assert all(row.stale is True for row in checked)
+    assert all(row.weight < 1 for row in checked)

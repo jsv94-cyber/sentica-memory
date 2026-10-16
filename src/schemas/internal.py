@@ -22,6 +22,8 @@ class ReconcilerType(str, Enum):
     CLEANUP = "cleanup"
     BACKFILL_DOCUMENT_SOURCES = "backfill_document_sources"
     BACKFILL = "backfill"
+    DREAMS = "dreams"
+    DECAY = "decay"
 
 
 # ---------------------------------------------------------------------------
@@ -66,7 +68,7 @@ class DocumentMetadata(BaseModel):
     )
     source_trust: str | None = Field(
         default=None,
-        description="external when every source message was external",
+        description="external when any source was external",
     )
 
 

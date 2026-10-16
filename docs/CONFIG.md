@@ -20,6 +20,8 @@ the groups at the end of this file. A name not listed here is not read.
 | `SENTICA_TOKEN_PUBLIC_KEY_PATH` | Broker token verification key. |
 | `SENTICA_TOKEN_ISSUER` | Expected token issuer. |
 | `SENTICA_TOKEN_SIGNING_KEY` | Test-only signing key path. Production does not use it. |
+| `SENTICA_TENANT_HASH_KEY` | HMAC key for deletion identifiers. At least 32 bytes. |
+| `SENTICA_TENANT_HASH_KEY_PATH` | Broker key file used when `SENTICA_TENANT_HASH_KEY` is unset. |
 | `SENTICA_BIND_HOST` | Private address the API binds. Required in production. |
 | `SENTICA_REDIS_HOST` | This instance's Redis hostname. |
 | `SENTICA_MIGRATION_TIMEOUT_SECONDS` | How long startup waits for migrations. Default 360. |
@@ -130,12 +132,16 @@ An optional per-purpose limit is
 purpose. A response that omits usage is charged an estimate, never zero.
 The backstop reserves and then charges, so it can slightly overshoot.
 
-`SENTICA_GATEWAY_TIMEOUT_SECONDS` defaults to 10. A purpose may set
+When `SENTICA_GATEWAY_TIMEOUT_SECONDS` is unset, each purpose has its own
+default: deriver 120 seconds, dream 180 seconds, dialectic 60 seconds,
+summary 60 seconds, and embed 30 seconds. A purpose may override that with
 `SENTICA_GATEWAY_DERIVER_TIMEOUT_SECONDS`,
 `SENTICA_GATEWAY_SUMMARY_TIMEOUT_SECONDS`,
 `SENTICA_GATEWAY_DIALECTIC_TIMEOUT_SECONDS`,
 `SENTICA_GATEWAY_DREAM_TIMEOUT_SECONDS`, or
-`SENTICA_GATEWAY_EMBED_TIMEOUT_SECONDS`.
+`SENTICA_GATEWAY_EMBED_TIMEOUT_SECONDS`. `SENTICA_GATEWAY_TIMEOUT_SECONDS`
+overrides every purpose that does not set its own value. A value that is
+not a positive number is refused.
 
 `SENTICA_GATEWAY_RETRY_ATTEMPTS` defaults to 3.
 `SENTICA_GATEWAY_RETRY_WAIT_SECONDS` defaults to 0.05. A failed attempt
@@ -144,9 +150,10 @@ retries the same URL and model. It does not fall back to another provider.
 ## Message source trust
 
 A message may set `source_trust` to `owner`, `staff`, `external`, or
-`system`. A missing value is stored as unknown. It is not treated as
-`owner`. A conclusion whose source messages are all `external` is returned
-with `source_trust` `external`, and that text is left out of the peer card.
+`system`. In production a missing value is refused. A conclusion is
+`external` when any source message or any premise is `external`. Derived
+conclusions, dreams, and digests inherit that taint. Peer cards are built
+only from conclusions that are not external.
 
 ## Retrieval
 
@@ -160,20 +167,25 @@ half of the search. A keyword match is still returned.
 `SENTICA_DECAY_INTERVAL_DAYS` defaults to 30. An unused conclusion halves
 its weight once per interval. `SENTICA_DECAY_FLOOR` defaults to 0.05. A
 weight below that is soft-deleted. `SENTICA_DECAY_RETENTION_DAYS` defaults
-to 30. Soft-deleted conclusions are purged after that. A retrieval or a use
-resets the clock. The reconciler runs this pass at most once an hour.
+to 30. Soft-deleted conclusions are purged after that. A use resets the
+clock. Decay runs as one queue work unit per workspace. A value that is
+not a positive number is refused.
 
 ## Workspace synthesis
 
-`PUT /v3/workspaces/{workspace_id}/synthesis` sets `sentica_synthesis` on
-the workspace. A missing value means synthesis is on, including for a
-restricted workspace. `false` stops new daily and weekly dreams and does
-not delete earlier ones. A daily digest is written once per UTC date. A
-weekly insight is written once per ISO week, from the daily digests.
+`PUT /v3/workspaces/{workspace_id}/synthesis` sets `sentica_synthesis` and
+`dream.enabled` on the workspace. A missing value means synthesis is on,
+including for a restricted workspace. `false` stops new daily and weekly
+dreams and the upstream dreamer, and does not delete earlier ones. A daily
+digest is written once per UTC date. A weekly insight is written once per
+ISO week, from the latest seven daily digests. Digests are read at
+`GET /v3/workspaces/{workspace_id}/digests`.
 
 ## Safety model check
 
-`SENTICA_SAFETY_MODEL_CHECK` is off unless it is `1`, `true`, `yes`, or
-`on`. When it is on, a conclusion that passes the rules is checked again
-by the summary model. A yes answer, a missing workspace, or a failed call
-drops the conclusion. The check does not switch to another model.
+`SENTICA_SAFETY_MODEL_CHECK` is on in production unless it is `0`, `false`,
+`no`, or `off`. Any other value is refused. When it is on, a conclusion,
+summary, or digest that passes the rules is checked again by the summary
+model. A yes answer, a missing workspace, an open database session, or a
+failed call holds the text. It is not stored. The check does not switch
+to another model.

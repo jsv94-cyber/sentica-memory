@@ -51,6 +51,7 @@ def _production(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         "SENTICA_TOKEN_ISSUER": "sentica-broker",
         "SENTICA_BIND_HOST": "127.0.0.1",
         "SENTICA_GATEWAY_MODE": "on",
+        "SENTICA_TENANT_HASH_KEY": "sentica-test-tenant-hash-key-32b!!",
         "HOME": str(tmp_path),
     }
     for key, value in env.items():
@@ -352,6 +353,7 @@ def test_slow_llm_chat_streams_fully(
     for path in ("client.crt", "client.key", "ca.crt"):
         (tmp_path / path).write_text("present\n", encoding="utf-8")
     monkeypatch.setenv("SENTICA_MODE", "production")
+    monkeypatch.setenv("SENTICA_TENANT_HASH_KEY", "sentica-test-tenant-hash-key-32b!!")
     monkeypatch.setenv("SENTICA_TENANT_ID", "tenant-a")
     monkeypatch.setenv("SENTICA_DB_PROXY_HOST", "pgbouncer")
     monkeypatch.setenv("SENTICA_DB_PROXY_PORT", "6432")

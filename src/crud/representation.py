@@ -125,11 +125,25 @@ class RepresentationManager:
 
         # Normalize before the emptiness check: str.strip() does not remove
         # NUL, so content that normalizes away has to be dropped afterwards.
+        from src.sentica.dreams import inference_enabled
+
+        async with tracked_db("representation.synthesis", read_only=True) as db:
+            workspace_row = await db.scalar(
+                select(models.Workspace).where(
+                    models.Workspace.name == self.workspace_name
+                )
+            )
+            synthesis_on = workspace_row is not None and inference_enabled(
+                workspace_row.configuration
+            )
+        source_observations: list[ExplicitObservation | DeductiveObservation] = []
+        if synthesis_on:
+            source_observations.extend(representation.deductive)
+        source_observations.extend(representation.explicit)
         all_observations = [
             normalized
             for normalized in (
-                _normalized_observation(obs)
-                for obs in representation.deductive + representation.explicit
+                _normalized_observation(obs) for obs in source_observations
             )
             if _observation_text(normalized)
         ]
@@ -257,7 +271,16 @@ class RepresentationManager:
             deduplicate=settings.DERIVER.DEDUPLICATE,
         )
 
-        if message_level_configuration.dream.enabled:
+        from src.sentica.dreams import inference_enabled
+
+        workspace = await db.scalar(
+            select(models.Workspace).where(models.Workspace.name == self.workspace_name)
+        )
+        if (
+            message_level_configuration.dream.enabled
+            and workspace is not None
+            and inference_enabled(workspace.configuration)
+        ):
             try:
                 await check_and_schedule_dream(db, collection)
             except Exception as e:

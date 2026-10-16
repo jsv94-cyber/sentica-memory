@@ -16,7 +16,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 from nanoid import generate as generate_nanoid
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -44,7 +44,6 @@ _CONTRADICTION = re.compile(
     r"\b(no longer|never|instead|does not|do not|is not|isn't|not)\b",
     re.IGNORECASE,
 )
-_last_scheduled: datetime | None = None
 
 
 def decay_interval() -> timedelta:
@@ -68,10 +67,16 @@ def _positive_float(name: str, default: float) -> float:
         return default
     try:
         value = float(raw)
-    except ValueError:
-        return default
+    except ValueError as exc:
+        from src.exceptions import ValidationException
+
+        raise ValidationException(
+            "Refusing to start: " + name + " is not a number"
+        ) from exc
     if value <= 0:
-        return default
+        from src.exceptions import ValidationException
+
+        raise ValidationException("Refusing to start: " + name + " must be positive")
     return value
 
 
@@ -102,13 +107,26 @@ def _aware(value: datetime) -> datetime:
 async def mark_subject_changed(
     db: AsyncSession, workspace_name: str, subject_ref: str
 ) -> int:
-    """Flag every live conclusion for this subject as stale."""
+    """Flag every live conclusion for this subject as stale, including copies."""
+    from sqlalchemy import or_
+
+    sources = (
+        select(models.Document.id)
+        .where(models.Document.workspace_name == workspace_name)
+        .where(models.Document.subject_ref == subject_ref)
+    )
+    copied_from = models.Document.internal_metadata["copied_from"].astext
     result = await db.execute(
         update(models.Document)
         .where(models.Document.workspace_name == workspace_name)
-        .where(models.Document.subject_ref == subject_ref)
         .where(models.Document.deleted_at.is_(None))
         .where(models.Document.superseded_by.is_(None))
+        .where(
+            or_(
+                models.Document.subject_ref == subject_ref,
+                copied_from.in_(sources),
+            )
+        )
         .values(stale=True)
     )
     await db.commit()
@@ -191,16 +209,29 @@ async def _note(
 ) -> None:
     if not document_ids:
         return
-    values: dict[str, Any] = {"last_used_at": func.now()}
-    if used:
-        values["used_count"] = models.Document.used_count + 1
-    else:
-        values["retrieved_count"] = models.Document.retrieved_count + 1
+    ids = sorted(set(document_ids))
+    table = models.Document.__table__
+    qualified = f"{table.schema}.{table.name}" if table.schema else table.name
+    assignment = (
+        "last_used_at = now(), used_count = used_count + 1, decayed_at = now()"
+        if used
+        else "last_used_at = now(), retrieved_count = retrieved_count + 1"
+    )
+    # Literal SQL so the lock order is the statement the database runs.
+    # A SQLAlchemy CTE drops FOR UPDATE SKIP LOCKED.
+    statement = f"""
+        WITH locked_conclusions AS (
+            SELECT id FROM {qualified}
+            WHERE workspace_name = :workspace_name AND id = ANY(:ids)
+            ORDER BY id FOR UPDATE SKIP LOCKED
+        )
+        UPDATE {qualified} SET {assignment}
+        WHERE workspace_name = :workspace_name
+          AND id IN (SELECT id FROM locked_conclusions)
+    """
     await db.execute(
-        update(models.Document)
-        .where(models.Document.workspace_name == workspace_name)
-        .where(models.Document.id.in_(sorted(document_ids)))
-        .values(**values)
+        text(statement),
+        {"workspace_name": workspace_name, "ids": ids},
     )
     await db.commit()
 
@@ -208,35 +239,56 @@ async def _note(
 async def apply_decay(db: AsyncSession, *, workspace_name: str, now: datetime) -> int:
     """Halve unused weights and soft-delete anything under the floor.
 
-    One call applies every interval that has elapsed since the last decay,
-    so a clock jump of two intervals halves twice.
+    One server-side UPDATE applies every elapsed interval. It does not lock
+    rows ahead of the write.
     """
     interval = decay_interval()
     floor = decay_floor()
     now = _aware(now)
-    rows = list(
-        await db.scalars(
-            select(models.Document)
-            .where(models.Document.workspace_name == workspace_name)
-            .where(models.Document.deleted_at.is_(None))
-            .where(models.Document.superseded_by.is_(None))
-            .order_by(models.Document.id)
-        )
+    table = models.Document.__table__
+    qualified = f"{table.schema}.{table.name}" if table.schema else table.name
+    result = await db.execute(
+        text(
+            f"""
+            UPDATE {qualified} AS document
+            SET
+                weight = document.weight * power(0.5, stepped.steps),
+                decayed_at = stepped.anchor
+                    + make_interval(secs => :interval_seconds * stepped.steps),
+                deleted_at = CASE
+                    WHEN document.weight * power(0.5, stepped.steps) < :floor
+                    THEN :now
+                    ELSE document.deleted_at
+                END
+            FROM (
+                SELECT
+                    id,
+                    COALESCE(decayed_at, last_used_at, created_at) AS anchor,
+                    floor(
+                        EXTRACT(
+                            EPOCH FROM (
+                                :now - COALESCE(decayed_at, last_used_at, created_at)
+                            )
+                        ) / :interval_seconds
+                    )::integer AS steps
+                FROM {qualified}
+                WHERE workspace_name = :workspace_name
+                    AND deleted_at IS NULL
+                    AND superseded_by IS NULL
+            ) AS stepped
+            WHERE document.id = stepped.id
+                AND document.workspace_name = :workspace_name
+                AND stepped.steps >= 1
+            """
+        ),
+        {
+            "workspace_name": workspace_name,
+            "now": now,
+            "floor": floor,
+            "interval_seconds": interval.total_seconds(),
+        },
     )
-    changed = 0
-    for row in rows:
-        anchor = _aware(row.decayed_at or row.last_used_at or row.created_at)
-        steps = int((now - anchor).total_seconds() // interval.total_seconds())
-        if steps < 1:
-            continue
-        weight = float(row.weight)
-        for _ in range(steps):
-            weight = weight / 2
-        row.weight = weight
-        row.decayed_at = anchor + (interval * steps)
-        if weight < floor:
-            row.deleted_at = now
-        changed += 1
+    changed = int(getattr(result, "rowcount", 0) or 0)
     await db.commit()
     from src.sentica.ops_metrics import note_decay
 
@@ -258,7 +310,7 @@ async def purge_expired(db: AsyncSession, *, workspace_name: str, now: datetime)
     )
     if not ids:
         return 0
-    await _delete_documents(db, ids)
+    await _delete_documents(db, ids, workspace_name=workspace_name)
     await db.commit()
     from src.sentica.ops_metrics import note_prune
 
@@ -286,23 +338,39 @@ async def forget(
             )
         )
     )
+    documents = await _with_descendants(db, workspace_name, documents)
+    texts = [document.content for document in documents if document.content]
     message_ids, public_ids = _message_keys(documents)
+    known_earliest = _earliest_deleted_messages(documents)
+    session_names = {
+        document.session_name
+        for document in documents
+        if document.session_name is not None
+    }
     if peer_name is not None:
         peer_messages = (
-            await db.execute(
-                select(models.Message.id, models.Message.public_id).where(
-                    models.Message.workspace_name == workspace_name,
-                    models.Message.peer_name == peer_name,
-                )
-            )
+            await db.execute(_peer_message_stmt(workspace_name, peer_name))
         ).all()
         for message_id, public_id in peer_messages:
             message_ids.add(int(message_id))
             public_ids.add(str(public_id))
     embedding_count = await _count_embeddings(db, workspace_name, public_ids)
-    summary_count = await _scrub_summaries(db, workspace_name, message_ids)
+    summary_count = await _scrub_summaries(
+        db,
+        workspace_name,
+        message_ids,
+        texts=texts,
+        session_names=session_names,
+        known_earliest=known_earliest,
+    )
+    forgotten_ids = {document.id for document in documents}
+    await _scrub_digests(db, workspace_name, texts, forgotten_ids)
     await _delete_messages(db, workspace_name, message_ids)
-    await _delete_documents(db, [document.id for document in documents])
+    await _delete_documents(
+        db, [document.id for document in documents], workspace_name=workspace_name
+    )
+    pairs = {(document.observer, document.observed) for document in documents}
+    await _rebuild_cards(db, workspace_name, pairs)
     record = DeletionCounts(
         id=generate_nanoid(),
         peer_name=peer_name,
@@ -316,30 +384,48 @@ async def forget(
     return record
 
 
+def identifier_hash(value: str) -> str:
+    """HMAC-SHA256 of an identifier with this tenant's key. The name is not stored."""
+    import hashlib
+    import hmac
+
+    from src.sentica.runtime import tenant_hash_key
+
+    digest = hmac.new(tenant_hash_key(), value.encode(), hashlib.sha256)
+    return digest.hexdigest()
+
+
 async def _store_deletion(
     db: AsyncSession, workspace_name: str, record: DeletionCounts
 ) -> None:
-    workspace = await db.scalar(
-        select(models.Workspace).where(models.Workspace.name == workspace_name)
+    db.add(
+        models.DeletionRecord(
+            id=record.id,
+            workspace_name=workspace_name,
+            peer_hash=(
+                identifier_hash(record.peer_name)
+                if record.peer_name is not None
+                else None
+            ),
+            subject_hash=(
+                identifier_hash(record.subject_ref)
+                if record.subject_ref is not None
+                else None
+            ),
+            document_count=record.document_count,
+            embedding_count=record.embedding_count,
+            summary_count=record.summary_count,
+            legacy=False,
+        )
     )
-    if workspace is None:
-        return
-    raw_meta: Any = workspace.internal_metadata or {}
-    metadata = cast(dict[str, Any], raw_meta) if isinstance(raw_meta, dict) else {}
-    existing = metadata.get("deletion_records")
-    records = cast(list[object], existing) if isinstance(existing, list) else []
-    stored = {
-        "id": record.id,
-        "peer_name": record.peer_name,
-        "subject_ref": record.subject_ref,
-        "document_count": record.document_count,
-        "embedding_count": record.embedding_count,
-        "summary_count": record.summary_count,
-    }
-    updated = dict(metadata)
-    updated["deletion_records"] = [*records, stored]
-    workspace.internal_metadata = updated
-    flag_modified(workspace, "internal_metadata")
+
+
+def _peer_message_stmt(workspace_name: str, peer_name: str) -> Any:
+    """Messages owned by one peer in one workspace."""
+    return select(models.Message.id, models.Message.public_id).where(
+        models.Message.workspace_name == workspace_name,
+        models.Message.peer_name == peer_name,
+    )
 
 
 def _target_documents(
@@ -356,6 +442,141 @@ def _target_documents(
     )
 
 
+async def _with_descendants(
+    db: AsyncSession, workspace_name: str, documents: list[models.Document]
+) -> list[models.Document]:
+    """Include provenance children and scope copies of the forgotten rows."""
+    from sqlalchemy import or_
+
+    found: dict[str, models.Document] = {
+        document.id: document for document in documents
+    }
+    frontier: set[str] = set(found)
+    while frontier:
+        linked = list(
+            await db.scalars(
+                select(models.Document)
+                .where(models.Document.workspace_name == workspace_name)
+                .where(
+                    models.Document.id.in_(
+                        select(models.DocumentSource.derived_id).where(
+                            models.DocumentSource.workspace_name == workspace_name,
+                            models.DocumentSource.source_id.in_(sorted(frontier)),
+                        )
+                    )
+                )
+            )
+        )
+        copied_from = models.Document.internal_metadata["copied_from"].astext
+        premise_ids = models.Document.internal_metadata["premise_ids"]
+        metadata_sources = models.Document.internal_metadata["source_ids"]
+        legacy_clauses = [
+            models.Document.legacy_source_ids.contains([item]) for item in frontier
+        ]
+        premise_clauses = [premise_ids.contains([item]) for item in sorted(frontier)]
+        source_clauses = [
+            metadata_sources.contains([item]) for item in sorted(frontier)
+        ]
+        extra_filters = [copied_from.in_(sorted(frontier))]
+        extra_filters.extend(legacy_clauses)
+        extra_filters.extend(premise_clauses)
+        extra_filters.extend(source_clauses)
+        copied = list(
+            await db.scalars(
+                select(models.Document)
+                .where(models.Document.workspace_name == workspace_name)
+                .where(or_(*extra_filters))
+            )
+        )
+        frontier = set[str]()
+        for row in [*linked, *copied]:
+            if row.id not in found:
+                found[row.id] = row
+                frontier.add(row.id)
+    return list(found.values())
+
+
+async def _rebuild_cards(
+    db: AsyncSession,
+    workspace_name: str,
+    pairs: set[tuple[str, str]],
+) -> None:
+    """Rebuild cards from the conclusions that remain. Model text is not kept."""
+    from src.crud.peer_card import replace_peer_card_from_conclusions
+
+    for observer, observed in sorted(pairs):
+        await replace_peer_card_from_conclusions(
+            db,
+            workspace_name,
+            observer=observer,
+            observed=observed,
+        )
+
+
+async def _scrub_digests(
+    db: AsyncSession,
+    workspace_name: str,
+    texts: list[str],
+    document_ids: set[str],
+) -> None:
+    forgotten = set(document_ids)
+    changed = True
+    while changed:
+        changed = False
+        rows = list(
+            await db.scalars(
+                select(models.DreamDigest)
+                .where(models.DreamDigest.workspace_name == workspace_name)
+                .order_by(models.DreamDigest.id)
+            )
+        )
+        for row in rows:
+            sources = {str(item) for item in row.source_ids or []}
+            contains = any(text and text in row.content for text in texts)
+            if contains or sources & forgotten:
+                forgotten.add(row.id)
+                await db.delete(row)
+                changed = True
+        if changed:
+            await db.flush()
+
+
+def _message_number(item: object) -> int | None:
+    if isinstance(item, bool):
+        return None
+    if isinstance(item, int):
+        return item
+    if isinstance(item, float) and item.is_integer():
+        return int(item)
+    if isinstance(item, str) and item.isdigit():
+        return int(item)
+    return None
+
+
+def _earliest_deleted_messages(documents: list[models.Document]) -> dict[str, int]:
+    """Earliest cited message id in each session, from the forgotten rows."""
+    earliest: dict[str, int] = {}
+    for document in documents:
+        session_name = document.session_name
+        if not isinstance(session_name, str) or not session_name:
+            continue
+        raw_meta: Any = document.internal_metadata or {}
+        if not isinstance(raw_meta, dict):
+            continue
+        metadata = cast(dict[str, Any], raw_meta)
+        raw_ids = metadata.get("message_ids")
+        if not isinstance(raw_ids, list):
+            continue
+        for item in cast(list[object], raw_ids):
+            number = _message_number(item)
+            if number is None:
+                continue
+            current = earliest.get(session_name)
+            if current is None or number < current:
+                earliest[session_name] = number
+    return earliest
+
+
 def _message_keys(
     documents: list[models.Document],
 ) -> tuple[set[int], set[str]]:
@@ -369,8 +590,9 @@ def _message_keys(
         raw_ids = metadata.get("message_ids")
         if isinstance(raw_ids, list):
             for item in cast(list[object], raw_ids):
-                if isinstance(item, int):
-                    message_ids.add(item)
+                number = _message_number(item)
+                if number is not None:
+                    message_ids.add(number)
         raw_public = metadata.get("message_public_ids")
         if isinstance(raw_public, list):
             for item in cast(list[object], raw_public):
@@ -394,10 +616,33 @@ async def _count_embeddings(
 
 
 async def _scrub_summaries(
-    db: AsyncSession, workspace_name: str, message_ids: set[int]
+    db: AsyncSession,
+    workspace_name: str,
+    message_ids: set[int],
+    *,
+    texts: list[str] | None = None,
+    session_names: set[str] | None = None,
+    known_earliest: dict[str, int] | None = None,
 ) -> int:
-    if not message_ids:
+    if not message_ids and not texts:
         return 0
+    earliest_by_session: dict[str, int] = {}
+    if message_ids:
+        located = await db.execute(
+            select(models.Message.id, models.Message.session_name)
+            .where(models.Message.workspace_name == workspace_name)
+            .where(models.Message.id.in_(sorted(message_ids)))
+            .order_by(models.Message.id)
+        )
+        for message_id, session_name in located:
+            current = earliest_by_session.get(str(session_name))
+            numbered = int(message_id)
+            if current is None or numbered < current:
+                earliest_by_session[str(session_name)] = numbered
+    for session_name, message_id in (known_earliest or {}).items():
+        current = earliest_by_session.get(session_name)
+        if current is None or message_id < current:
+            earliest_by_session[session_name] = message_id
     removed = 0
     sessions = list(
         await db.scalars(
@@ -416,14 +661,22 @@ async def _scrub_summaries(
             continue
         kept: dict[str, Any] = {}
         session_removed = 0
+        cutoff = earliest_by_session.get(session.name)
+        in_scope = cutoff is not None or session.name in (session_names or set())
         summary_map = cast(dict[object, object], summaries)
         for key, value in summary_map.items():
-            message_id = (
-                cast(dict[str, Any], value).get("message_id")
-                if isinstance(value, dict)
-                else None
+            payload = cast(dict[str, Any], value) if isinstance(value, dict) else {}
+            message_id = _message_number(payload.get("message_id"))
+            content = payload.get("content")
+            contains_deleted = (
+                in_scope
+                and isinstance(content, str)
+                and any(text and text in content for text in texts or [])
             )
-            if isinstance(message_id, int) and message_id in message_ids:
+            covers_deleted = (
+                cutoff is not None and message_id is not None and message_id >= cutoff
+            )
+            if covers_deleted or contains_deleted:
                 session_removed += 1
                 continue
             kept[str(key)] = value
@@ -456,26 +709,44 @@ async def _delete_messages(
     )
 
 
-async def _delete_documents(db: AsyncSession, document_ids: list[str]) -> None:
+async def _delete_documents(
+    db: AsyncSession, document_ids: list[str], *, workspace_name: str
+) -> None:
     if not document_ids:
         return
     ids = sorted(document_ids)
+    from sqlalchemy import or_
+
     await db.execute(
         delete(models.DocumentSource).where(
-            models.DocumentSource.derived_id.in_(ids)
-            | models.DocumentSource.source_id.in_(ids)
+            models.DocumentSource.workspace_name == workspace_name,
+            or_(
+                models.DocumentSource.derived_id.in_(ids),
+                models.DocumentSource.source_id.in_(ids),
+            ),
         )
     )
-    await db.execute(delete(models.Document).where(models.Document.id.in_(ids)))
+    await db.execute(
+        delete(models.Document).where(
+            models.Document.workspace_name == workspace_name,
+            models.Document.id.in_(ids),
+        )
+    )
+
+
+async def run_decay(workspace_name: str, *, now: datetime | None = None) -> None:
+    """Decay and purge one workspace. The queue claims this once."""
+    from src.dependencies import tracked_db
+
+    clock = now or datetime.now(UTC)
+    async with tracked_db("freshness.decay") as db:
+        await apply_decay(db, workspace_name=workspace_name, now=clock)
+        await purge_expired(db, workspace_name=workspace_name, now=clock)
 
 
 async def decay_due_workspaces() -> None:
-    """Run decay and purge for every workspace, at most once an hour."""
-    global _last_scheduled
+    """Run decay and purge for every workspace."""
     now = datetime.now(UTC)
-    if _last_scheduled is not None and now - _last_scheduled < timedelta(hours=1):
-        return
-    _last_scheduled = now
     from src.dependencies import tracked_db
     from src.sentica.workspace_scope import reset_workspace, set_workspace
 

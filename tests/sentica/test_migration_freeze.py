@@ -463,3 +463,167 @@ async def test_upgrade_from_merged_head_ignores_dream_settings(
             conn.execute(
                 sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(runtime_role))
             )
+
+
+def test_deletion_backfill_round_trips_without_a_name_hash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Downgrade restores the JSON. Upgrade stores a legacy row with a null hash."""
+    import hashlib
+    import json
+
+    admin = _admin_url()
+    token = uuid.uuid4().hex[:8]
+    runtime_role = "m2h" + token
+    ddl_role = runtime_role + "_ddl"
+    database = "m2hash_" + token
+    password = admin.password
+    schema = settings.DB.SCHEMA
+    previous_uri = settings.DB.CONNECTION_URI
+    record_id = "legacyrecord000000001"
+    secret = "secret-peer-name"
+    plain = hashlib.sha256(secret.encode()).hexdigest()
+    try:
+        with psycopg.connect(_sync(admin), autocommit=True) as conn:
+            if password is None:
+                conn.execute(
+                    sql.SQL("CREATE ROLE {} LOGIN NOBYPASSRLS").format(
+                        sql.Identifier(runtime_role)
+                    )
+                )
+                conn.execute(
+                    sql.SQL("CREATE ROLE {} LOGIN NOBYPASSRLS").format(
+                        sql.Identifier(ddl_role)
+                    )
+                )
+            else:
+                conn.execute(
+                    sql.SQL("CREATE ROLE {} LOGIN PASSWORD {} NOBYPASSRLS").format(
+                        sql.Identifier(runtime_role), sql.Literal(password)
+                    )
+                )
+                conn.execute(
+                    sql.SQL("CREATE ROLE {} LOGIN PASSWORD {} NOBYPASSRLS").format(
+                        sql.Identifier(ddl_role), sql.Literal(password)
+                    )
+                )
+            conn.execute(
+                sql.SQL("CREATE DATABASE {} OWNER {}").format(
+                    sql.Identifier(database), sql.Identifier(ddl_role)
+                )
+            )
+        created = admin.set(database=database)
+        with psycopg.connect(_sync(created), autocommit=True) as conn:
+            conn.execute(
+                sql.SQL("CREATE SCHEMA IF NOT EXISTS {} AUTHORIZATION {}").format(
+                    sql.Identifier(schema), sql.Identifier(ddl_role)
+                )
+            )
+            conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+            conn.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+        ddl_url = created.set(
+            drivername="postgresql+psycopg",
+            username=ddl_role,
+            password=password,
+        ).render_as_string(hide_password=False)
+        settings.DB.CONNECTION_URI = ddl_url
+        os.environ["DB_CONNECTION_URI"] = ddl_url
+        monkeypatch.setenv("DB_CONNECTION_URI", ddl_url)
+        cfg = Config(str(ROOT / "alembic.ini"))
+        cfg.set_main_option("script_location", str(ROOT / "migrations"))
+        cfg.set_main_option("sqlalchemy.url", ddl_url)
+        command.upgrade(cfg, "b8e3c1a94d20")
+        name = "w" + token
+        metadata = json.dumps(
+            {
+                "deletion_records": [
+                    {
+                        "id": record_id,
+                        "peer_name": secret,
+                        "document_count": 2,
+                        "embedding_count": 1,
+                        "summary_count": 0,
+                    }
+                ]
+            }
+        )
+        with psycopg.connect(
+            _sync(created.set(username=ddl_role, password=password)),
+            autocommit=True,
+        ) as conn:
+            conn.execute("SELECT set_config('sentica.workspace', %s, false)", (name,))
+            conn.execute(
+                sql.SQL(
+                    "INSERT INTO {}.workspaces (id, name, internal_metadata) VALUES (%s, %s, %s::jsonb)"
+                ).format(sql.Identifier(schema)),
+                (generate_nanoid(), name, metadata),
+            )
+        command.upgrade(cfg, "c9d4e2a71b58")
+
+        def _row() -> tuple[object, ...]:
+            with psycopg.connect(
+                _sync(created.set(username=ddl_role, password=password)),
+                autocommit=True,
+            ) as conn:
+                conn.execute(
+                    "SELECT set_config('sentica.workspace', %s, false)", (name,)
+                )
+                found = conn.execute(
+                    sql.SQL(
+                        "SELECT peer_hash, subject_hash, legacy, document_count "
+                        + "FROM {}.deletion_records WHERE id = %s"
+                    ).format(sql.Identifier(schema)),
+                    (record_id,),
+                ).fetchone()
+            assert found is not None
+            return found
+
+        stored = _row()
+        assert stored[0] is None
+        assert stored[1] is None
+        assert stored[2] is True
+        assert stored[3] == 2
+        assert secret not in str(stored)
+        assert plain not in str(stored)
+        command.downgrade(cfg, "b8e3c1a94d20")
+        with psycopg.connect(
+            _sync(created.set(username=ddl_role, password=password)),
+            autocommit=True,
+        ) as conn:
+            conn.execute("SELECT set_config('sentica.workspace', %s, false)", (name,))
+            restored = conn.execute(
+                sql.SQL(
+                    "SELECT internal_metadata->'deletion_records' "
+                    + "FROM {}.workspaces WHERE name = %s"
+                ).format(sql.Identifier(schema)),
+                (name,),
+            ).fetchone()
+        assert restored is not None
+        payload = restored[0]
+        assert isinstance(payload, list)
+        assert payload[0]["id"] == record_id
+        assert payload[0]["document_count"] == 2
+        assert payload[0]["legacy"] is True
+        assert secret not in json.dumps(payload)
+        assert plain not in json.dumps(payload)
+        command.upgrade(cfg, "c9d4e2a71b58")
+        again = _row()
+        assert again[0] is None
+        assert again[2] is True
+        assert plain not in str(again)
+    finally:
+        settings.DB.CONNECTION_URI = previous_uri
+        if previous_uri:
+            os.environ["DB_CONNECTION_URI"] = previous_uri
+        with psycopg.connect(_sync(admin), autocommit=True) as conn:
+            conn.execute(
+                sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(
+                    sql.Identifier(database)
+                )
+            )
+            conn.execute(
+                sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(ddl_role))
+            )
+            conn.execute(
+                sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(runtime_role))
+            )

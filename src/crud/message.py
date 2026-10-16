@@ -408,6 +408,14 @@ async def create_messages(
     # keeps ingesting. Must stay *before* get_or_create_session below: that call
     # would create the scope peer and add it with a default SessionPeerConfig(),
     # clobbering its observe_others=True/observe_me=False membership config.
+    from src.exceptions import ValidationException
+    from src.sentica.runtime import production_enabled
+
+    if production_enabled() and any(
+        message.source_trust is None for message in messages
+    ):
+        raise ValidationException("source_trust is required")
+
     await reject_scope_peers(
         db,
         workspace_name,

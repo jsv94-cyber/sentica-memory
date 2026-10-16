@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import Any, cast
+from typing import Any
 
 from fastapi.testclient import TestClient
 from sqlalchemy import select
@@ -65,17 +65,24 @@ def _fake(prompts: list[str], content_for: Any):
 async def _dreams(
     db_session: AsyncSession, workspace_name: str
 ) -> list[dict[str, Any]]:
-    workspace = (
+    rows = (
         await db_session.scalars(
-            select(models.Workspace).where(models.Workspace.name == workspace_name)
+            select(models.DreamDigest)
+            .where(models.DreamDigest.workspace_name == workspace_name)
+            .order_by(models.DreamDigest.period.asc(), models.DreamDigest.id.asc())
         )
-    ).one()
-    await db_session.refresh(workspace)
-    raw = workspace.internal_metadata.get("dreams")
-    if not isinstance(raw, list):
-        return []
-    rows = cast("list[object]", raw)
-    return [cast("dict[str, Any]", item) for item in rows if isinstance(item, dict)]
+    ).all()
+    return [
+        {
+            "id": row.id,
+            "kind": row.kind,
+            "period": row.period,
+            "content": row.content,
+            "skipped": row.skipped,
+            "workspace_name": row.workspace_name,
+        }
+        for row in rows
+    ]
 
 
 async def test_weekly_insight_cites_daily_digests(
@@ -194,8 +201,12 @@ async def test_banned_inference_is_not_stored(
     monkeypatch.setattr("src.llm.api.honcho_llm_call", banned)
     reset_drops()
     created = await run_dreams(workspace.name, now=datetime(2026, 10, 12, tzinfo=UTC))
-    assert created == []
-    assert await _dreams(db_session, workspace.name) == []
+    assert created
+    assert all(item["content"] == "" and item["skipped"] for item in created)
+    stored = await _dreams(db_session, workspace.name)
+    assert stored
+    assert all(item["content"] == "" for item in stored)
+    assert all("diabetic" not in item["content"] for item in stored)
     assert drops() == 1
 
 

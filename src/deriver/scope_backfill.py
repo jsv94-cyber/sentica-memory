@@ -89,6 +89,7 @@ class _CopySpec:
     times_derived: int
     source_ids: list[str] | None
     session_name: str
+    subject_ref: str | None = None
     restore_document_id: str | None = None
 
 
@@ -189,6 +190,7 @@ async def _run_backfill(
                     models.Document.times_derived,
                     models.Document.internal_metadata,
                     models.Document.session_name,
+                    models.Document.subject_ref,
                     # source_ids falls back to this column for undrained rows.
                     models.Document.legacy_source_ids,
                     models.Document.deleted_at,
@@ -262,6 +264,7 @@ async def _run_backfill(
                     if source.source_ids is not None
                     else None,
                     session_name=session_name,
+                    subject_ref=source.subject_ref,
                     restore_document_id=soft_deleted_copies.get(key),
                 )
             )
@@ -374,6 +377,7 @@ async def _copy_chunk(
                     COPIED_FROM_KEY: spec.source_id,
                 },
                 session_name=spec.session_name,
+                subject_ref=spec.subject_ref,
                 source_ids=spec.source_ids,
                 embedding=spec.embedding if store_in_postgres else None,
             )

@@ -513,7 +513,7 @@ class Document(Base):
 
     @property
     def source_trust(self) -> str | None:
-        """``external`` when every source message was external."""
+        """``external`` when any source was external."""
         raw = (self.internal_metadata or {}).get("source_trust")
         if raw in {"owner", "staff", "external", "system"}:
             return str(raw)
@@ -745,6 +745,75 @@ class SessionPeer(Base):
     left_at: Mapped[datetime.datetime | None]
 
 
+@final
+class DreamDigest(Base):
+    """One daily or weekly digest for a workspace. Not workspace metadata."""
+
+    __tablename__: str = "dream_digests"
+
+    id: Mapped[str] = mapped_column(TEXT, primary_key=True)
+    workspace_name: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.name"), nullable=False, index=True
+    )
+    kind: Mapped[str] = mapped_column(TEXT, nullable=False)
+    period: Mapped[str] = mapped_column(TEXT, nullable=False)
+    content: Mapped[str] = mapped_column(TEXT, nullable=False)
+    source_ids: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    tokens: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    external: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    skipped: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_name", "kind", "period", name="dream_digests_workspace_period"
+        ),
+        CheckConstraint("kind IN ('daily', 'weekly')", name="dream_digests_kind_valid"),
+        CheckConstraint("length(id) = 21", name="dream_digests_id_length"),
+    )
+
+
+@final
+class DeletionRecord(Base):
+    """Counts for one hard delete. Identifiers are hashes, never names."""
+
+    __tablename__: str = "deletion_records"
+
+    id: Mapped[str] = mapped_column(TEXT, primary_key=True)
+    workspace_name: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.name"), nullable=False, index=True
+    )
+    peer_hash: Mapped[str | None] = mapped_column(TEXT, nullable=True)
+    subject_hash: Mapped[str | None] = mapped_column(TEXT, nullable=True)
+    document_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    embedding_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    summary_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    legacy: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        CheckConstraint("length(id) = 21", name="deletion_records_id_length"),
+    )
+
+
 from src.sentica.queue import install_queue_stamp  # noqa: E402
+from src.sentica.workspace_metadata import (  # noqa: E402
+    install_workspace_metadata_guard,
+)
 
 install_queue_stamp(QueueItem)
+install_workspace_metadata_guard(Workspace)

@@ -90,23 +90,7 @@ async def set_peer_card(
 
     from src.sentica.safety import banned_category
 
-    external_rows = (
-        await db.execute(
-            select(models.Document.content).where(
-                models.Document.workspace_name == workspace_name,
-                models.Document.observer == observer,
-                models.Document.observed == observed,
-                models.Document.deleted_at.is_(None),
-                models.Document.internal_metadata["source_trust"].astext == "external",
-            )
-        )
-    ).scalars()
-    blocked = {row.strip() for row in external_rows}
-    peer_card = [
-        line
-        for line in peer_card
-        if banned_category(line) is None and line.strip() not in blocked
-    ]
+    peer_card = [line for line in peer_card if banned_category(line) is None]
 
     # Ensure the peer exists (get-or-create)
     peers_result = await get_or_create_peers(
@@ -138,6 +122,45 @@ async def set_peer_card(
     # Invalidate cache - read-through pattern
     cache_key = peer_cache_key(workspace_name, observer)
     await safe_cache_delete(cache_key)
+
+
+def card_trust_clauses() -> list[Any]:
+    """Keep a conclusion off the card when its trust is missing or external."""
+    trust = models.Document.internal_metadata["source_trust"].astext
+    return [trust.is_not(None), trust != "external"]
+
+
+async def replace_peer_card_from_conclusions(
+    db: AsyncSession,
+    workspace_name: str,
+    *,
+    observer: str,
+    observed: str,
+) -> list[str]:
+    """Rebuild a card from untainted conclusions. External text never lands on it."""
+    statement = (
+        select(models.Document.content)
+        .where(models.Document.workspace_name == workspace_name)
+        .where(models.Document.observer == observer)
+        .where(models.Document.observed == observed)
+        .where(models.Document.deleted_at.is_(None))
+        .where(models.Document.superseded_by.is_(None))
+        .order_by(models.Document.created_at.asc(), models.Document.id.asc())
+    )
+    for clause in card_trust_clauses():
+        statement = statement.where(clause)
+    rows = (await db.scalars(statement)).all()
+    await set_peer_card(
+        db,
+        workspace_name,
+        [str(row) for row in rows],
+        observer=observer,
+        observed=observed,
+    )
+    stored = await get_peer_card(
+        db, workspace_name, observer=observer, observed=observed
+    )
+    return stored or []
 
 
 def construct_peer_card_label(*, observer: str, observed: str) -> str:

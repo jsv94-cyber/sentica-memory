@@ -68,6 +68,7 @@ _RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
 
 _LOCK = threading.Lock()
 _DROPS: dict[str, int] = {}
+_UNPARSEABLE: dict[str, int] = {}
 
 
 def banned_category(text: str) -> str | None:
@@ -103,49 +104,144 @@ def drops(tenant: str | None = None) -> int:
         return _DROPS.get(key, 0)
 
 
+def note_unparseable() -> None:
+    """Count a drop caused by an unparseable safety reply, not by a ban."""
+    tenant = _tenant()
+    with _LOCK:
+        _UNPARSEABLE[tenant] = _UNPARSEABLE.get(tenant, 0) + 1
+
+
+def unparseable_drops(tenant: str | None = None) -> int:
+    """How many conclusions were dropped because the reply was not yes or no."""
+    key = tenant if tenant is not None else _tenant()
+    with _LOCK:
+        return _UNPARSEABLE.get(key, 0)
+
+
 def reset_drops() -> None:
     """Clear counters. Tests call this between cases."""
     with _LOCK:
         _DROPS.clear()
+        _UNPARSEABLE.clear()
 
 
 def model_check_enabled() -> bool:
-    """Return whether the optional second check is on."""
-    raw = os.environ.get("SENTICA_SAFETY_MODEL_CHECK", "").strip().lower()
-    return raw in {"1", "true", "yes", "on"}
+    """On in production unless explicitly turned off. Malformed values refuse."""
+    from src.exceptions import ValidationException
+    from src.sentica.runtime import production_enabled
 
-
-async def model_check_bans(text: str, *, workspace_name: str | None) -> bool:
-    """Ask the configured model when the optional check is on.
-
-    A missing workspace, a transport failure, or a yes answer drops the text.
-    The text itself is not logged.
-    """
-    if not model_check_enabled():
-        return False
-    if not workspace_name:
-        logger.warning("Safety model check refused a conclusion with no workspace")
+    raw = os.environ.get("SENTICA_SAFETY_MODEL_CHECK")
+    if raw is None or raw.strip() == "":
+        return production_enabled()
+    value = raw.strip().lower()
+    if value in {"1", "true", "yes", "on"}:
         return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    raise ValidationException(
+        "Refusing to start: SENTICA_SAFETY_MODEL_CHECK is not a boolean"
+    )
+
+
+def is_safety_outage(exc: BaseException) -> bool:
+    """True when the queue item must be retried instead of dropping the text."""
+    return _propagates(exc)
+
+
+def _propagates(exc: BaseException) -> bool:
+    """Outages retry the queue item. They do not drop the conclusion."""
+    from src.exceptions import GatewayBudgetExceeded, GatewayUnavailable
+
+    if isinstance(exc, (GatewayUnavailable, GatewayBudgetExceeded)):
+        return True
+    try:
+        import redis.exceptions as redis_errors
+    except ImportError:
+        return False
+    return isinstance(exc, redis_errors.RedisError)
+
+
+def _unparseable_failure(exc: BaseException) -> bool:
+    """A gateway validation error, a malformed 200, or a 4xx is not a ban."""
+    from src.exceptions import ValidationException
+
+    if isinstance(exc, ValidationException):
+        return True
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int) and 400 <= status < 500:
+        return True
+    response = getattr(exc, "response", None)
+    code = getattr(response, "status_code", None)
+    return isinstance(code, int) and 400 <= code < 500
+
+
+def _classify(answer: str) -> str:
+    folded = answer.strip().casefold()
+    if folded.startswith("yes"):
+        return "yes"
+    if folded.startswith("no"):
+        return "no"
+    return "unparseable"
+
+
+async def _ask(prompt: str, *, workspace_name: str) -> str:
     from src.config import settings
     from src.llm.api import honcho_llm_call
     from src.llm.types import LLMTelemetryContext
 
-    try:
-        response = await honcho_llm_call(
-            model_config=settings.SUMMARY.MODEL_CONFIG,
-            prompt="Reply yes if the conclusion states or implies a health condition, sexual orientation or activity, religion, political view, immigration status, criminal history, personal finances, or a medical reason for leave. Reply no otherwise.\n\n"
-            + text,
-            max_tokens=8,
-            telemetry=LLMTelemetryContext(
-                workspace_name=workspace_name,
-                call_purpose="summary.safety",
-                parent_category="summary",
-            ),
-        )
-    except Exception:
-        logger.warning("Safety model check failed closed")
-        return True
-    return response.content.strip().casefold().startswith("yes")
+    response = await honcho_llm_call(
+        model_config=settings.SUMMARY.MODEL_CONFIG,
+        prompt=prompt,
+        max_tokens=8,
+        telemetry=LLMTelemetryContext(
+            workspace_name=workspace_name,
+            call_purpose="summary.safety",
+            parent_category="summary",
+        ),
+    )
+    return response.content
+
+
+async def model_check_bans(text: str, *, workspace_name: str | None) -> str:
+    """Ask the configured model when the optional check is on.
+
+    Returns ``yes``, ``no``, or ``unparseable``. Only ``yes`` is a ban.
+    An unparseable reply, a gateway validation error, a malformed 200, or a
+    4xx is asked once more and then dropped with the unparseable counter.
+    Gateway, budget, and Redis errors propagate. Any other exception is
+    raised and is not counted as a ban. The prompt is this line only.
+    An open database session is a programming error.
+    """
+    if not model_check_enabled():
+        return "no"
+    if not workspace_name:
+        logger.warning("Safety model check refused a conclusion with no workspace")
+        return "yes"
+    from src.dependencies import open_db_sessions
+
+    if open_db_sessions() > 0:
+        raise RuntimeError("Refusing the safety check: a database session is open")
+    prompt = (
+        "Reply yes if the conclusion states or implies a health condition, "
+        + "sexual orientation or activity, religion, political view, "
+        + "immigration status, criminal history, personal finances, or a "
+        + "medical reason for leave. Reply no otherwise.\n\n"
+        + text
+    )
+    verdict = "unparseable"
+    for _attempt in range(2):
+        try:
+            verdict = _classify(await _ask(prompt, workspace_name=workspace_name))
+        except Exception as exc:
+            if _propagates(exc):
+                raise
+            if _unparseable_failure(exc):
+                verdict = "unparseable"
+            else:
+                raise
+        if verdict != "unparseable":
+            return verdict
+    return verdict
 
 
 async def keep_conclusion(text: str, *, workspace_name: str | None) -> bool:
@@ -155,8 +251,13 @@ async def keep_conclusion(text: str, *, workspace_name: str | None) -> bool:
         logger.info("Dropped a conclusion category=%s", category)
         note_drop(category)
         return False
-    if await model_check_bans(text, workspace_name=workspace_name):
+    verdict = await model_check_bans(text, workspace_name=workspace_name)
+    if verdict == "yes":
         logger.info("Dropped a conclusion category=%s", "model")
         note_drop("model")
+        return False
+    if verdict == "unparseable":
+        logger.info("Dropped a conclusion category=%s", "unparseable")
+        note_unparseable()
         return False
     return True

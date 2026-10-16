@@ -117,7 +117,7 @@ Each entry must start with one of these four prefixes (exact case, followed by a
 
 ### Migrating an existing peer card
 
-The CURRENT PEER CARD shown in the user message may contain entries from an older format that do not start with an allowed prefix (e.g. `Name: Alice`, `Lives in NYC`, `TRAIT: Analytical`, `PREFERENCE: Detailed explanations`). When you call `update_peer_card`, you are responsible for re-emitting the entries you want to keep — entries you omit are dropped, and entries without an allowed prefix are silently rejected.
+The CURRENT PEER CARD shown in the user message may contain entries from an older format that do not start with an allowed prefix (e.g. `Name: Alice`, `Lives in NYC`, `TRAIT: Analytical`, `PREFERENCE: Detailed explanations`). The card is rebuilt from untainted conclusions after this run. Do not write the card yourself.
 
 For each legacy entry:
 
@@ -130,7 +130,7 @@ For each legacy entry:
 
 When in doubt about a specific legacy entry, prefer migrating it (so valid info isn't lost) over dropping it. Splitting one dense legacy entry into multiple correctly-prefixed entries is fine and encouraged (e.g. a semicolon-separated `Tech Stack:` dump can become several `ATTRIBUTE:` lines, one per durable tool/platform).
 
-Call `update_peer_card` with the complete deduplicated list when there is a durable identity update to record, or when the existing card needs migration. Entries that do not start with one of the four allowed prefixes will be rejected. Keep concise (max 40 entries)."""
+Do not write the peer card. A later step rebuilds it from untainted conclusions. Entries that do not start with one of the four allowed prefixes are not identity markers. Keep concise (max 40 entries)."""
 
 
 def custom_instructions_prompt(
@@ -190,7 +190,7 @@ class BaseSpecialist(ABC):
     inject_peer_card: bool = True
     # Subclasses can override to customize the peer card update instruction
     peer_card_update_instruction: str = (
-        "Only update this with durable identity markers via `update_peer_card`."
+        "Do not write the peer card. It is rebuilt from untainted conclusions."
     )
 
     @abstractmethod
@@ -368,6 +368,7 @@ If you update it, send the full deduplicated list and remove stale entries.
             ]
 
             # Create tool executor with telemetry context
+            specialist_tools = self.get_tools(peer_card_enabled=peer_card_enabled)
             tool_executor: Callable[
                 [str, dict[str, Any]], Any
             ] = await create_tool_executor(
@@ -380,6 +381,11 @@ If you update it, send the full deduplicated list and remove stale entries.
                 run_id=run_id,
                 agent_type=self.name,
                 parent_category="dream",
+                offered={
+                    name
+                    for tool in specialist_tools
+                    if isinstance((name := tool.get("name")), str)
+                },
             )
 
             model_config = self.get_model_config()
@@ -399,36 +405,45 @@ If you update it, send the full deduplicated list and remove stale entries.
             # closed CallPurpose enum slugs without importing the enum here.
             call_purpose_slug = f"dream.{self.name}"
 
-            # Run the agent loop
-            response = await honcho_llm_call(
-                model_config=model_config,
-                prompt="",  # Ignored since we pass messages
-                max_tokens=effective_max_tokens,
-                tools=self.get_tools(peer_card_enabled=peer_card_enabled),
-                tool_choice=None,
-                tool_executor=tool_executor,
-                max_tool_iterations=self.get_max_iterations(),
-                messages=messages,
-                telemetry=LLMTelemetryContext(
-                    workspace_name=workspace_name,
-                    call_purpose=call_purpose_slug,
-                    parent_category="dream",
-                    agent_type=self.name,
-                    run_id=run_id,
-                    # Root span per specialist run (distinct span_id, see above).
-                    # parent_span_id stays None for now; wiring specialists as
-                    # children of a dream-level trace is forking (out of scope).
-                    trace_id=run_id,
-                    span_id=span_id,
-                    observer=observer,
-                    observed=observed,
-                    track_name=f"Dreamer/{self.name}",
-                    observers=[observer],
-                    session_id=session_id,
-                    queue_item_ids=[queue_item_id] if queue_item_id is not None else [],
-                    custom_instructions=injected_instructions.strip() or None,
-                ),
+            # Run the agent loop. A tainted input taints every conclusion
+            # this run writes, including ones that cite only clean sources.
+            from src.sentica.taint import bind_run_trust, collection_run_trust
+
+            run_trust = await collection_run_trust(
+                workspace_name, observer=observer, observed=observed
             )
+            with bind_run_trust(run_trust):
+                response = await honcho_llm_call(
+                    model_config=model_config,
+                    prompt="",  # Ignored since we pass messages
+                    max_tokens=effective_max_tokens,
+                    tools=specialist_tools,
+                    tool_choice=None,
+                    tool_executor=tool_executor,
+                    max_tool_iterations=self.get_max_iterations(),
+                    messages=messages,
+                    telemetry=LLMTelemetryContext(
+                        workspace_name=workspace_name,
+                        call_purpose=call_purpose_slug,
+                        parent_category="dream",
+                        agent_type=self.name,
+                        run_id=run_id,
+                        # Root span per specialist run (distinct span_id, see above).
+                        # parent_span_id stays None for now; wiring specialists as
+                        # children of a dream-level trace is forking (out of scope).
+                        trace_id=run_id,
+                        span_id=span_id,
+                        observer=observer,
+                        observed=observed,
+                        track_name=f"Dreamer/{self.name}",
+                        observers=[observer],
+                        session_id=session_id,
+                        queue_item_ids=[queue_item_id]
+                        if queue_item_id is not None
+                        else [],
+                        custom_instructions=injected_instructions.strip() or None,
+                    ),
+                )
 
             # Log metrics
             duration_ms = (time.perf_counter() - start_time) * 1000
@@ -587,7 +602,7 @@ class DeductionSpecialist(BaseSpecialist):
     """
 
     name: str = "deduction"
-    peer_card_update_instruction: str = "Update this with `update_peer_card` only for stable identity markers. See the PEER CARD section in the system prompt for the allowed entry kinds and rules."
+    peer_card_update_instruction: str = "Do not write the peer card. It is rebuilt from untainted conclusions after this run."
 
     def get_tools(self, *, peer_card_enabled: bool = True) -> list[dict[str, Any]]:
         if peer_card_enabled:
@@ -868,7 +883,7 @@ class CardRefreshSpecialist(BaseSpecialist):
     """
 
     name: str = "card_refresh"
-    peer_card_update_instruction: str = "Update this with `update_peer_card`. See the PEER CARD section in the system prompt for the allowed entry kinds and rules."
+    peer_card_update_instruction: str = "Do not write the peer card. It is rebuilt from untainted conclusions after this run."
 
     # Low iteration ceiling for this lightweight, single-purpose run.
     MAX_ITERATIONS_CEILING: int = 6
@@ -920,13 +935,12 @@ The existing peer card is deliberately NOT shown to you: it may contain entries 
 
 ## YOUR JOB
 
-Refresh the peer card and nothing else. You cannot create or delete observations — you have no tools for that. Your only write operation is `update_peer_card`.
+Survey observations and nothing else. You cannot create or delete observations, and you do not write the peer card. A later step rebuilds it from untainted conclusions.
 
 ## PROCESS
 
 1. Survey the observation space: start with `get_recent_observations`, then use `search_memory` for targeted follow-ups (names, roles, locations, standing instructions).
-2. Extract stable identity markers supported by the observations you found.
-3. Call `update_peer_card` once with the complete deduplicated list.
+2. Stop. Do not write the card.
 
 Keep it short — a handful of tool calls at most.{rebuild_section}
 {PEER_CARD_SYSTEM_SECTION}"""
@@ -947,13 +961,13 @@ Keep it short — a handful of tool calls at most.{rebuild_section}
         if self.rebuild:
             return f"""{target_observee_context}Rebuild the peer card from scratch.
 
-The previous card is not shown and must not be assumed: reconstruct the card solely from observations currently in the collection. Start with `get_recent_observations`, verify with `search_memory` where needed, then call `update_peer_card` with the complete list.
+The previous card is not shown and must not be assumed. Survey observations with `get_recent_observations` and `search_memory`. Do not write the card.
 
 Go."""
 
         return f"""{target_observee_context}{peer_card_context}Refresh the peer card.
 
-Review recent observations with `get_recent_observations` (and `search_memory` for targeted checks), then call `update_peer_card` with the complete deduplicated list if there is anything to add, correct, or migrate. If the card is already accurate and complete, finish without updating it.
+Review recent observations with `get_recent_observations` and `search_memory`. Do not write the card. It is rebuilt from untainted conclusions after this run.
 
 Go."""
 

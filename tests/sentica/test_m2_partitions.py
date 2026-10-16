@@ -26,6 +26,32 @@ def _run(conn: Any, statement: str, params: tuple[object, ...] = ()) -> Any:
     return conn.execute(statement, params)
 
 
+def _store_own_card(client: Any, workspace: str, peer: str, lines: list[str]) -> None:
+    """Seed the observer's own card. Production refuses the HTTP write."""
+    from src.sentica.runtime import production_enabled
+
+    if not production_enabled():
+        stored = client.put(
+            f"/v3/workspaces/{workspace}/peers/{peer}/card",
+            json={"peer_card": lines},
+        )
+        assert stored.status_code == 200, stored.text
+        return
+    from tests.sentica.rls_job import runtime_dsn
+
+    payload = json.dumps({"peer_card": lines})
+    with psycopg.connect(runtime_dsn()) as conn:
+        conn.execute("SELECT set_config('sentica.workspace', %s, true)", (workspace,))
+        statement = (
+            "UPDATE peers SET internal_metadata = "
+            + "COALESCE(internal_metadata, '{}'::jsonb) || %s::jsonb "
+            + "WHERE workspace_name = %s AND name = %s"
+        )
+        updated = conn.execute(statement, (payload, workspace, peer))
+        assert updated.rowcount == 1
+        conn.commit()
+
+
 def test_runtime_role_cannot_cross_workspaces(
     db_session: object, worker_id: str
 ) -> None:
@@ -168,6 +194,21 @@ def test_runtime_role_cannot_cross_workspaces(
                     "http://" + workspace + ".example",
                 ),
             )
+            conn.execute(
+                """
+                INSERT INTO dream_digests (id, workspace_name, kind, period, content)
+                VALUES (%s, %s, 'daily', '2026-10-01', 'digest')
+                """,
+                (("g" + uuid.uuid4().hex)[:21], workspace),
+            )
+            conn.execute(
+                """
+                INSERT INTO deletion_records (
+                    id, workspace_name, document_count, embedding_count, summary_count
+                ) VALUES (%s, %s, 1, 0, 0)
+                """,
+                (("h" + uuid.uuid4().hex)[:21], workspace),
+            )
         covered = {
             "collections",
             "document_sources",
@@ -179,6 +220,8 @@ def test_runtime_role_cannot_cross_workspaces(
             "session_peers",
             "sessions",
             "webhook_endpoints",
+            "dream_digests",
+            "deletion_records",
         }
         tables = [
             row[0]
@@ -288,6 +331,8 @@ def test_runtime_role_cannot_cross_workspaces(
             "webhook_endpoints",
             "peers",
             "sessions",
+            "dream_digests",
+            "deletion_records",
         ):
             _run(
                 conn,
@@ -318,6 +363,8 @@ def _prove_migrated_runtime_isolation() -> None:
         "session_peers",
         "sessions",
         "webhook_endpoints",
+        "dream_digests",
+        "deletion_records",
     }
     with psycopg.connect(runtime_dsn()) as conn:
         for workspace, workspace_id in ((left, left_id), (right, right_id)):
@@ -407,6 +454,21 @@ def _prove_migrated_runtime_isolation() -> None:
                     workspace,
                     "http://" + workspace + ".example",
                 ),
+            )
+            conn.execute(
+                """
+                INSERT INTO dream_digests (id, workspace_name, kind, period, content)
+                VALUES (%s, %s, 'daily', '2026-10-01', 'digest')
+                """,
+                (("g" + uuid.uuid4().hex)[:21], workspace),
+            )
+            conn.execute(
+                """
+                INSERT INTO deletion_records (
+                    id, workspace_name, document_count, embedding_count, summary_count
+                ) VALUES (%s, %s, 1, 0, 0)
+                """,
+                (("h" + uuid.uuid4().hex)[:21], workspace),
             )
             conn.commit()
         tables = [
@@ -505,6 +567,8 @@ def _prove_migrated_runtime_isolation() -> None:
                 "webhook_endpoints",
                 "peers",
                 "sessions",
+                "dream_digests",
+                "deletion_records",
             ):
                 _run(
                     conn,
@@ -537,11 +601,7 @@ def test_cached_card_for_r_is_not_served_without_r(
         assert client.post(
             f"/v3/workspaces/{name}/peers", json={"name": "ada"}
         ).status_code in (200, 201)
-    stored = client.put(
-        f"/v3/workspaces/{right}/peers/ada/card",
-        json={"peer_card": [canary]},
-    )
-    assert stored.status_code == 200, stored.text
+    _store_own_card(client, right, "ada", [canary])
     warmed = client.get(f"/v3/workspaces/{right}/peers/ada/card")
     assert warmed.status_code == 200, warmed.text
     assert canary in warmed.text
@@ -607,6 +667,7 @@ def test_removing_a_workspace_from_the_token_refuses_the_next_request(
     monkeypatch.setenv("SENTICA_TOKEN_ISSUER", "sentica-broker")
     monkeypatch.setenv("SENTICA_BIND_HOST", "127.0.0.1")
     monkeypatch.setenv("SENTICA_GATEWAY_MODE", "on")
+    monkeypatch.setenv("SENTICA_TENANT_HASH_KEY", "sentica-test-tenant-hash-key-32b!!")
     monkeypatch.setenv("HOME", str(root))
     for name in (
         "DB_CONNECTION_URI",
@@ -695,6 +756,7 @@ def test_production_refuses_external_vector_stores(
     monkeypatch.setenv("SENTICA_TOKEN_ISSUER", "sentica-broker")
     monkeypatch.setenv("SENTICA_BIND_HOST", "127.0.0.1")
     monkeypatch.setenv("SENTICA_GATEWAY_MODE", "on")
+    monkeypatch.setenv("SENTICA_TENANT_HASH_KEY", "sentica-test-tenant-hash-key-32b!!")
     monkeypatch.setenv("HOME", str(root))
     monkeypatch.setenv("VECTOR_STORE_TYPE", store)
     for name in (
@@ -729,7 +791,9 @@ def test_search_tags_each_workspace(client: object) -> None:
         assert peer.status_code in (200, 201), peer.text
     stored = client.post(
         f"/v3/workspaces/{right}/sessions/s1/messages",
-        json={"messages": [{"content": canary, "peer_id": "p1"}]},
+        json={
+            "messages": [{"content": canary, "peer_id": "p1", "source_trust": "owner"}]
+        },
     )
     assert stored.status_code in (200, 201), stored.text
     searched = client.post(
@@ -790,19 +854,19 @@ async def test_canary_written_only_to_r_stays_out_of_other_workspaces(
         ).status_code in (200, 201)
     assert client.post(
         f"/v3/workspaces/{left}/sessions/s1/messages",
-        json={"messages": [{"content": "local hello", "peer_id": "p1"}]},
+        json={
+            "messages": [
+                {"content": "local hello", "peer_id": "p1", "source_trust": "owner"}
+            ]
+        },
     ).status_code in (200, 201)
     assert client.post(
         f"/v3/workspaces/{right}/sessions/s1/messages",
-        json={"messages": [{"content": canary, "peer_id": "p1"}]},
+        json={
+            "messages": [{"content": canary, "peer_id": "p1", "source_trust": "owner"}]
+        },
     ).status_code in (200, 201)
-    assert (
-        client.put(
-            f"/v3/workspaces/{right}/peers/p1/card",
-            json={"peer_card": [canary]},
-        ).status_code
-        == 200
-    )
+    _store_own_card(client, right, "p1", [canary])
     bound = set_workspace(right)
     try:
         db_session.add(
@@ -960,6 +1024,8 @@ async def test_canary_written_only_to_r_stays_out_of_other_workspaces(
         )
         if formatted.get("type") == "json_schema":
             return chat_message('{"explicit":[{"content":"local hello"}]}')
+        if "Reply yes if the conclusion" in json.dumps(body):
+            return chat_message("no")
         return chat_message("ok")
 
     gateway = MockGateway(_decide, dimensions=width, strict=True)
@@ -1200,7 +1266,9 @@ def test_harness_flags_the_canary_when_the_request_includes_its_workspace(
     ).status_code in (200, 201)
     assert client.post(
         f"/v3/workspaces/{name}/sessions/s1/messages",
-        json={"messages": [{"content": canary, "peer_id": "p1"}]},
+        json={
+            "messages": [{"content": canary, "peer_id": "p1", "source_trust": "owner"}]
+        },
     ).status_code in (200, 201)
     recorded: list[str] = []
 
@@ -1256,7 +1324,11 @@ def test_membership_noop_lets_the_canary_through(
     ).status_code in (200, 201)
     stored = client.post(
         f"/v3/workspaces/{name}/sessions/s1/messages",
-        json={"messages": [{"content": canary, "peer_id": "owner"}]},
+        json={
+            "messages": [
+                {"content": canary, "peer_id": "owner", "source_trust": "owner"}
+            ]
+        },
     )
     assert stored.status_code in (200, 201), stored.text
     previous_auth = settings.AUTH.USE_AUTH
@@ -1319,12 +1391,18 @@ def test_search_scope_is_resolved_per_workspace(client: object) -> None:
     authorize(client, [left, right], primary=left)
     stored = client.post(
         f"/v3/workspaces/{right}/sessions/beta/messages",
-        json={"messages": [{"content": canary, "peer_id": "p1"}]},
+        json={
+            "messages": [{"content": canary, "peer_id": "p1", "source_trust": "owner"}]
+        },
     )
     assert stored.status_code in (200, 201), stored.text
     decoy = client.post(
         f"/v3/workspaces/{right}/sessions/alpha/messages",
-        json={"messages": [{"content": "ordinary", "peer_id": "p1"}]},
+        json={
+            "messages": [
+                {"content": "ordinary", "peer_id": "p1", "source_trust": "owner"}
+            ]
+        },
     )
     assert decoy.status_code in (200, 201), decoy.text
     searched = client.post(
@@ -1370,11 +1448,8 @@ async def test_cold_cache_returns_each_peer_card(
         assert client.post(
             f"/v3/workspaces/{name}/peers", json={"name": "p1"}
         ).status_code in (200, 201)
-        stored = client.put(
-            f"/v3/workspaces/{name}/peers/p1/card",
-            json={"peer_card": [left_fact if name == left else right_fact]},
-        )
-        assert stored.status_code == 200, stored.text
+        fact = left_fact if name == left else right_fact
+        _store_own_card(client, name, "p1", [fact])
     await safe_cache_delete(peer_cache_key(left, "p1"))
     await safe_cache_delete(peer_cache_key(right, "p1"))
     opened: list[str] = []
@@ -1455,6 +1530,9 @@ def _broker_headers(monkeypatch: pytest.MonkeyPatch, tmp_path: object):
         for name in ("client.crt", "client.key", "ca.crt"):
             (root / name).write_text("present\n", encoding="utf-8")
         monkeypatch.setenv("SENTICA_MODE", "production")
+        monkeypatch.setenv(
+            "SENTICA_TENANT_HASH_KEY", "sentica-test-tenant-hash-key-32b!!"
+        )
         monkeypatch.setenv("SENTICA_TENANT_ID", "tenant-a")
         monkeypatch.setenv("SENTICA_DB_PROXY_HOST", "pgbouncer")
         monkeypatch.setenv("SENTICA_DB_PROXY_PORT", "6432")
@@ -1631,7 +1709,11 @@ async def _message_layer(
         ).status_code in (200, 201)
         posted = client.post(
             f"/v3/workspaces/{name}/sessions/s1/messages",
-            json={"messages": [{"content": content, "peer_id": "p1"}]},
+            json={
+                "messages": [
+                    {"content": content, "peer_id": "p1", "source_trust": "owner"}
+                ]
+            },
         )
         assert posted.status_code in (200, 201), posted.text
 
@@ -1806,8 +1888,20 @@ async def test_crud_filter_removed_disabled_rls_shows_the_canary(
     await _message_layer(client, monkeypatch, worker_id, db_engine, disable_rls=True)
 
 
-async def _seed_canary_pair(client: object, db_session: object) -> tuple[str, str, str]:
-    """Two workspaces. The canary lives only in the second."""
+def _vector() -> list[float]:
+    from src.config import settings
+
+    return [0.25] * settings.EMBEDDING.VECTOR_DIMENSIONS
+
+
+async def _seed_canary_pair(
+    client: object,
+    db_session: object,
+    *,
+    subject_ref: str = "customer:1",
+    peer: str = "p1",
+) -> tuple[str, str, str]:
+    """Two workspaces. The canary lives only in the second, with an embedding."""
     from sqlalchemy.ext.asyncio import AsyncSession
     from starlette.testclient import TestClient
 
@@ -1820,6 +1914,7 @@ async def _seed_canary_pair(client: object, db_session: object) -> tuple[str, st
     left = "a" + uuid.uuid4().hex[:8]
     right = "r" + uuid.uuid4().hex[:8]
     canary = "secretcanary" + uuid.uuid4().hex
+    vector = _vector()
     for name, text in ((left, "local hello"), (right, canary)):
         authorize(client, [left, right], primary=name)
         assert client.post("/v3/workspaces", json={"name": name}).status_code in (
@@ -1830,27 +1925,32 @@ async def _seed_canary_pair(client: object, db_session: object) -> tuple[str, st
             f"/v3/workspaces/{name}/sessions", json={"id": "s1"}
         ).status_code in (200, 201)
         assert client.post(
-            f"/v3/workspaces/{name}/peers", json={"name": "p1"}
+            f"/v3/workspaces/{name}/peers", json={"name": peer}
         ).status_code in (200, 201)
         posted = client.post(
             f"/v3/workspaces/{name}/sessions/s1/messages",
-            json={"messages": [{"content": text, "peer_id": "p1"}]},
+            json={
+                "messages": [
+                    {"content": text, "peer_id": peer, "source_trust": "owner"}
+                ]
+            },
         )
         assert posted.status_code in (200, 201), posted.text
         bound = set_workspace(name)
         try:
             db_session.add(
-                models.Collection(observer="p1", observed="p1", workspace_name=name)
+                models.Collection(observer=peer, observed=peer, workspace_name=name)
             )
             await db_session.commit()
             db_session.add(
                 models.Document(
                     content=text,
-                    observer="p1",
-                    observed="p1",
+                    observer=peer,
+                    observed=peer,
                     workspace_name=name,
                     session_name="s1",
-                    subject_ref="customer:1",
+                    subject_ref=subject_ref,
+                    embedding=vector,
                 )
             )
             await db_session.commit()
@@ -1860,101 +1960,404 @@ async def _seed_canary_pair(client: object, db_session: object) -> tuple[str, st
     return left, right, canary
 
 
+def _relax_rls(*tables: str) -> Any:
+    """Disable row-level security for a negative control, then restore it."""
+    from contextlib import contextmanager
+
+    from src.config import settings
+    from tests.sentica.rls_job import ddl_dsn, rls_job
+
+    @contextmanager
+    def _window() -> Any:
+        if not rls_job():
+            yield
+            return
+        schema = settings.DB.SCHEMA
+        if not schema.replace("_", "").isalnum():
+            raise RuntimeError("unexpected schema")
+
+        def _apply(enabled: bool) -> None:
+            verb = "ENABLE" if enabled else "DISABLE"
+            force = "FORCE" if enabled else "NO FORCE"
+            with psycopg.connect(ddl_dsn(), autocommit=True) as conn:
+                # The request session must already be idle. A short lock
+                # timeout turns a leftover transaction into a failure.
+                _run(conn, "SET lock_timeout = '5s'")
+                for table in tables:
+                    _run(
+                        conn,
+                        'ALTER TABLE "'
+                        + schema
+                        + '"."'
+                        + table
+                        + '" '
+                        + force
+                        + " ROW LEVEL SECURITY",
+                    )
+                    _run(
+                        conn,
+                        'ALTER TABLE "'
+                        + schema
+                        + '"."'
+                        + table
+                        + '" '
+                        + verb
+                        + " ROW LEVEL SECURITY",
+                    )
+
+        _apply(False)
+        try:
+            yield
+        finally:
+            _apply(True)
+
+    return _window()
+
+
+async def _release_locks(db_session: object) -> None:
+    """End the caller's transaction so RLS DDL can take its lock."""
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    if isinstance(db_session, AsyncSession):
+        await db_session.commit()
+
+
+async def _one_document(
+    db_session: Any, workspace_name: str, content: str
+) -> dict[str, Any] | None:
+    from sqlalchemy import select
+
+    from src import models
+    from src.sentica.workspace_scope import reset_workspace, set_workspace
+
+    bound = set_workspace(workspace_name)
+    try:
+        db_session.expire_all()
+        row = await db_session.scalar(
+            select(models.Document).where(
+                models.Document.workspace_name == workspace_name,
+                models.Document.content == content,
+            )
+        )
+        found = None
+        if row is not None:
+            found = {
+                "stale": bool(row.stale),
+                "content": row.content,
+                "embedding": row.embedding is not None,
+            }
+        await db_session.commit()
+        return found
+    finally:
+        reset_workspace(bound)
+
+
+async def _one_message(
+    db_session: Any, workspace_name: str, content: str
+) -> str | None:
+    from sqlalchemy import select
+
+    from src import models
+    from src.sentica.workspace_scope import reset_workspace, set_workspace
+
+    bound = set_workspace(workspace_name)
+    try:
+        db_session.expire_all()
+        row = await db_session.scalar(
+            select(models.Message).where(
+                models.Message.workspace_name == workspace_name,
+                models.Message.content == content,
+            )
+        )
+        content_text = None if row is None else str(row.content)
+        await db_session.commit()
+        return content_text
+    finally:
+        reset_workspace(bound)
+
+
 def _captured(server: Any) -> str:
     return json.dumps(server.records)
+
+
+def _unscoped_documents(
+    workspace_name: str,
+    observer: str,
+    observed: str,
+    *,
+    subject_ref: str | None = None,
+    since: object = None,
+) -> Any:
+    """The brief scope with the workspace predicate removed."""
+    from sqlalchemy import select
+
+    from src import models
+
+    del workspace_name
+    stmt = (
+        select(models.Document)
+        .where(models.Document.observer == observer)
+        .where(models.Document.observed == observed)
+        .where(models.Document.deleted_at.is_(None))
+        .where(models.Document.superseded_by.is_(None))
+    )
+    if subject_ref:
+        stmt = stmt.where(models.Document.subject_ref == subject_ref)
+    if since is not None:
+        stmt = stmt.where(models.Document.created_at >= since)
+    return stmt
 
 
 async def test_brief_stays_inside_the_callers_workspace(
     client: object, db_session: object, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A brief for A does not embed or return the other workspace's canary."""
+    """A brief with no query uses _recent and stays inside the workspace."""
     from starlette.testclient import TestClient
 
-    from tests.sentica.mock_gateway import (
-        MockGateway,
-        apply_gateway_env,
-        forbid_provider_sdks,
-        use_real_embeddings,
-    )
-
     assert isinstance(client, TestClient)
-    left, _right, canary = await _seed_canary_pair(client, db_session)
-    gateway = MockGateway(strict=True)
-    apply_gateway_env(monkeypatch, gateway.start())
-    forbid_provider_sdks(monkeypatch)
-    use_real_embeddings(monkeypatch)
-    try:
-        response = client.post(
-            f"/v3/workspaces/{left}/peers/p1/brief",
-            json={"token_budget": 200, "query": "local hello"},
-        )
-    finally:
-        gateway.close()
+    left, right, canary = await _seed_canary_pair(client, db_session)
+    response = client.post(
+        f"/v3/workspaces/{left}/peers/p1/brief",
+        json={"token_budget": 200},
+    )
     assert response.status_code == 200, response.text
-    blob = response.text + _captured(gateway)
-    assert canary not in blob
-    assert gateway.records
+    body = response.json()
+    contents = [item["content"] for item in body["conclusions"]]
+    assert "local hello" in contents
+    assert canary not in contents
+    assert canary not in response.text
+    stored = await _one_document(db_session, right, canary)
+    assert stored is not None
+    assert stored["embedding"] is True
+
+    monkeypatch.setattr("src.sentica.retrieval._scoped", _unscoped_documents)
+    await _release_locks(db_session)
+    with _relax_rls("documents"):
+        leaked = client.post(
+            f"/v3/workspaces/{left}/peers/p1/brief",
+            json={"token_budget": 200},
+        )
+        await _release_locks(db_session)
+    assert leaked.status_code == 200, leaked.text
+    assert canary in leaked.text
 
 
 async def test_subject_change_and_deletion_leave_no_canary_text(
     client: object, db_session: object, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Change and deletion responses are counts. They do not carry the canary."""
+    """Counts stay exact. The other workspace's rows are not touched."""
+    from sqlalchemy import select, update
     from starlette.testclient import TestClient
 
-    from tests.sentica.mock_gateway import (
-        MockGateway,
-        apply_gateway_env,
-        forbid_provider_sdks,
-    )
+    from src import models
 
     assert isinstance(client, TestClient)
-    left, _right, canary = await _seed_canary_pair(client, db_session)
-    gateway = MockGateway(strict=True)
-    apply_gateway_env(monkeypatch, gateway.start())
-    forbid_provider_sdks(monkeypatch)
-    try:
-        changed = client.post(f"/v3/workspaces/{left}/subjects/customer:1/changed")
-        deleted = client.post(
-            f"/v3/workspaces/{left}/deletions",
-            json={"peer_id": "p1"},
-        )
-    finally:
-        gateway.close()
+    left, right, canary = await _seed_canary_pair(client, db_session)
+    changed = client.post(f"/v3/workspaces/{left}/subjects/customer:1/changed")
     assert changed.status_code == 200, changed.text
+    assert changed.json() == {"subject_ref": "customer:1", "stale_count": 1}
+    assert canary not in changed.text
+    left_doc = await _one_document(db_session, left, "local hello")
+    right_doc = await _one_document(db_session, right, canary)
+    right_message = await _one_message(db_session, right, canary)
+    assert left_doc is not None and left_doc["stale"] is True
+    assert right_doc is not None and right_doc["stale"] is False
+    assert right_doc["content"] == canary
+    assert right_message == canary
+
+    deleted = client.post(
+        f"/v3/workspaces/{left}/deletions",
+        json={"peer_id": "p1"},
+    )
     assert deleted.status_code == 201, deleted.text
-    blob = changed.text + deleted.text + _captured(gateway)
-    assert canary not in blob
-    assert "stale_count" in changed.text
-    assert "document_count" in deleted.text
+    assert deleted.json()["document_count"] == 1
+    assert deleted.json()["peer_name"] == "p1"
+    assert canary not in deleted.text
+    survived = await _one_document(db_session, right, canary)
+    assert survived is not None and survived["stale"] is False
+    assert survived["content"] == canary
+    assert await _one_message(db_session, right, canary) == canary
+    assert await _one_document(db_session, left, "local hello") is None
+
+    other_left, other_right, other_canary = await _seed_canary_pair(
+        client, db_session, subject_ref="customer:other", peer="p2"
+    )
+
+    async def _unscoped_changed(db: Any, workspace_name: str, subject_ref: str) -> int:
+        del workspace_name
+        result = await db.execute(
+            update(models.Document)
+            .where(models.Document.subject_ref == subject_ref)
+            .where(models.Document.deleted_at.is_(None))
+            .where(models.Document.superseded_by.is_(None))
+            .values(stale=True)
+        )
+        await db.commit()
+        return int(getattr(result, "rowcount", 0) or 0)
+
+    def _unscoped_targets(
+        workspace_name: str, *, peer_name: str | None, subject_ref: str | None
+    ) -> Any:
+        del workspace_name
+        stmt = select(models.Document)
+        if subject_ref is not None:
+            return stmt.where(models.Document.subject_ref == subject_ref)
+        return stmt.where(
+            (models.Document.observer == peer_name)
+            | (models.Document.observed == peer_name)
+        )
+
+    def _unscoped_messages(workspace_name: str, peer_name: str) -> Any:
+        del workspace_name
+        return select(models.Message.id, models.Message.public_id).where(
+            models.Message.peer_name == peer_name
+        )
+
+    async def _unscoped_delete_messages(
+        db: Any, workspace_name: str, message_ids: set[int]
+    ) -> None:
+        from sqlalchemy import delete
+
+        del workspace_name
+        if not message_ids:
+            return
+        ids = sorted(message_ids)
+        await db.execute(
+            delete(models.QueueItem).where(models.QueueItem.message_id.in_(ids))
+        )
+        await db.execute(delete(models.Message).where(models.Message.id.in_(ids)))
+
+    monkeypatch.setattr("src.routers.subjects.mark_subject_changed", _unscoped_changed)
+    await _release_locks(db_session)
+    with _relax_rls("documents", "messages", "queue"):
+        leaked_change = client.post(
+            f"/v3/workspaces/{other_left}/subjects/customer:other/changed"
+        )
+        assert leaked_change.status_code == 200, leaked_change.text
+        assert leaked_change.json()["stale_count"] == 2
+        touched = await _one_document(db_session, other_right, other_canary)
+        assert touched is not None and touched["stale"] is True
+        assert touched["content"] == other_canary
+        monkeypatch.setattr(
+            "src.sentica.freshness._target_documents", _unscoped_targets
+        )
+        monkeypatch.setattr(
+            "src.sentica.freshness._peer_message_stmt", _unscoped_messages
+        )
+
+        async def _unscoped_delete_documents(
+            db: Any, document_ids: list[str], *, workspace_name: str
+        ) -> None:
+            from sqlalchemy import delete, or_
+
+            del workspace_name
+            if not document_ids:
+                return
+            ids = sorted(document_ids)
+            await db.execute(
+                delete(models.DocumentSource).where(
+                    or_(
+                        models.DocumentSource.derived_id.in_(ids),
+                        models.DocumentSource.source_id.in_(ids),
+                    )
+                )
+            )
+            await db.execute(delete(models.Document).where(models.Document.id.in_(ids)))
+
+        monkeypatch.setattr(
+            "src.sentica.freshness._delete_messages", _unscoped_delete_messages
+        )
+        monkeypatch.setattr(
+            "src.sentica.freshness._delete_documents", _unscoped_delete_documents
+        )
+        leaked_delete = client.post(
+            f"/v3/workspaces/{other_left}/deletions",
+            json={"peer_id": "p2"},
+        )
+        await _release_locks(db_session)
+    assert leaked_delete.status_code == 201, leaked_delete.text
+    assert leaked_delete.json()["document_count"] == 2
+    assert await _one_message(db_session, other_right, other_canary) is None
+    assert await _one_document(db_session, other_right, other_canary) is None
+
+
+async def _configuration(db_session: Any, workspace_name: str) -> dict[str, Any]:
+    from sqlalchemy import select
+
+    from src import models
+    from src.sentica.workspace_scope import reset_workspace, set_workspace
+
+    bound = set_workspace(workspace_name)
+    try:
+        db_session.expire_all()
+        workspace = await db_session.scalar(
+            select(models.Workspace).where(models.Workspace.name == workspace_name)
+        )
+        assert workspace is not None
+        raw: Any = workspace.configuration or {}
+        assert isinstance(raw, dict)
+        copied = cast(dict[str, Any], raw)
+        snapshot = dict(copied)
+        await db_session.commit()
+        return snapshot
+    finally:
+        reset_workspace(bound)
 
 
 async def test_synthesis_stays_inside_the_callers_workspace(
-    client: object, db_session: object, monkeypatch: pytest.MonkeyPatch
+    client: object, db_session: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Turning synthesis on does not read the other workspace."""
+    """Turning synthesis off does not change the other workspace's configuration."""
+    from sqlalchemy import select
+    from sqlalchemy.orm.attributes import flag_modified
     from starlette.testclient import TestClient
 
-    from tests.sentica.mock_gateway import (
-        MockGateway,
-        apply_gateway_env,
-        forbid_provider_sdks,
-    )
+    from src import models
+    from src.sentica.workspace_scope import reset_workspace, set_workspace
 
     assert isinstance(client, TestClient)
-    left, _right, canary = await _seed_canary_pair(client, db_session)
-    gateway = MockGateway(strict=True)
-    apply_gateway_env(monkeypatch, gateway.start())
-    forbid_provider_sdks(monkeypatch)
+    left, right, canary = await _seed_canary_pair(client, db_session)
+    bound = set_workspace(right)
     try:
-        response = client.put(
-            f"/v3/workspaces/{left}/synthesis",
-            json={"enabled": True},
+        workspace = await db_session.scalar(
+            select(models.Workspace).where(models.Workspace.name == right)
         )
+        assert workspace is not None
+        workspace.configuration = {"note": canary}
+        flag_modified(workspace, "configuration")
+        await db_session.commit()
     finally:
-        gateway.close()
+        reset_workspace(bound)
+    before = await _configuration(db_session, right)
+    response = client.put(
+        f"/v3/workspaces/{left}/synthesis",
+        json={"enabled": False},
+    )
     assert response.status_code == 200, response.text
-    assert canary not in response.text + _captured(gateway)
+    assert canary not in response.text
+    left_config = await _configuration(db_session, left)
+    assert left_config.get("sentica_synthesis") is False
+    assert await _configuration(db_session, right) == before
+
+    async def _unscoped_synthesis(db: Any, workspace_name: str, enabled: bool) -> None:
+        del workspace_name
+        rows = (await db.scalars(select(models.Workspace))).all()
+        for row in rows:
+            configuration = dict(row.configuration or {})
+            configuration["sentica_synthesis"] = enabled
+            row.configuration = configuration
+            flag_modified(row, "configuration")
+        await db.commit()
+
+    monkeypatch.setattr("src.sentica.dreams.set_synthesis_enabled", _unscoped_synthesis)
+    leaked = client.put(
+        f"/v3/workspaces/{left}/synthesis",
+        json={"enabled": False},
+    )
+    assert leaked.status_code == 200, leaked.text
+    after = await _configuration(db_session, right)
+    assert after.get("note") == canary
+    assert after.get("sentica_synthesis") is False
 
 
 async def test_run_dreams_stays_inside_the_callers_workspace(
@@ -1973,17 +2376,21 @@ async def test_run_dreams_stays_inside_the_callers_workspace(
     gateway = MockGateway(strict=True)
     apply_gateway_env(monkeypatch, gateway.start())
     forbid_provider_sdks(monkeypatch)
+    from sqlalchemy import select
+
+    from src import models
+    from src.sentica import dreams as dreams_module
     from src.sentica.dreams import run_dreams
     from src.sentica.workspace_scope import reset_workspace, set_workspace
 
     # dreams_due sets the workspace before run_dreams. Without that setting,
     # row-level security hides the workspace and the dream never calls the model.
+
     bound = set_workspace(left)
     try:
         created = await run_dreams(left, now=datetime(2026, 10, 15, tzinfo=UTC))
     finally:
         reset_workspace(bound)
-        gateway.close()
     blob = repr(created) + _captured(gateway)
     assert "local hello" in blob
     assert canary not in blob
@@ -1992,51 +2399,33 @@ async def test_run_dreams_stays_inside_the_callers_workspace(
         for record in gateway.records
     )
 
+    def _unscoped_conclusions(workspace_name: str) -> Any:
+        del workspace_name
+        return (
+            select(
+                models.Document.id,
+                models.Document.content,
+                models.Document.internal_metadata,
+            )
+            .where(models.Document.deleted_at.is_(None))
+            .where(models.Document.superseded_by.is_(None))
+            .order_by(models.Document.created_at.desc())
+            .limit(40)
+        )
 
-async def test_safety_model_check_does_not_see_the_other_workspace(
-    client: object, db_session: object, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The safety check is given A's conclusions, loaded by workspace."""
-    from sqlalchemy import select
-    from sqlalchemy.ext.asyncio import AsyncSession
-
-    from src import models
-    from src.sentica.safety import model_check_bans
-    from src.sentica.workspace_scope import reset_workspace, set_workspace
-    from tests.sentica.mock_gateway import (
-        MockGateway,
-        apply_gateway_env,
-        forbid_provider_sdks,
+    monkeypatch.setattr(
+        dreams_module,
+        "_source_conclusion_query",
+        _unscoped_conclusions,
     )
-
-    assert isinstance(db_session, AsyncSession)
-    left, _right, canary = await _seed_canary_pair(client, db_session)
+    gateway.records.clear()
+    await _release_locks(db_session)
     bound = set_workspace(left)
     try:
-        rows = (
-            await db_session.execute(
-                select(models.Document.content)
-                .where(models.Document.workspace_name == left)
-                .where(models.Document.deleted_at.is_(None))
-                .where(models.Document.superseded_by.is_(None))
-                .order_by(models.Document.created_at.desc())
-                .limit(40)
-            )
-        ).all()
+        with _relax_rls("documents"):
+            await _release_locks(db_session)
+            leaked = await run_dreams(left, now=datetime(2026, 10, 16, tzinfo=UTC))
     finally:
         reset_workspace(bound)
-    texts = [str(row[0]) for row in rows]
-    assert texts
-    assert canary not in "\n".join(texts)
-    gateway = MockGateway(strict=True)
-    apply_gateway_env(monkeypatch, gateway.start())
-    forbid_provider_sdks(monkeypatch)
-    monkeypatch.setenv("SENTICA_SAFETY_MODEL_CHECK", "on")
-    try:
-        dropped = await model_check_bans("\n".join(texts), workspace_name=left)
-    finally:
         gateway.close()
-    assert dropped is False
-    blob = _captured(gateway)
-    assert "local hello" in blob
-    assert canary not in blob
+    assert canary in repr(leaked) + _captured(gateway)

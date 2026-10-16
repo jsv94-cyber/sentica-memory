@@ -250,6 +250,22 @@ def test_every_memory_table_has_rls_or_a_reason(
                         WHERE cols.table_schema = 'memory'
                             AND cols.table_name = c.relname
                             AND cols.column_name = 'workspace_name'
+                    ),
+                    (
+                        SELECT COALESCE(pg_get_expr(p.polqual, p.polrelid), '')
+                            || COALESCE(pg_get_expr(p.polwithcheck, p.polrelid), '')
+                        FROM pg_policy AS p
+                        WHERE p.polrelid = c.oid
+                            AND p.polname = 'sentica_workspace'
+                    ),
+                    (
+                        SELECT count(*)
+                        FROM pg_policy AS p
+                        WHERE p.polrelid = c.oid
+                            AND p.polpermissive
+                            AND p.polname NOT IN (
+                                'sentica_workspace', 'sentica_ddl_read'
+                            )
                     )
                 FROM pg_class AS c
                 JOIN pg_namespace AS n ON n.oid = c.relnamespace
@@ -267,11 +283,16 @@ def test_every_memory_table_has_rls_or_a_reason(
             forced = bool(row[2])
             has_policy = bool(row[3])
             has_workspace = bool(row[4])
+            expression = str(row[5] or "")
+            permissive = int(row[6])
             if name in TABLES_WITHOUT_WORKSPACE_RLS:
                 assert not has_workspace, name
                 continue
             assert enabled and forced and has_policy, name
             assert has_workspace, name
+            assert "workspace_name" in expression, name
+            assert "sentica.workspace" in expression, name
+            assert permissive == 0, name
     finally:
         settings.DB.CONNECTION_URI = previous_uri
         os.environ["DB_CONNECTION_URI"] = previous_uri

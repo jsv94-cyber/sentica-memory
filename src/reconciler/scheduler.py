@@ -82,6 +82,18 @@ RECONCILER_TASKS: dict[str, ReconcilerTask] = {
         payload={"reconciler_type": ReconcilerType.CLEANUP.value},
         has_pending=has_soft_deleted_documents,
     ),
+    "dreams": ReconcilerTask(
+        name="dreams",
+        work_unit_key="reconciler:dreams",
+        interval_seconds=3600,
+        payload={"reconciler_type": ReconcilerType.DREAMS.value},
+    ),
+    "decay": ReconcilerTask(
+        name="decay",
+        work_unit_key="reconciler:decay",
+        interval_seconds=3600,
+        payload={"reconciler_type": ReconcilerType.DECAY.value},
+    ),
     **{task.name: task for task in map(backfill_task, BACKFILLS.values())},
 }
 
@@ -213,12 +225,6 @@ class ReconcilerScheduler:
                 # endregion
                 await record_pending_embeddings_backlog()
                 await record_backfill_pending()
-                from src.sentica.freshness import decay_due_workspaces
-
-                await decay_due_workspaces()
-                from src.sentica.dreams import dreams_due
-
-                await dreams_due()
 
                 # Check each task and enqueue if due
                 for task_name, task in RECONCILER_TASKS.items():

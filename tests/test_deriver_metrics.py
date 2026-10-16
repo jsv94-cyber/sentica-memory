@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi import HTTPException
 
-from src import schemas
+from src import models, schemas
 from src.backlog import (
     DeriverMetricsPoller,
     DeriverMetricsSnapshot,
@@ -167,12 +167,18 @@ class TestPoller:
         assert poller.snapshot is first
 
     async def test_api_scheduler_enqueues_due_dreams(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, db_session: object
     ):
+        from sqlalchemy.ext.asyncio import AsyncSession
+
+        assert isinstance(db_session, AsyncSession)
         monkeypatch.setattr(settings.DERIVER, "SCHEDULER", "api")
         stats = schemas.DeriverMetrics()
         poller = DeriverMetricsPoller()
         due = _due_dreams(2)
+        for dream in due:
+            db_session.add(models.Workspace(name=dream.workspace_name))
+        await db_session.commit()
         enqueue = AsyncMock()
 
         with (
@@ -194,11 +200,17 @@ class TestPoller:
         assert first_call.kwargs["session_name"] == due[0].session_name
 
     async def test_api_scheduler_does_not_reenqueue_from_the_cached_list(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, db_session: object
     ):
+        from sqlalchemy.ext.asyncio import AsyncSession
+
+        assert isinstance(db_session, AsyncSession)
         monkeypatch.setattr(settings.DERIVER, "SCHEDULER", "api")
         stats = schemas.DeriverMetrics()
         poller = DeriverMetricsPoller()
+        due = _due_dreams(1)
+        db_session.add(models.Workspace(name=due[0].workspace_name))
+        await db_session.commit()
         enqueue = AsyncMock()
 
         with (
@@ -242,11 +254,18 @@ class TestPoller:
         assert poller.snapshot.dreams_due == 1
 
     async def test_one_failed_enqueue_does_not_stop_the_rest(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, db_session: object
     ):
+        from sqlalchemy.ext.asyncio import AsyncSession
+
+        assert isinstance(db_session, AsyncSession)
         monkeypatch.setattr(settings.DERIVER, "SCHEDULER", "api")
         stats = schemas.DeriverMetrics()
         poller = DeriverMetricsPoller()
+        due = _due_dreams(2)
+        for dream in due:
+            db_session.add(models.Workspace(name=dream.workspace_name))
+        await db_session.commit()
         enqueue = AsyncMock(side_effect=[RuntimeError("db down"), None])
 
         with (
@@ -256,7 +275,7 @@ class TestPoller:
             ),
             patch(
                 "src.backlog.list_due_dreams",
-                AsyncMock(return_value=_due_dreams(2)),
+                AsyncMock(return_value=due),
             ),
             patch("src.backlog.enqueue_dream", enqueue),
         ):

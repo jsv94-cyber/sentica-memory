@@ -735,7 +735,16 @@ async def set_peer_card(
 
     Sets the peer card that the observer peer has for the target peer.
     If no target is specified, sets the observer's own peer card.
+    Production refuses the write. An owner correction is a trusted conclusion,
+    which the rebuild keeps.
     """
+    from src.sentica.runtime import production_enabled
+
+    if production_enabled():
+        raise HTTPException(
+            status_code=403,
+            detail="Peer cards are rebuilt from trusted conclusions.",
+        )
     # If no target specified, set the observer's own card
     observed = target if target is not None else peer_id
 

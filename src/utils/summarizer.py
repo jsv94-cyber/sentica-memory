@@ -5,7 +5,7 @@ from dataclasses import replace
 from enum import Enum
 from functools import cache
 from inspect import cleandoc as c
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 
 from nanoid import generate as generate_nanoid
 from sqlalchemy import update
@@ -58,6 +58,7 @@ class Summary(TypedDict):
     created_at: str
     token_count: int
     message_public_id: str
+    message_start_id: NotRequired[int]
 
 
 def to_schema_summary(s: Summary) -> schemas.Summary:
@@ -518,6 +519,7 @@ async def _create_and_save_summary(
         # Extract values before closing session
         formatted_messages = _format_messages(messages)
         last_message_id = messages[-1].id
+        message_start_id = messages[0].id
         last_message_content_preview = messages[-1].content[:30]
         message_count = len(messages)
         source_message_ids = [message.public_id for message in messages]
@@ -538,6 +540,7 @@ async def _create_and_save_summary(
         input_tokens=input_tokens,
         message_public_id=message_public_id,
         last_message_id=last_message_id,
+        message_start_id=message_start_id,
         last_message_content_preview=last_message_content_preview,
         message_count=message_count,
         custom_instructions=configuration.summary.custom_instructions,
@@ -549,6 +552,11 @@ async def _create_and_save_summary(
             custom_instructions=configuration.summary.custom_instructions,
         ),
     )
+
+    from src.sentica.safety import keep_conclusion
+
+    if not await keep_conclusion(new_summary["content"], workspace_name=workspace_name):
+        return
 
     # Compute scaffold tokens up front (cheap + idempotent) so both the
     # save-summary path and the telemetry emit below can use it
@@ -648,6 +656,7 @@ async def _create_summary(
     input_tokens: int,
     message_public_id: str,
     last_message_id: int,
+    message_start_id: int,
     last_message_content_preview: str,
     message_count: int,
     custom_instructions: str | None = None,
@@ -757,6 +766,7 @@ async def _create_summary(
         Summary(
             content=summary_text,
             message_id=last_message_id,
+            message_start_id=message_start_id,
             summary_type=summary_type.value,
             created_at=utc_now_iso(),
             token_count=summary_tokens,

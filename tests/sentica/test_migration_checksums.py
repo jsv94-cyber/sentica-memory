@@ -36,6 +36,7 @@ _EXPECTED: dict[str, str] = {
     "bb6fb3a7a643_add_message_seq_in_session_column.py": "f763e0c2750aee0066b655c95538004703499df3ee823d1c99d6f22c9b2de65b",
     "c3828084f472_add_indexes_for_messages_and_.py": "15751708deaaaf8ac8bcd23425704ae85c852f9f05d018be94f43469377c10f7",
     "c4e8b1a2d6f0_runtime_role_and_pending_counts.py": "7125256ec3427c95a3d41d064ec6fcbb84e823ecbf849858a2d232e3a143933a",
+    "c9d4e2a71b58_digests_and_deletion_records.py": "0656360f7d13252417bc87e3d4c2b8a25c8b4a4d6edcdf16676279cb82be3e6a",
     "d429de0e5338_adopt_peer_paradigm.py": "a2d224d9cdb03ab5eb0044f043709b2d27a592fc6db9446ebef3cab2ee681943",
     "e4eba9cfaa6f_make_document_session_name_nullable.py": "c66c166914a75c8b737eb6408b4eedaaf658f790877124de69dcfc2df0bdde57",
     "e6b2d8f04a17_dreams_due_superset.py": "537c1c9377c04b03a13f2ff7359f8b5dc9f6c86fc71586ed0f8eb552f3a6fc31",
@@ -46,6 +47,14 @@ _EXPECTED: dict[str, str] = {
 }
 
 
+# The version pin stays equal to the versions directory. These two files
+# are not migrations, and a change to either one still fails the pin.
+_EXTRA: dict[str, str] = {
+    "migrations/env.py": "d8db768dbfdc98238636bef8a75bbeac0536682126a751691db07a8c9abea5f4",
+    "src/migrate.py": "52fa2ca612b493d1d6f6176de48b490d69467f9c993ea71dfeecd9fd13196739",
+}
+
+
 def test_migration_files_match_the_pinned_sha256() -> None:
     root = Path("migrations/versions")
     found = {
@@ -53,3 +62,6 @@ def test_migration_files_match_the_pinned_sha256() -> None:
         for path in sorted(root.glob("*.py"))
     }
     assert found == _EXPECTED
+    for relative, digest in _EXTRA.items():
+        payload = Path(relative).read_bytes()
+        assert hashlib.sha256(payload).hexdigest() == digest, relative

@@ -61,6 +61,7 @@ def _production_env(tmp_path: Path, **overrides: str) -> dict[str, str]:
         "SENTICA_TOKEN_ISSUER": "sentica-broker",
         "SENTICA_BIND_HOST": "127.0.0.1",
         "SENTICA_GATEWAY_MODE": "on",
+        "SENTICA_TENANT_HASH_KEY": "sentica-test-tenant-hash-key-32b!!",
     }
     env.update(overrides)
     return env
@@ -109,6 +110,22 @@ def test_production_starts_when_gateway_mode_is_explicitly_on(
     _apply(monkeypatch, _production_env(tmp_path))
     monkeypatch.setenv("SENTICA_GATEWAY_MODE", value)
     assert load_instance() is not None
+
+
+@pytest.mark.parametrize("value", [None, "", "short-key"])
+def test_production_refuses_a_missing_or_short_tenant_hash_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, value: str | None
+) -> None:
+    env = _production_env(tmp_path)
+    env.pop("SENTICA_TENANT_HASH_KEY")
+    _apply(monkeypatch, env)
+    monkeypatch.delenv("SENTICA_TENANT_HASH_KEY_PATH", raising=False)
+    if value is None:
+        monkeypatch.delenv("SENTICA_TENANT_HASH_KEY", raising=False)
+    else:
+        monkeypatch.setenv("SENTICA_TENANT_HASH_KEY", value)
+    with pytest.raises(SenticaStartupError, match="SENTICA_TENANT_HASH_KEY"):
+        load_instance()
 
 
 def test_missing_tenant_refuses(
@@ -382,19 +399,12 @@ def test_unsafe_production_settings_refuse(
         load_instance()
 
 
-def test_fake_embeddings_are_deterministic_and_nonzero() -> None:
-    import importlib.util
-
-    path = ROOT / "docker" / "sentica" / "fake_embeddings.py"
-    spec = importlib.util.spec_from_file_location("fake_embeddings", path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    first = module.embedding_for("local hello", 8)
-    assert first == module.embedding_for("local hello", 8)
-    assert first != module.embedding_for("other text", 8)
-    assert any(value != 0.0 for value in first)
+def test_stack_uses_the_mock_gateway_without_provider_keys() -> None:
     compose = (ROOT / "docker-compose.sentica.yml").read_text(encoding="utf-8")
-    assert "sentica-local-dummy" not in compose
+    assert "tests/sentica/mock_gateway.py" in compose
+    assert "LLM_ANTHROPIC_API_KEY" not in compose
+    assert "LLM_OPENAI_API_KEY" not in compose
+    assert "LLM_GEMINI_API_KEY" not in compose
+    assert "EMBEDDING_MODEL_CONFIG__OVERRIDES__BASE_URL" not in compose
     assert "http://embeddings:8080/v1" in compose
-    assert "EMBEDDING_MODEL_CONFIG__OVERRIDES__BASE_URL" in compose
+    assert "fake_embeddings.py" not in compose

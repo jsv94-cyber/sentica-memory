@@ -140,6 +140,8 @@ def _fingerprint() -> tuple[tuple[str, str | None], ...]:
         *_llm_api_key_env_names(),
         "METRICS_ENABLED",
         "SENTICA_DB_CALL_TIMEOUT_SECONDS",
+        "SENTICA_TENANT_HASH_KEY",
+        "SENTICA_TENANT_HASH_KEY_PATH",
         *REQUIRED_SETTINGS,
         *_PASSWORD_ENV,
     )
@@ -150,6 +152,35 @@ def _fingerprint() -> tuple[tuple[str, str | None], ...]:
         marker_state = None
     env = tuple((name, os.environ.get(name)) for name in names)
     return (*env, ("production_image_marker", f"{marker}:{marker_state}"))
+
+
+def tenant_hash_key() -> bytes:
+    """The per-tenant HMAC key. Production refuses a missing or short key.
+
+    SENTICA_TENANT_HASH_KEY is the secret. SENTICA_TENANT_HASH_KEY_PATH is
+    the broker's key file and is used when the environment value is unset.
+    Test mode uses a fixed key only when neither is set.
+    """
+    raw = os.environ.get("SENTICA_TENANT_HASH_KEY", "").strip().encode()
+    path = os.environ.get("SENTICA_TENANT_HASH_KEY_PATH", "").strip()
+    if not raw and path:
+        try:
+            raw = Path(path).read_bytes().strip()
+        except OSError as exc:
+            raise SenticaStartupError(
+                "Refusing to start: SENTICA_TENANT_HASH_KEY_PATH cannot be read"
+            ) from exc
+    if len(raw) >= 32:
+        return raw
+    if production_enabled() or raw:
+        raise SenticaStartupError(
+            "Refusing to start: SENTICA_TENANT_HASH_KEY is missing or shorter than 32 bytes"
+        )
+    return b"sentica-test-tenant-hash-key-32b!!"
+
+
+def _require_tenant_hash_key() -> None:
+    tenant_hash_key()
 
 
 def db_call_timeout_seconds() -> float:
@@ -226,6 +257,7 @@ def _load_instance() -> SenticaInstance | None:
             "Refusing to start: SENTICA_DB_PROXY_PORT is out of range"
         )
 
+    _require_tenant_hash_key()
     instance = SenticaInstance(
         tenant_id=os.environ["SENTICA_TENANT_ID"].strip(),
         proxy_host=os.environ["SENTICA_DB_PROXY_HOST"].strip(),

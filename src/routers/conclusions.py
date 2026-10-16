@@ -37,25 +37,46 @@ async def create_conclusions(
         ...,
         description="Batch of Conclusions to create",
     ),
-    db: AsyncSession = db,
 ) -> list[schemas.Conclusion]:
     """
     Create one or more Conclusions.
 
     Conclusions are logical certainties derived from interactions between Peers. They form the basis of a Peer's Representation.
+    The safety check runs before a database session is opened.
     """
-    documents = await crud.create_observations(
-        db,
-        observations=body.conclusions,
-        workspace_name=workspace_id,
-    )
+    from src.dependencies import tracked_db
+    from src.sentica.safety import keep_conclusion
+    from src.sentica.workspace_scope import reset_workspace, set_workspace
+
+    token = set_workspace(workspace_id)
+    try:
+        kept: list[schemas.ConclusionCreate] = []
+        for observation in body.conclusions:
+            if await keep_conclusion(observation.content, workspace_name=workspace_id):
+                kept.append(observation)
+        if not kept:
+            return []
+        async with tracked_db("conclusions.create") as session:
+            documents = await crud.create_observations(
+                session,
+                observations=kept,
+                workspace_name=workspace_id,
+                already_checked=True,
+            )
+            for document in documents:
+                await session.refresh(document)
+            created = [
+                schemas.Conclusion.model_validate(document) for document in documents
+            ]
+    finally:
+        reset_workspace(token)
 
     logger.debug(
         "Created %d conclusions in workspace %s",
-        len(documents),
+        len(created),
         workspace_id,
     )
-    return [schemas.Conclusion.model_validate(doc) for doc in documents]
+    return created
 
 
 @router.post(
@@ -143,10 +164,14 @@ async def query_conclusions(
     ids = [document.id for document in documents]
     if ids:
         from src.dependencies import tracked_db
-        from src.sentica.freshness import note_retrieved
+        from src.sentica.freshness import note_retrieved, note_used
 
-        async with tracked_db("conclusion_retrieved") as write_db:
-            await note_retrieved(write_db, ids, workspace_name=workspace_id)
+        try:
+            async with tracked_db("conclusion_used") as write_db:
+                await note_retrieved(write_db, ids, workspace_name=workspace_id)
+                await note_used(write_db, ids, workspace_name=workspace_id)
+        except Exception:
+            logger.warning("conclusion use note skipped")
     return [schemas.Conclusion.model_validate(doc) for doc in documents]
 
 

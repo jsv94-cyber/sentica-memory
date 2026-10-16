@@ -157,7 +157,10 @@ async def run_dream(
         workspace = await crud.get_workspace(db, workspace_name=workspace_name)
         configuration = get_configuration(None, session, workspace)
         resolved_session_id = session.id if session else None
-    if not configuration.dream.enabled:
+        raw_configuration = dict(workspace.configuration or {})
+    from src.sentica.dreams import inference_enabled
+
+    if not configuration.dream.enabled or not inference_enabled(raw_configuration):
         logger.info(
             f"[{run_id}] Dreams disabled for {workspace_name}/{session_name}, skipping dream"
         )
@@ -267,7 +270,12 @@ async def run_dream(
             # `Exception` (not `BaseException`) — CancelledError must still
             # propagate so the worker can shut down. SpecialistExecutionError
             # is no longer raised by `src/`, but the catch is broad enough to
-            # cover provider/DB/tool/validation errors.
+            # cover provider/DB/tool/validation errors. A safety outage retries
+            # the dream instead of marking it processed.
+            from src.sentica.safety import is_safety_outage
+
+            if is_safety_outage(e):
+                raise
             logger.error(f"[{run_id}] Deduction specialist failed: {e}", exc_info=True)
             accumulate_metric(task_name, "deduction_error", str(e), "blob")
 
@@ -294,6 +302,10 @@ async def run_dream(
             )
             induction_success = induction_result.success
         except Exception as e:
+            from src.sentica.safety import is_safety_outage
+
+            if is_safety_outage(e):
+                raise
             logger.error(f"[{run_id}] Induction specialist failed: {e}", exc_info=True)
             accumulate_metric(task_name, "induction_error", str(e), "blob")
 
@@ -358,6 +370,7 @@ async def run_dream(
         except Exception:  # pragma: no cover - telemetry must not raise
             logger.debug("Failed to emit DreamRunEvent", exc_info=True)
 
+    await _rebuild_peer_card(workspace_name, observer=observer, observed=observed)
     return DreamResult(
         run_id=run_id,
         specialists_run=["deduction", "induction"],
@@ -423,7 +436,10 @@ async def run_card_refresh_dream(
         workspace = await crud.get_workspace(db, workspace_name=workspace_name)
         configuration = get_configuration(None, session, workspace)
         resolved_session_id = session.id if session else None
-    if not configuration.dream.enabled:
+        raw_configuration = dict(workspace.configuration or {})
+    from src.sentica.dreams import inference_enabled
+
+    if not configuration.dream.enabled or not inference_enabled(raw_configuration):
         logger.info(
             f"[{run_id}] Dreams disabled for {workspace_name}/{session_name}, skipping card refresh"
         )
@@ -469,6 +485,10 @@ async def run_card_refresh_dream(
         except Exception as e:
             # Exception (not BaseException) — CancelledError must propagate so
             # the worker can shut down; the finally still emits the run event.
+            from src.sentica.safety import is_safety_outage
+
+            if is_safety_outage(e):
+                raise
             logger.error(
                 f"[{run_id}] Card refresh specialist failed: {e}", exc_info=True
             )
@@ -521,6 +541,7 @@ async def run_card_refresh_dream(
         except Exception:  # pragma: no cover - telemetry must not raise
             logger.debug("Failed to emit DreamRunEvent", exc_info=True)
 
+    await _rebuild_peer_card(workspace_name, observer=observer, observed=observed)
     return DreamResult(
         run_id=run_id,
         specialists_run=["card_refresh"],
@@ -656,6 +677,10 @@ DREAM: {payload.dream_type} documents for {workspace_name}/{payload.observer}/{p
                     )
 
     except Exception as e:
+        from src.sentica.safety import is_safety_outage
+
+        if is_safety_outage(e):
+            raise
         logger.error(
             f"Error processing dream task {payload.dream_type} for {payload.observer}/{payload.observed}: {str(e)}",
             exc_info=True,
@@ -663,3 +688,24 @@ DREAM: {payload.dream_type} documents for {workspace_name}/{payload.observer}/{p
         if settings.SENTRY.ENABLED:
             sentry_sdk.capture_exception(e)
         # Don't re-raise - we want to mark the dream task as processed even if it fails
+
+
+async def _rebuild_peer_card(
+    workspace_name: str, *, observer: str, observed: str
+) -> None:
+    """Replace the card from untainted conclusions."""
+    from src.crud.peer_card import replace_peer_card_from_conclusions
+    from src.dependencies import tracked_db
+    from src.sentica.workspace_scope import reset_workspace, set_workspace
+
+    token = set_workspace(workspace_name)
+    try:
+        async with tracked_db("dream.rebuild_card") as db:
+            await replace_peer_card_from_conclusions(
+                db,
+                workspace_name,
+                observer=observer,
+                observed=observed,
+            )
+    finally:
+        reset_workspace(token)

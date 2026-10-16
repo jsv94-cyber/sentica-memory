@@ -1360,7 +1360,7 @@
           "peers"
         ],
         "summary": "Set Peer Card",
-        "description": "Set a peer card for a specific peer relationship.\n\nSets the peer card that the observer peer has for the target peer.\nIf no target is specified, sets the observer's own peer card.",
+        "description": "Set a peer card for a specific peer relationship.\n\nSets the peer card that the observer peer has for the target peer.\nIf no target is specified, sets the observer's own peer card.\nProduction refuses the write. An owner correction is a trusted conclusion,\nwhich the rebuild keeps.",
         "operationId": "set_peer_card_v3_workspaces__workspace_id__peers__peer_id__card_put",
         "security": [
           {
@@ -4045,7 +4045,7 @@
           "conclusions"
         ],
         "summary": "Create Conclusions",
-        "description": "Create one or more Conclusions.\n\nConclusions are logical certainties derived from interactions between Peers. They form the basis of a Peer's Representation.",
+        "description": "Create one or more Conclusions.\n\nConclusions are logical certainties derived from interactions between Peers. They form the basis of a Peer's Representation.\nThe safety check runs before a database session is opened.",
         "operationId": "create_conclusions_v3_workspaces__workspace_id__conclusions_post",
         "security": [
           {
@@ -4506,6 +4506,58 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/DeletionResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v3/workspaces/{workspace_id}/digests": {
+      "get": {
+        "tags": [
+          "subjects"
+        ],
+        "summary": "List Digests",
+        "description": "Read this workspace's digests. Another workspace's rows are not visible.",
+        "operationId": "list_digests_v3_workspaces__workspace_id__digests_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Workspace Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DigestRead"
+                  },
+                  "title": "Response List Digests V3 Workspaces  Workspace Id  Digests Get"
                 }
               }
             }
@@ -6103,6 +6155,45 @@
           "query"
         ],
         "title": "DialecticOptions"
+      },
+      "DigestRead": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "kind": {
+            "type": "string",
+            "title": "Kind"
+          },
+          "period": {
+            "type": "string",
+            "title": "Period"
+          },
+          "content": {
+            "type": "string",
+            "title": "Content"
+          },
+          "external": {
+            "type": "boolean",
+            "title": "External"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "period",
+          "content",
+          "external",
+          "created_at"
+        ],
+        "title": "DigestRead"
       },
       "DreamConfiguration": {
         "properties": {

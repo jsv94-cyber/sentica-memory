@@ -230,6 +230,35 @@ class DreamScheduler:
         enqueue_dream: Any,
         get_configuration: Any,
     ) -> None:
+        await self._check_and_schedule(
+            workspace_name,
+            dream_type,
+            observer=observer,
+            observed=observed,
+            trigger_reason=trigger_reason,
+            delay_reason=delay_reason,
+            documents_since_last_dream_at_schedule=documents_since_last_dream_at_schedule,
+            document_threshold=document_threshold,
+            crud=crud,
+            enqueue_dream=enqueue_dream,
+            get_configuration=get_configuration,
+        )
+
+    async def _check_and_schedule(
+        self,
+        workspace_name: str,
+        dream_type: DreamType,
+        *,
+        observer: str,
+        observed: str,
+        trigger_reason: str | None,
+        delay_reason: str | None,
+        documents_since_last_dream_at_schedule: int | None,
+        document_threshold: int | None,
+        crud: Any,
+        enqueue_dream: Any,
+        get_configuration: Any,
+    ) -> bool:
         async with tracked_db("dream_session_lookup") as db:
             stmt = (
                 select(models.Document.session_name)
@@ -248,7 +277,7 @@ class DreamScheduler:
                 logger.warning(
                     f"No documents found for {workspace_name}/{observer}/{observed}, skipping dream"
                 )
-                return
+                return False
 
             session = await crud.get_session(
                 db, workspace_name=workspace_name, session_name=session_name
@@ -257,11 +286,15 @@ class DreamScheduler:
 
             configuration = get_configuration(None, session, workspace)
 
-            if not configuration.dream.enabled:
+            from src.sentica.dreams import inference_enabled
+
+            if not configuration.dream.enabled or not inference_enabled(
+                workspace.configuration
+            ):
                 logger.debug(
                     f"Dreams disabled for {workspace_name}/{session_name}, skipping dream"
                 )
-                return
+                return False
 
         await enqueue_dream(
             workspace_name,
@@ -274,6 +307,7 @@ class DreamScheduler:
             documents_since_last_dream_at_schedule=documents_since_last_dream_at_schedule,
             document_threshold=document_threshold,
         )
+        return True
 
     async def shutdown(self) -> None:
         """Cancel all pending dreams during shutdown."""
@@ -311,6 +345,16 @@ async def check_and_schedule_dream(
         True if a dream timer was scheduled, False otherwise
     """
     if not settings.DREAM.ENABLED or settings.DERIVER.SCHEDULER == "api":
+        return False
+
+    from src.sentica.dreams import inference_enabled
+
+    workspace = await db.scalar(
+        select(models.Workspace).where(
+            models.Workspace.name == collection.workspace_name
+        )
+    )
+    if workspace is None or not inference_enabled(workspace.configuration):
         return False
 
     dream_metadata = collection.internal_metadata.get("dream", {})
