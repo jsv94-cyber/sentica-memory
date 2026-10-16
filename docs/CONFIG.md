@@ -96,9 +96,10 @@ migration timeout is less than or equal to the lock wait.
 
 ## Gateway
 
-Gateway mode is off unless `SENTICA_GATEWAY_MODE` is `1`, `true`, `yes`, or
-`on`. The local stack and the upstream suite leave it unset and keep using
-the provider SDKs.
+Production refuses to start unless `SENTICA_GATEWAY_MODE` is explicitly on.
+The accepted on-values are `1`, `true`, `yes`, and `on` (any case, surrounding
+space ignored). Unset, empty, and any other value refuse in production. Test
+mode may leave it unset and keep using the provider SDKs.
 
 When it is on, every model call needs:
 
@@ -113,9 +114,28 @@ When it is on, every model call needs:
 
 A missing value is refused. The call does not pick another model.
 
-`SENTICA_GATEWAY_DAILY_TOKEN_BUDGET` is optional. Unset means no limit.
-`0` means the budget is already spent. The counter is in memory, per
-process, per tenant, per purpose, and resets at UTC midnight.
+The authoritative budget is enforced at the Sentica gateway. This process
+keeps a backstop in the instance Redis, shared by the API and the deriver.
+`SENTICA_GATEWAY_REDIS_URL` wins. Otherwise a `redis://` or `rediss://`
+`CACHE_URL` is used. The counter is per tenant, across every purpose, and
+resets at UTC midnight. `SENTICA_GATEWAY_DAILY_TOKEN_BUDGET` is that total.
+Unset means no total. `0` means the budget is already spent.
+
+An optional per-purpose limit is
+`SENTICA_GATEWAY_DERIVER_DAILY_TOKEN_BUDGET`,
+`SENTICA_GATEWAY_SUMMARY_DAILY_TOKEN_BUDGET`,
+`SENTICA_GATEWAY_DIALECTIC_DAILY_TOKEN_BUDGET`,
+`SENTICA_GATEWAY_DREAM_DAILY_TOKEN_BUDGET`, or
+`SENTICA_GATEWAY_EMBED_DAILY_TOKEN_BUDGET`. A purpose limit blocks only that
+purpose. A response that omits usage is charged an estimate, never zero.
+The backstop reserves and then charges, so it can slightly overshoot.
+
+`SENTICA_GATEWAY_TIMEOUT_SECONDS` defaults to 10. A purpose may set
+`SENTICA_GATEWAY_DERIVER_TIMEOUT_SECONDS`,
+`SENTICA_GATEWAY_SUMMARY_TIMEOUT_SECONDS`,
+`SENTICA_GATEWAY_DIALECTIC_TIMEOUT_SECONDS`,
+`SENTICA_GATEWAY_DREAM_TIMEOUT_SECONDS`, or
+`SENTICA_GATEWAY_EMBED_TIMEOUT_SECONDS`.
 
 `SENTICA_GATEWAY_RETRY_ATTEMPTS` defaults to 3.
 `SENTICA_GATEWAY_RETRY_WAIT_SECONDS` defaults to 0.05. A failed attempt

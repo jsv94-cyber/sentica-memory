@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from typing import Any, cast
 
@@ -23,27 +24,6 @@ def _sync_dsn(worker_id: str) -> str:
 
 def _run(conn: Any, statement: str, params: tuple[object, ...] = ()) -> Any:
     return conn.execute(statement, params)
-
-
-def _unused_client(*_args: object, **_kwargs: object) -> object:
-    return object()
-
-
-def _tool_names(tools: object) -> list[str]:
-    found: list[str] = []
-    if not isinstance(tools, list):
-        return found
-    for tool in cast(list[object], tools):
-        if not isinstance(tool, dict):
-            continue
-        raw = cast(dict[str, object], tool)
-        function = raw.get("function", raw)
-        if not isinstance(function, dict):
-            continue
-        name = cast(dict[str, object], function).get("name")
-        if isinstance(name, str):
-            found.append(name)
-    return found
 
 
 def test_runtime_role_cannot_cross_workspaces(
@@ -626,6 +606,7 @@ def test_removing_a_workspace_from_the_token_refuses_the_next_request(
     monkeypatch.setenv("SENTICA_TOKEN_PUBLIC_KEY_PATH", str(public))
     monkeypatch.setenv("SENTICA_TOKEN_ISSUER", "sentica-broker")
     monkeypatch.setenv("SENTICA_BIND_HOST", "127.0.0.1")
+    monkeypatch.setenv("SENTICA_GATEWAY_MODE", "on")
     monkeypatch.setenv("HOME", str(root))
     for name in (
         "DB_CONNECTION_URI",
@@ -713,6 +694,7 @@ def test_production_refuses_external_vector_stores(
     monkeypatch.setenv("SENTICA_TOKEN_PUBLIC_KEY_PATH", str(public))
     monkeypatch.setenv("SENTICA_TOKEN_ISSUER", "sentica-broker")
     monkeypatch.setenv("SENTICA_BIND_HOST", "127.0.0.1")
+    monkeypatch.setenv("SENTICA_GATEWAY_MODE", "on")
     monkeypatch.setenv("HOME", str(root))
     monkeypatch.setenv("VECTOR_STORE_TYPE", store)
     for name in (
@@ -882,9 +864,15 @@ async def test_canary_written_only_to_r_stays_out_of_other_workspaces(
 
     from src.dialectic.chat import agentic_chat_stream
     from src.dreamer.specialists import InductionSpecialist
-    from src.embedding_client import embedding_client
-    from src.llm.backend import CompletionResult, StreamChunk, ToolCallResult
-    from src.utils.representation import ExplicitObservationBase, PromptRepresentation
+    from tests.sentica.mock_gateway import (
+        MockGateway,
+        apply_gateway_env,
+        chat_message,
+        forbid_provider_sdks,
+        function_names,
+        message_has_tool,
+        use_real_embeddings,
+    )
 
     counters = {
         "deriver": 0,
@@ -902,131 +890,84 @@ async def test_canary_written_only_to_r_stays_out_of_other_workspaces(
     stream_saw_tool_result = {"ok": False}
     width = settings.EMBEDDING.VECTOR_DIMENSIONS
 
-    def _has_tool_result(messages: object) -> bool:
-        text = repr(messages)
-        return (
-            "tool_result" in text
-            or "'role': 'tool'" in text
-            or '"role": "tool"' in text
-        )
-
-    def _note_followup(messages: object) -> None:
-        if _has_tool_result(messages):
-            tool_results["n"] += 1
-            recorded.append("tool-result:" + repr(messages))
-
-    async def _deriver(**kwargs: object) -> CompletionResult:
-        del kwargs
-        counters["deriver"] += 1
-        return CompletionResult(
-            content=PromptRepresentation(
-                explicit=[ExplicitObservationBase(content="local hello")]
-            ),
-            output_tokens=1,
-        )
-
-    async def _specialist(kind: str, messages: object) -> CompletionResult:
-        counters[kind] += 1
-        recorded.append("capture:" + kind + ":" + repr(messages))
-        if _has_tool_result(messages):
-            return CompletionResult(content="ok")
-        return CompletionResult(
-            content="",
-            tool_calls=[
-                ToolCallResult(kind[:1] + "1", "search_memory", {"query": "local"})
-            ],
-        )
-
-    async def _dialectic(messages: object) -> CompletionResult:
-        counters["dialectic"] += 1
-        recorded.append(repr(messages))
-        if _has_tool_result(messages):
-            _note_followup(messages)
-            return CompletionResult(content="ok")
-        tool_rounds["n"] += 1
-        return CompletionResult(
-            content="",
-            tool_calls=[
-                ToolCallResult("c1", "grep_messages", {"text": canary}),
-                ToolCallResult("c2", "grep_messages", {"text": right}),
-            ],
-        )
-
-    def _capture_call(kind: str, kwargs: dict[str, object]) -> None:
-        messages = kwargs.get("messages")
-        prompt = kwargs.get("prompt")
-        recorded.append("capture:" + kind + ":" + repr(messages))
-        if prompt is not None:
-            recorded.append("capture:" + kind + ":prompt:" + str(prompt))
-
-    summary_capture = {"on": False}
-
-    async def _complete(
-        _backend: object, _config: object, **kwargs: object
-    ) -> CompletionResult:
-        _capture_call("complete", kwargs)
-        messages = kwargs.get("messages")
-        if summary_capture["on"] and "local hello" in repr(messages):
-            recorded.append("capture:summarizer:" + repr(messages))
-        names = _tool_names(kwargs.get("tools"))
-        if kwargs.get("response_format") is PromptRepresentation:
-            recorded.append("capture:deriver:" + repr(messages))
-            return await _deriver(prompt=kwargs.get("prompt"))
+    def _decide(
+        path: str, body: dict[str, Any], headers: dict[str, str]
+    ) -> dict[str, Any]:
+        encoded = json.dumps(body)
+        if path.rstrip("/").endswith("/embeddings"):
+            operation = headers.get("X-Sentica-Embed-Op") or "embed"
+            if operation in counters:
+                counters[operation] += 1
+            recorded.append("capture:" + operation + ":" + encoded)
+            incoming = body.get("input", [])
+            texts = [incoming] if isinstance(incoming, str) else list(incoming)
+            return {
+                "data": [
+                    {"index": index, "embedding": [0.25] * width}
+                    for index in range(len(texts))
+                ],
+                "usage": {"prompt_tokens": 2, "completion_tokens": 0},
+            }
+        names = function_names(body)
+        purpose = headers.get("X-Sentica-Purpose", "")
+        followup = message_has_tool(body)
+        recorded.append(encoded)
+        if purpose == "dialectic":
+            counters["dialectic"] += 1
+            if headers.get("X-Sentica-Stream") == "true":
+                counters["stream"] += 1
+                recorded.append("capture:stream:" + encoded)
+            if followup:
+                tool_results["n"] += 1
+                recorded.append("tool-result:" + encoded)
+                if headers.get("X-Sentica-Stream") == "true":
+                    stream_saw_tool_result["ok"] = True
+            elif "grep_messages" in names or "search_messages" in names:
+                tool_rounds["n"] += 1
+        if purpose == "deriver":
+            counters["deriver"] += 1
+            recorded.append("capture:deriver:" + encoded)
+        if purpose == "summary":
+            recorded.append("capture:summarizer:" + encoded)
         if "create_observations_deductive" in names:
-            return await _specialist("deduction", messages)
+            counters["deduction"] += 1
+            recorded.append("capture:deduction:" + encoded)
         if "create_observations_inductive" in names:
-            return await _specialist("induction", messages)
-        if "grep_messages" in names or "search_messages" in names:
-            return await _dialectic(messages)
-        return CompletionResult(content="ok")
+            counters["induction"] += 1
+            recorded.append("capture:induction:" + encoded)
+        if followup:
+            return chat_message("ok")
+        if purpose == "dialectic" and (
+            "grep_messages" in names or "search_messages" in names
+        ):
+            return chat_message(
+                None,
+                [
+                    ("c1", "grep_messages", {"text": canary}),
+                    ("c2", "grep_messages", {"text": right}),
+                ],
+            )
+        if "search_memory" in names and (
+            "create_observations_deductive" in names
+            or "create_observations_inductive" in names
+        ):
+            return chat_message(None, [("s1", "search_memory", {"query": "local"})])
+        response_format = body.get("response_format")
+        formatted = (
+            cast(dict[str, Any], response_format)
+            if isinstance(response_format, dict)
+            else {}
+        )
+        if formatted.get("type") == "json_schema":
+            return chat_message('{"explicit":[{"content":"local hello"}]}')
+        return chat_message("ok")
 
-    async def _stream(_backend: object, _config: object, **kwargs: object) -> object:
-        _capture_call("stream", kwargs)
-        counters["stream"] += 1
-        messages = kwargs.get("messages")
-        recorded.append("capture:stream:" + repr(messages))
-        if _has_tool_result(messages):
-            stream_saw_tool_result["ok"] = True
-            recorded.append("tool-result:" + repr(messages))
-
-        async def _chunks() -> object:
-            yield StreamChunk(content="ok", is_done=True, finish_reason="stop")
-
-        return _chunks()
-
-    async def _batch(
-        texts: dict[str, str], *_args: object, **_kwargs: object
-    ) -> dict[str, list[list[float]]]:
-        counters["batch_embed"] += 1
-        recorded.append("capture:batch_embed:" + repr(texts))
-        return {key: [[0.0] * width] for key in texts}
-
-    async def _zero_embed(text: str, *_args: object, **_kwargs: object) -> list[float]:
-        recorded.append("capture:embed:" + repr(text))
-        return [0.0] * width
-
-    settings.LLM.OPENAI_API_KEY = "test-key"
-    inner = embedding_client._get_client()  # pyright: ignore[reportPrivateUsage]
-
-    async def _simple(
-        texts: list[str], *_args: object, **_kwargs: object
-    ) -> list[list[float]]:
-        counters["simple_batch_embed"] += 1
-        recorded.append("capture:simple_batch_embed:" + repr(list(texts)))
-        return [[0.0] * width for _text in texts]
-
-    monkeypatch.setattr(inner, "batch_embed", _batch)
-    monkeypatch.setattr(inner, "simple_batch_embed", _simple)
-    monkeypatch.setattr(inner, "embed", _zero_embed)
-    monkeypatch.setattr(embedding_client, "simple_batch_embed", _simple)
-    monkeypatch.setattr(embedding_client, "batch_embed", _batch)
-    monkeypatch.setattr(embedding_client, "embed", _zero_embed)
+    gateway = MockGateway(_decide, dimensions=width, strict=True)
+    apply_gateway_env(monkeypatch, gateway.start(), tenant="tenant-a")
+    forbid_provider_sdks(monkeypatch)
+    use_real_embeddings(monkeypatch)
     monkeypatch.setattr("src.routers.peers.agentic_chat", agentic_chat)
     monkeypatch.setattr("src.routers.peers.agentic_chat_stream", agentic_chat_stream)
-    monkeypatch.setattr("src.llm.executor.default_client", _unused_client)
-    monkeypatch.setattr("src.llm.executor.backend_for_provider", _unused_client)
-    monkeypatch.setattr("src.llm.executor.execute_completion", _complete)
-    monkeypatch.setattr("src.llm.executor.execute_stream", _stream)
     import src.deriver.deriver as deriver_module
     from src.llm.api import honcho_llm_call as real_llm_call
 
@@ -1099,11 +1040,8 @@ async def test_canary_written_only_to_r_stays_out_of_other_workspaces(
     async def _summary_call(*args: Any, **kwargs: Any) -> Any:
         if kwargs["telemetry"].track_name == "Short Summary":
             counters["summarizer"] += 1
-            summary_capture["on"] = True
-        try:
-            return await real_honcho_llm_call(*args, **kwargs)
-        finally:
-            summary_capture["on"] = False
+            recorded.append("capture:summarizer:" + str(kwargs.get("prompt")))
+        return await real_honcho_llm_call(*args, **kwargs)
 
     monkeypatch.setattr(summarizer_module, "honcho_llm_call", _summary_call)
     bound = set_workspace(left)
@@ -1225,8 +1163,10 @@ async def test_canary_written_only_to_r_stays_out_of_other_workspaces(
     blob = "\n".join([*responses, *recorded])
     scrubbed = blob.replace(f'"text": "{canary}"', "")
     scrubbed = scrubbed.replace(f"'text': '{canary}'", "")
+    scrubbed = scrubbed.replace('\\"text\\": \\"' + canary + '\\"', "")
     scrubbed = scrubbed.replace(f"No messages found containing '{canary}'", "")
     assert canary not in scrubbed
+    gateway.close()
 
 
 def test_harness_flags_the_canary_when_the_request_includes_its_workspace(
@@ -1236,9 +1176,15 @@ def test_harness_flags_the_canary_when_the_request_includes_its_workspace(
     """The same tool loop reports the canary when the caller is allowed to see it."""
     from starlette.testclient import TestClient
 
-    from src.config import settings
     from src.dialectic.chat import agentic_chat
-    from src.llm.backend import CompletionResult, ToolCallResult
+    from tests.sentica.mock_gateway import (
+        MockGateway,
+        apply_gateway_env,
+        chat_message,
+        forbid_provider_sdks,
+        function_names,
+        message_has_tool,
+    )
     from tests.sentica.rls_job import authorize
 
     assert isinstance(client, TestClient)
@@ -1257,27 +1203,28 @@ def test_harness_flags_the_canary_when_the_request_includes_its_workspace(
         json={"messages": [{"content": canary, "peer_id": "p1"}]},
     ).status_code in (200, 201)
     recorded: list[str] = []
-    rounds = {"n": 0}
 
-    async def _complete(
-        _backend: object, _config: object, **kwargs: object
-    ) -> CompletionResult:
-        recorded.append(repr(kwargs.get("messages")))
-        if kwargs.get("tools") and rounds["n"] < 1:
-            rounds["n"] += 1
-            return CompletionResult(
-                content="",
-                tool_calls=[ToolCallResult("c1", "grep_messages", {"text": canary})],
-            )
-        return CompletionResult(content="ok")
+    def _decide(
+        path: str, body: dict[str, Any], headers: dict[str, str]
+    ) -> dict[str, Any]:
+        del path, headers
+        recorded.append(json.dumps(body))
+        names = function_names(body)
+        if message_has_tool(body) or "grep_messages" not in names:
+            return chat_message("ok")
+        return chat_message(None, [("c1", "grep_messages", {"text": canary})])
 
-    settings.LLM.OPENAI_API_KEY = "test-key"
+    gateway = MockGateway(_decide, strict=True)
+    apply_gateway_env(monkeypatch, gateway.start())
+    forbid_provider_sdks(monkeypatch)
     monkeypatch.setattr("src.routers.peers.agentic_chat", agentic_chat)
-    monkeypatch.setattr("src.llm.executor.execute_completion", _complete)
-    answer = client.post(
-        f"/v3/workspaces/{name}/peers/p1/chat",
-        json={"query": "repeat the stored fact", "stream": False},
-    )
+    try:
+        answer = client.post(
+            f"/v3/workspaces/{name}/peers/p1/chat",
+            json={"query": "repeat the stored fact", "stream": False},
+        )
+    finally:
+        gateway.close()
     assert answer.status_code == 200, answer.text
     blob = "\n".join(recorded)
     assert canary in blob
@@ -1519,6 +1466,7 @@ def _broker_headers(monkeypatch: pytest.MonkeyPatch, tmp_path: object):
         monkeypatch.setenv("SENTICA_TOKEN_PUBLIC_KEY_PATH", str(public))
         monkeypatch.setenv("SENTICA_TOKEN_ISSUER", "sentica-broker")
         monkeypatch.setenv("SENTICA_BIND_HOST", "127.0.0.1")
+        monkeypatch.setenv("SENTICA_GATEWAY_MODE", "on")
         monkeypatch.setenv("HOME", str(root))
         for name in (
             "DB_CONNECTION_URI",
@@ -1654,8 +1602,15 @@ async def _message_layer(
     from src import models
     from src.config import settings
     from src.dialectic.chat import agentic_chat
-    from src.llm.backend import CompletionResult, ToolCallResult
     from src.utils.formatting import ILIKE_ESCAPE_CHAR, escape_ilike_pattern
+    from tests.sentica.mock_gateway import (
+        MockGateway,
+        apply_gateway_env,
+        chat_message,
+        forbid_provider_sdks,
+        function_names,
+        message_has_tool,
+    )
     from tests.sentica.rls_job import authorize, ddl_dsn, rls_job
 
     assert isinstance(client, TestClient)
@@ -1774,30 +1729,23 @@ async def _message_layer(
 
     followups: list[str] = []
 
-    async def _complete(
-        _backend: object, _config: object, **kwargs: object
-    ) -> CompletionResult:
-        messages = repr(kwargs.get("messages"))
-        if (
-            "tool_result" in messages
-            or "'role': 'tool'" in messages
-            or '"role": "tool"' in messages
-        ):
-            followups.append(messages)
-            return CompletionResult(content="ok")
-        if "grep_messages" in _tool_names(kwargs.get("tools")):
-            return CompletionResult(
-                content="",
-                tool_calls=[ToolCallResult("c1", "grep_messages", {"text": canary})],
-            )
-        return CompletionResult(content="ok")
+    def _decide(
+        path: str, body: dict[str, Any], headers: dict[str, str]
+    ) -> dict[str, Any]:
+        del path, headers
+        encoded = json.dumps(body.get("messages"))
+        if message_has_tool(body):
+            followups.append(encoded)
+            return chat_message("ok")
+        if "grep_messages" in function_names(body):
+            return chat_message(None, [("c1", "grep_messages", {"text": canary})])
+        return chat_message("ok")
 
+    gateway = MockGateway(_decide, strict=True)
+    apply_gateway_env(monkeypatch, gateway.start())
+    forbid_provider_sdks(monkeypatch)
     monkeypatch.setattr("src.crud.message._grep_messages_internal", _unscoped)
-    monkeypatch.setattr(settings.LLM, "OPENAI_API_KEY", "test-key")
     monkeypatch.setattr("src.routers.peers.agentic_chat", agentic_chat)
-    monkeypatch.setattr("src.llm.executor.default_client", _unused_client)
-    monkeypatch.setattr("src.llm.executor.backend_for_provider", _unused_client)
-    monkeypatch.setattr("src.llm.executor.execute_completion", _complete)
     try:
         if disable_rls:
             _messages_rls(False)
@@ -1816,6 +1764,7 @@ async def _message_layer(
         else:
             assert "No messages found containing" in blob
     finally:
+        gateway.close()
         if disable_rls or not rls_job():
             if disable_rls and rls_job():
                 _messages_rls(True)
@@ -1855,3 +1804,239 @@ async def test_crud_filter_removed_disabled_rls_shows_the_canary(
 ) -> None:
     """The same chat sees the canary once the ddl role disables row-level security."""
     await _message_layer(client, monkeypatch, worker_id, db_engine, disable_rls=True)
+
+
+async def _seed_canary_pair(client: object, db_session: object) -> tuple[str, str, str]:
+    """Two workspaces. The canary lives only in the second."""
+    from sqlalchemy.ext.asyncio import AsyncSession
+    from starlette.testclient import TestClient
+
+    from src import models
+    from src.sentica.workspace_scope import reset_workspace, set_workspace
+    from tests.sentica.rls_job import authorize
+
+    assert isinstance(client, TestClient)
+    assert isinstance(db_session, AsyncSession)
+    left = "a" + uuid.uuid4().hex[:8]
+    right = "r" + uuid.uuid4().hex[:8]
+    canary = "secretcanary" + uuid.uuid4().hex
+    for name, text in ((left, "local hello"), (right, canary)):
+        authorize(client, [left, right], primary=name)
+        assert client.post("/v3/workspaces", json={"name": name}).status_code in (
+            200,
+            201,
+        )
+        assert client.post(
+            f"/v3/workspaces/{name}/sessions", json={"id": "s1"}
+        ).status_code in (200, 201)
+        assert client.post(
+            f"/v3/workspaces/{name}/peers", json={"name": "p1"}
+        ).status_code in (200, 201)
+        posted = client.post(
+            f"/v3/workspaces/{name}/sessions/s1/messages",
+            json={"messages": [{"content": text, "peer_id": "p1"}]},
+        )
+        assert posted.status_code in (200, 201), posted.text
+        bound = set_workspace(name)
+        try:
+            db_session.add(
+                models.Collection(observer="p1", observed="p1", workspace_name=name)
+            )
+            await db_session.commit()
+            db_session.add(
+                models.Document(
+                    content=text,
+                    observer="p1",
+                    observed="p1",
+                    workspace_name=name,
+                    session_name="s1",
+                    subject_ref="customer:1",
+                )
+            )
+            await db_session.commit()
+        finally:
+            reset_workspace(bound)
+    authorize(client, [left, right], primary=left)
+    return left, right, canary
+
+
+def _captured(server: Any) -> str:
+    return json.dumps(server.records)
+
+
+async def test_brief_stays_inside_the_callers_workspace(
+    client: object, db_session: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A brief for A does not embed or return the other workspace's canary."""
+    from starlette.testclient import TestClient
+
+    from tests.sentica.mock_gateway import (
+        MockGateway,
+        apply_gateway_env,
+        forbid_provider_sdks,
+        use_real_embeddings,
+    )
+
+    assert isinstance(client, TestClient)
+    left, _right, canary = await _seed_canary_pair(client, db_session)
+    gateway = MockGateway(strict=True)
+    apply_gateway_env(monkeypatch, gateway.start())
+    forbid_provider_sdks(monkeypatch)
+    use_real_embeddings(monkeypatch)
+    try:
+        response = client.post(
+            f"/v3/workspaces/{left}/peers/p1/brief",
+            json={"token_budget": 200, "query": "local hello"},
+        )
+    finally:
+        gateway.close()
+    assert response.status_code == 200, response.text
+    blob = response.text + _captured(gateway)
+    assert canary not in blob
+    assert gateway.records
+
+
+async def test_subject_change_and_deletion_leave_no_canary_text(
+    client: object, db_session: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Change and deletion responses are counts. They do not carry the canary."""
+    from starlette.testclient import TestClient
+
+    from tests.sentica.mock_gateway import (
+        MockGateway,
+        apply_gateway_env,
+        forbid_provider_sdks,
+    )
+
+    assert isinstance(client, TestClient)
+    left, _right, canary = await _seed_canary_pair(client, db_session)
+    gateway = MockGateway(strict=True)
+    apply_gateway_env(monkeypatch, gateway.start())
+    forbid_provider_sdks(monkeypatch)
+    try:
+        changed = client.post(f"/v3/workspaces/{left}/subjects/customer:1/changed")
+        deleted = client.post(
+            f"/v3/workspaces/{left}/deletions",
+            json={"peer_id": "p1"},
+        )
+    finally:
+        gateway.close()
+    assert changed.status_code == 200, changed.text
+    assert deleted.status_code == 201, deleted.text
+    blob = changed.text + deleted.text + _captured(gateway)
+    assert canary not in blob
+    assert "stale_count" in changed.text
+    assert "document_count" in deleted.text
+
+
+async def test_synthesis_stays_inside_the_callers_workspace(
+    client: object, db_session: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Turning synthesis on does not read the other workspace."""
+    from starlette.testclient import TestClient
+
+    from tests.sentica.mock_gateway import (
+        MockGateway,
+        apply_gateway_env,
+        forbid_provider_sdks,
+    )
+
+    assert isinstance(client, TestClient)
+    left, _right, canary = await _seed_canary_pair(client, db_session)
+    gateway = MockGateway(strict=True)
+    apply_gateway_env(monkeypatch, gateway.start())
+    forbid_provider_sdks(monkeypatch)
+    try:
+        response = client.put(
+            f"/v3/workspaces/{left}/synthesis",
+            json={"enabled": True},
+        )
+    finally:
+        gateway.close()
+    assert response.status_code == 200, response.text
+    assert canary not in response.text + _captured(gateway)
+
+
+async def test_run_dreams_stays_inside_the_callers_workspace(
+    client: object, db_session: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dream prompt for A contains A's conclusion and not the canary."""
+    from datetime import UTC, datetime
+
+    from tests.sentica.mock_gateway import (
+        MockGateway,
+        apply_gateway_env,
+        forbid_provider_sdks,
+    )
+
+    left, _right, canary = await _seed_canary_pair(client, db_session)
+    gateway = MockGateway(strict=True)
+    apply_gateway_env(monkeypatch, gateway.start())
+    forbid_provider_sdks(monkeypatch)
+    from src.sentica.dreams import run_dreams
+    from src.sentica.workspace_scope import reset_workspace, set_workspace
+
+    # dreams_due sets the workspace before run_dreams. Without that setting,
+    # row-level security hides the workspace and the dream never calls the model.
+    bound = set_workspace(left)
+    try:
+        created = await run_dreams(left, now=datetime(2026, 10, 15, tzinfo=UTC))
+    finally:
+        reset_workspace(bound)
+        gateway.close()
+    blob = repr(created) + _captured(gateway)
+    assert "local hello" in blob
+    assert canary not in blob
+    assert any(
+        record["headers"].get("X-Sentica-Purpose") == "dream"
+        for record in gateway.records
+    )
+
+
+async def test_safety_model_check_does_not_see_the_other_workspace(
+    client: object, db_session: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The safety check is given A's conclusions, loaded by workspace."""
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from src import models
+    from src.sentica.safety import model_check_bans
+    from src.sentica.workspace_scope import reset_workspace, set_workspace
+    from tests.sentica.mock_gateway import (
+        MockGateway,
+        apply_gateway_env,
+        forbid_provider_sdks,
+    )
+
+    assert isinstance(db_session, AsyncSession)
+    left, _right, canary = await _seed_canary_pair(client, db_session)
+    bound = set_workspace(left)
+    try:
+        rows = (
+            await db_session.execute(
+                select(models.Document.content)
+                .where(models.Document.workspace_name == left)
+                .where(models.Document.deleted_at.is_(None))
+                .where(models.Document.superseded_by.is_(None))
+                .order_by(models.Document.created_at.desc())
+                .limit(40)
+            )
+        ).all()
+    finally:
+        reset_workspace(bound)
+    texts = [str(row[0]) for row in rows]
+    assert texts
+    assert canary not in "\n".join(texts)
+    gateway = MockGateway(strict=True)
+    apply_gateway_env(monkeypatch, gateway.start())
+    forbid_provider_sdks(monkeypatch)
+    monkeypatch.setenv("SENTICA_SAFETY_MODEL_CHECK", "on")
+    try:
+        dropped = await model_check_bans("\n".join(texts), workspace_name=left)
+    finally:
+        gateway.close()
+    assert dropped is False
+    blob = _captured(gateway)
+    assert "local hello" in blob
+    assert canary not in blob

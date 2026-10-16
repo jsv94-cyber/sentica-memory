@@ -16,7 +16,7 @@ from src.cache.client import cache as cache_client
 from src.config import ConfiguredModelSettings, settings
 from src.crud.session import session_cache_key
 from src.dependencies import tracked_db
-from src.exceptions import ResourceNotFoundException
+from src.exceptions import GatewayStructuredOutputError, ResourceNotFoundException
 from src.llm import HonchoLLMCallResponse, honcho_llm_call
 from src.llm.types import LLMTelemetryContext
 from src.models import Message
@@ -742,6 +742,8 @@ async def _create_summary(
                         summary_type=summary_type.name.lower(),
                         reason=SUMMARY_REJECTION_DEGENERATE,
                     )
+    except GatewayStructuredOutputError:
+        raise
     except Exception:
         logger.exception("Error generating summary!")
         # Fallback to a basic summary in case of error

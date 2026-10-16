@@ -221,20 +221,23 @@ Built:
 - Each function has its own model and an optional base URL. Headers are
   tenant, workspace, purpose, and request id. The request id is the
   telemetry span id when that is set, and the same id is reused for retries.
-- The daily token budget is in memory, per process, per tenant, per purpose.
-  A spent budget raises `GatewayBudgetExceeded` (429, `token budget
-  exhausted`) before the HTTP call. An outage, after retries of the same
-  model, raises `GatewayUnavailable` (503). The deriver leaves the queue
-  item unprocessed.
+- The daily token budget is a per-tenant total in the instance Redis, shared
+  by the API and the deriver. Per-purpose limits are optional. A response
+  without usage is charged an estimate, never zero. The authoritative budget
+  is enforced at the Sentica gateway. This counter is a backstop and can
+  slightly overshoot. A spent budget raises `GatewayBudgetExceeded` (429,
+  `token budget exhausted`) before the HTTP call. An outage, after retries
+  of the same model, raises `GatewayUnavailable` (503). The deriver leaves
+  the queue item unprocessed and backs off before the next claim.
 - Provider SDK imports stay on the Part B allow-list because gateway mode
   off still uses them. The M3 proof is that those constructors are not
   called while gateway mode is on.
 
 Decisions:
 
-- The budget is not shared across the API and the deriver. Each process
-  enforces the configured number on its own. A shared counter would need
-  another store, and the host must not keep memory content.
+- The budget backstop is shared across the API and the deriver through the
+  instance Redis. It stores token counts, not memory content. The
+  authoritative budget is enforced at the Sentica gateway.
 - A gateway HTTP 429 is an outage retry, not the local budget. The local
   budget never sends the request.
 

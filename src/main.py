@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import re
@@ -8,6 +9,8 @@ from contextlib import asynccontextmanager
 
 import sentry_sdk
 from fastapi import FastAPI, Request, Response
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi_pagination import add_pagination
@@ -341,6 +344,28 @@ def _memory_unavailable(exc: Exception) -> bool:
             return True
         current = current.__cause__ or current.__context__
     return False
+
+
+class _AsciiJSONResponse(JSONResponse):
+    """JSONResponse that escapes non-ASCII, so lone surrogates encode cleanly."""
+
+    def render(self, content: object) -> bytes:
+        return json.dumps(
+            content, ensure_ascii=True, allow_nan=False, separators=(",", ":")
+        ).encode("ascii")
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(_request: Request, exc: RequestValidationError):
+    """Same body as FastAPI's default handler, but safe to encode.
+
+    Validation errors echo the rejected input. When that input contains a lone
+    surrogate, the default UTF-8 render raises and the 422 turns into a 500.
+    """
+    return _AsciiJSONResponse(
+        status_code=422,
+        content={"detail": jsonable_encoder(exc.errors())},
+    )
 
 
 @app.exception_handler(Exception)

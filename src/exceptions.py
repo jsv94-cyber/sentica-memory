@@ -100,6 +100,19 @@ class GatewayUnavailable(HonchoException):
 
 
 @final
+class GatewayStructuredOutputError(HonchoException):
+    """The gateway returned structured output that cannot be used.
+
+    The message is a failure class plus a hash and a length. It does not
+    include the model text. There is no Sentry policy: this fork does not
+    report the failure to Sentry.
+    """
+
+    status_code = 502
+    detail = "structured output failed"
+
+
+@final
 class ConflictException(HonchoException):
     """Exception raised when there's a resource conflict."""
 

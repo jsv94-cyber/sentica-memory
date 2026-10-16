@@ -1,6 +1,6 @@
 # Upstream triage
 
-Base is plastic-labs/honcho v3.3.0, commit `608aec8a928da13c540262ed980c569448fb53ab`. Compared with `upstream/main` at `2bdd4587921dc0cbfabfe84692be02a29f3e0179` on 2026-10-15. There is no release tag after v3.3.0. Fourteen commits. This report does not change code.
+Base is plastic-labs/honcho v3.3.0, commit `608aec8a928da13c540262ed980c569448fb53ab`. Compared with `upstream/main` at `2bdd4587921dc0cbfabfe84692be02a29f3e0179` on 2026-10-15. There is no release tag after v3.3.0. Fourteen commits. R1 took `2bdd4587` and adapted `261357ef` on the gateway path. It did not take `c384783d`. This report does not change runtime code by itself.
 
 A path counts as one we use when it is on the API, the deriver, the migrations, or the CI job that runs those. A conflict means the commit edits a file this fork has also edited since v3.3.0.
 
@@ -14,7 +14,7 @@ Files: `src/security.py`, `src/routers/keys.py`, `src/routers/sessions.py`, `src
 
 Touches a path we use: yes (`src/security.py` and the session and peer routers). Conflicts: yes, those three plus `docs/v3/openapi.json`.
 
-Recommendation: take now. It is an authorization bug. Stop for review, because it touches auth.
+Recommendation: do not take. The commit adds named-scope API keys. The hole it closes exists only inside that new key type. Sentica production uses broker tokens, with the tenant and the workspace set on the token, and does not use Honcho API keys. Taking the commit would add a second credential system and conflict with `src/security.py`, the session and peer routers, and `docs/v3/openapi.json`.
 
 ### `2bdd4587` fix: return 422, not 500, for request bodies with lone surrogates (#1387)
 
@@ -24,7 +24,7 @@ Files: `src/main.py`, `tests/routes/test_validation_api.py`.
 
 Touches a path we use: yes (`src/main.py`). Conflicts: yes.
 
-Recommendation: take now. A crafted body should not turn into a 500. Stop for review, because `src/main.py` is the request path this fork has changed.
+Recommendation: taken. R1 cherry-picked it as a validation 422, without the upstream trailer. A crafted body should not turn into a 500.
 
 ## Other commits
 
@@ -36,7 +36,7 @@ Files include `src/deriver/deriver.py`, `src/utils/summarizer.py`, `src/llm/api.
 
 Touches a path we use: yes (the deriver and the summarizer). Conflicts: no overlapping files.
 
-Recommendation: take later. It is a correctness fix on the deriver, which is a review path, so the cherry-pick stops for review.
+Recommendation: adapted, not cherry-picked. R1 fails the gateway path on malformed or refused structured output and retries, then raises `GatewayStructuredOutputError`. The message is a failure class plus a hash and a length. There is no Sentry policy and no provider-backend change. The Sentry fingerprints and the provider `validate_response` path stay upstream.
 
 ### `b05dca46` fix(deriver): normalize PromptRepresentation.explicit string shapes (#538)
 

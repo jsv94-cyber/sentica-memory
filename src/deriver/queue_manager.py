@@ -149,6 +149,9 @@ class QueueManager:
         self._current_poll_interval: float = (
             settings.DERIVER.POLLING_SLEEP_INTERVAL_SECONDS
         )
+        # A gateway outage grows the poll interval before the next claim.
+        self._gateway_outage_pending: bool = False
+        self._suppress_poll_reset: bool = False
 
         # Monotonic timestamp of the last stale-work-unit cleanup ATTEMPT.
         # None -> the first poll always runs cleanup (recovers rows left stale
@@ -548,6 +551,12 @@ class QueueManager:
         logger.debug("Starting polling loop")
         try:
             while not self.shutdown_event.is_set():
+                if self._gateway_outage_pending:
+                    self._gateway_outage_pending = False
+                    self._suppress_poll_reset = True
+                    await asyncio.sleep(self._jitter(self._advance_poll_interval()))
+                    continue
+
                 if self.queue_empty_flag.is_set():
                     # The empty-poll branch below already slept this cycle's
                     # interval; just clear the flag and re-query (no second
@@ -571,7 +580,10 @@ class QueueManager:
                     claimed_work_units = await self.get_and_claim_work_units()
                     if claimed_work_units:
                         if self._is_tenant_work(claimed_work_units):
-                            self._reset_poll_interval()
+                            if self._suppress_poll_reset:
+                                self._suppress_poll_reset = False
+                            else:
+                                self._reset_poll_interval()
                         for work_unit_key, aqs_id in claimed_work_units.items():
                             # Create a new task for processing this work unit
                             if not self.shutdown_event.is_set():
@@ -635,7 +647,19 @@ class QueueManager:
         """
         from src.exceptions import GatewayBudgetExceeded, GatewayUnavailable
 
-        if isinstance(error, GatewayBudgetExceeded | GatewayUnavailable):
+        if isinstance(error, GatewayUnavailable):
+            # The next poll waits out the grown interval instead of claiming
+            # this unit again on the base interval.
+            self._gateway_outage_pending = True
+            logger.warning(
+                "Gateway pause for work unit %s during %s: %s",
+                work_unit_key,
+                context,
+                error.__class__.__name__,
+            )
+            return True
+
+        if isinstance(error, GatewayBudgetExceeded):
             logger.warning(
                 "Gateway pause for work unit %s during %s: %s",
                 work_unit_key,
