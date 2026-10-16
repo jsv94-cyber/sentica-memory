@@ -1101,6 +1101,7 @@ def mock_tracked_db(request: pytest.FixtureRequest):
     # 20-statically-nested-block limit as this list grows.
     tracked_db_targets = [
         "src.dependencies.tracked_db",
+        "src.backlog.tracked_db",
         "src.sentica.retrieval.tracked_db",
         "src.sentica.dreams.tracked_db",
         "src.deriver.queue_manager.tracked_db",

@@ -1517,6 +1517,9 @@ def _broker_headers(monkeypatch: pytest.MonkeyPatch, tmp_path: object):
         for name in ("client.crt", "client.key", "ca.crt"):
             (root / name).write_text("present\n", encoding="utf-8")
         monkeypatch.setenv("SENTICA_MODE", "production")
+        monkeypatch.setenv(
+            "SENTICA_TENANT_HASH_KEY", "sentica-test-tenant-hash-key-32b!!"
+        )
         monkeypatch.setenv("SENTICA_TENANT_ID", "tenant-a")
         monkeypatch.setenv("SENTICA_DB_PROXY_HOST", "pgbouncer")
         monkeypatch.setenv("SENTICA_DB_PROXY_PORT", "6432")
