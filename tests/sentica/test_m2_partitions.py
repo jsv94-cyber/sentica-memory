@@ -1960,6 +1960,9 @@ def _relax_rls(*tables: str) -> Any:
             verb = "ENABLE" if enabled else "DISABLE"
             force = "FORCE" if enabled else "NO FORCE"
             with psycopg.connect(ddl_dsn(), autocommit=True) as conn:
+                # The request session must already be idle. A short lock
+                # timeout turns a leftover transaction into a failure.
+                _run(conn, "SET lock_timeout = '5s'")
                 for table in tables:
                     _run(
                         conn,
@@ -1991,6 +1994,14 @@ def _relax_rls(*tables: str) -> Any:
     return _window()
 
 
+async def _release_locks(db_session: object) -> None:
+    """End the caller's transaction so RLS DDL can take its lock."""
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    if isinstance(db_session, AsyncSession):
+        await db_session.commit()
+
+
 async def _one_document(
     db_session: Any, workspace_name: str, content: str
 ) -> dict[str, Any] | None:
@@ -2008,13 +2019,15 @@ async def _one_document(
                 models.Document.content == content,
             )
         )
-        if row is None:
-            return None
-        return {
-            "stale": bool(row.stale),
-            "content": row.content,
-            "embedding": row.embedding is not None,
-        }
+        found = None
+        if row is not None:
+            found = {
+                "stale": bool(row.stale),
+                "content": row.content,
+                "embedding": row.embedding is not None,
+            }
+        await db_session.commit()
+        return found
     finally:
         reset_workspace(bound)
 
@@ -2036,9 +2049,9 @@ async def _one_message(
                 models.Message.content == content,
             )
         )
-        if row is None:
-            return None
-        return str(row.content)
+        content_text = None if row is None else str(row.content)
+        await db_session.commit()
+        return content_text
     finally:
         reset_workspace(bound)
 
@@ -2098,11 +2111,13 @@ async def test_brief_stays_inside_the_callers_workspace(
     assert stored["embedding"] is True
 
     monkeypatch.setattr("src.sentica.retrieval._scoped", _unscoped_documents)
+    await _release_locks(db_session)
     with _relax_rls("documents"):
         leaked = client.post(
             f"/v3/workspaces/{left}/peers/p1/brief",
             json={"token_budget": 200},
         )
+        await _release_locks(db_session)
     assert leaked.status_code == 200, leaked.text
     assert canary in leaked.text
 
@@ -2193,7 +2208,8 @@ async def test_subject_change_and_deletion_leave_no_canary_text(
         await db.execute(delete(models.Message).where(models.Message.id.in_(ids)))
 
     monkeypatch.setattr("src.routers.subjects.mark_subject_changed", _unscoped_changed)
-    with _relax_rls("documents", "messages"):
+    await _release_locks(db_session)
+    with _relax_rls("documents", "messages", "queue"):
         leaked_change = client.post(
             f"/v3/workspaces/{other_left}/subjects/customer:other/changed"
         )
@@ -2238,6 +2254,7 @@ async def test_subject_change_and_deletion_leave_no_canary_text(
             f"/v3/workspaces/{other_left}/deletions",
             json={"peer_id": "p2"},
         )
+        await _release_locks(db_session)
     assert leaked_delete.status_code == 201, leaked_delete.text
     assert leaked_delete.json()["document_count"] == 2
     assert await _one_message(db_session, other_right, other_canary) is None
@@ -2260,7 +2277,9 @@ async def _configuration(db_session: Any, workspace_name: str) -> dict[str, Any]
         raw: Any = workspace.configuration or {}
         assert isinstance(raw, dict)
         copied = cast(dict[str, Any], raw)
-        return dict(copied)
+        snapshot = dict(copied)
+        await db_session.commit()
+        return snapshot
     finally:
         reset_workspace(bound)
 
@@ -2311,11 +2330,10 @@ async def test_synthesis_stays_inside_the_callers_workspace(
         await db.commit()
 
     monkeypatch.setattr("src.sentica.dreams.set_synthesis_enabled", _unscoped_synthesis)
-    with _relax_rls("workspaces"):
-        leaked = client.put(
-            f"/v3/workspaces/{left}/synthesis",
-            json={"enabled": False},
-        )
+    leaked = client.put(
+        f"/v3/workspaces/{left}/synthesis",
+        json={"enabled": False},
+    )
     assert leaked.status_code == 200, leaked.text
     after = await _configuration(db_session, right)
     assert after.get("note") == canary
@@ -2421,8 +2439,10 @@ async def test_safety_model_check_does_not_see_the_other_workspace(
         monkeypatch.setattr(
             "src.sentica.safety._conclusion_text_query", _unscoped_texts
         )
+        await _release_locks(db_session)
         with _relax_rls("documents"):
             await _store("local hello again")
+            await _release_locks(db_session)
         assert canary in _captured(gateway)
     finally:
         gateway.close()
