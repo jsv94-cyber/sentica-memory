@@ -12,7 +12,7 @@ import warnings
 from datetime import datetime
 from pathlib import Path
 from time import perf_counter
-from typing import final
+from typing import Any, cast, final
 
 import pytest
 from sqlalchemy import select, update
@@ -237,6 +237,68 @@ async def _search(
     )
 
 
+async def _knowledge_update_details(
+    db: AsyncSession,
+    businesses: dict[str, models.Workspace],
+    ids: dict[str, str],
+) -> list[str]:
+    """Why a knowledge-update question scored zero. Read on failure only."""
+    keys = [
+        key
+        for question in QUESTIONS
+        if question.category == "knowledge_updates"
+        for key in question.gold + question.forbidden
+    ]
+    stored = (
+        await db.execute(
+            select(
+                models.Document.id,
+                models.Document.superseded_by,
+                models.Document.subject_ref,
+                models.Document.embedding.is_(None),
+                models.Document.internal_metadata,
+            ).where(models.Document.id.in_([ids[key] for key in keys]))
+        )
+    ).all()
+    by_id = {str(row[0]): row for row in stored}
+    details: list[str] = []
+    for question in QUESTIONS:
+        if question.category != "knowledge_updates":
+            continue
+        found = await _search(
+            db,
+            businesses[question.business].name,
+            question.query,
+            question.slot,
+            since=question.since,
+        )
+        retrieved = {item.id for item in found}
+        for key in question.gold + question.forbidden:
+            row = by_id.get(ids[key])
+            raw_meta = row[4] if row is not None else None
+            meta = cast(dict[str, Any], raw_meta) if isinstance(raw_meta, dict) else {}
+            trust = cast(object, meta.get("source_trust"))
+            relation = cast(object, meta.get("relation"))
+            details.append(
+                key
+                + " hit="
+                + str(ids[key] in retrieved)
+                + " superseded="
+                + str(None if row is None else row[1])
+                + " subject="
+                + str(None if row is None else row[2])
+                + " embedding_null="
+                + str(None if row is None else row[3])
+                + " trust="
+                + str(trust)
+                + " relation="
+                + str(relation)
+                + " n="
+                + str(len(retrieved))
+            )
+    return details
+
+
 async def test_retrieval_eval_matches_baseline(db_session: AsyncSession) -> None:
     businesses, ids = await _seed(db_session)
     rows: list[tuple[str, float, float]] = []
@@ -258,7 +320,10 @@ async def test_retrieval_eval_matches_baseline(db_session: AsyncSession) -> None
     current = category_means(rows)
     text = _BASELINE.read_text(encoding="utf-8")
     failed = regressions(current, parse_baseline(text))
-    assert not failed, "; ".join(failed)
+    if failed:
+        details = await _knowledge_update_details(db_session, businesses, ids)
+        assert not failed, "; ".join(failed) + " || " + "; ".join(details)
+    assert not failed
 
     sample = QUESTIONS[0]
     started = perf_counter()
