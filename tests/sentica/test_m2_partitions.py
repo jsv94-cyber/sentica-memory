@@ -2416,4 +2416,3 @@ async def test_run_dreams_stays_inside_the_callers_workspace(
         reset_workspace(bound)
         gateway.close()
     assert canary in repr(leaked) + _captured(gateway)
-

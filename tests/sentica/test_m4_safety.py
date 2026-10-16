@@ -691,6 +691,7 @@ async def test_production_refuses_a_card_write_and_keeps_a_trusted_conclusion(
     from src.security import JWTParams
 
     monkeypatch.setattr("src.sentica.runtime.production_enabled", lambda: True)
+
     def _accept_token(_token: str) -> JWTParams:
         return JWTParams(t="", ad=True)
 

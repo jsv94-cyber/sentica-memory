@@ -1670,8 +1670,6 @@ class TestGetReasoningChain:
 
 
 @pytest.mark.asyncio
-
-
 class TestPeerCardEntryValidator:
     """Unit tests for the pure structural validator."""
 
