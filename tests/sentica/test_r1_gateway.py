@@ -30,7 +30,6 @@ def _arguments(name: str) -> dict[str, Any]:
 
 
 def _decide(path: str, body: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
-    del headers
     if path.rstrip("/").endswith("/embeddings"):
         incoming = body.get("input", [])
         texts = [incoming] if isinstance(incoming, str) else list(incoming)
@@ -54,10 +53,14 @@ def _decide(path: str, body: dict[str, Any], headers: dict[str, str]) -> dict[st
             return chat_message('{"explicit":[{"content":"local hello"}]}')
         return chat_message("{}")
     names = function_names(body)
+    # Dialectic keeps calling tools until the iteration limit drops them.
+    # The configured limit is 2 in CI and 1 by default, so stopping after
+    # one result would skip the final call without tools.
+    if names and headers.get("X-Sentica-Purpose") == "dialectic":
+        return chat_message(None, [("c1", names[0], _arguments(names[0]))])
     if names and not message_has_tool(body):
         return chat_message(None, [("c1", names[0], _arguments(names[0]))])
     if names and message_has_tool(body):
-        # One tool round, then a normal answer, unless the caller omitted tools.
         return chat_message("ok")
     return chat_message("ok")
 

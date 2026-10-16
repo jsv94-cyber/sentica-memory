@@ -212,7 +212,10 @@ def message_has_tool(body: dict[str, Any]) -> bool:
     if not isinstance(messages, list):
         return False
     for message in cast(list[object], messages):
-        if isinstance(message, dict) and cast(dict[str, Any], message).get("role") == "tool":
+        if (
+            isinstance(message, dict)
+            and cast(dict[str, Any], message).get("role") == "tool"
+        ):
             return True
     return False
 
@@ -286,7 +289,10 @@ def apply_gateway_env(
     """Point gateway mode at one server and name every purpose model."""
     monkeypatch.setenv("SENTICA_GATEWAY_MODE", "on")
     monkeypatch.setenv("SENTICA_GATEWAY_BASE_URL", base_url)
-    monkeypatch.setenv("SENTICA_TENANT_ID", tenant)
+    # The runtime-role job already loaded its tenant. Replacing it reloads
+    # the instance and every broker token becomes the wrong tenant.
+    if not os.environ.get("SENTICA_TENANT_ID", "").strip():
+        monkeypatch.setenv("SENTICA_TENANT_ID", tenant)
     monkeypatch.setenv("SENTICA_GATEWAY_RETRY_ATTEMPTS", "3")
     monkeypatch.setenv("SENTICA_GATEWAY_RETRY_WAIT_SECONDS", "0")
     monkeypatch.delenv("SENTICA_GATEWAY_DAILY_TOKEN_BUDGET", raising=False)

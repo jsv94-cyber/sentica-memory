@@ -102,9 +102,7 @@ def test_production_refuses_gateway_mode_unless_it_is_on(
         load_instance()
 
 
-@pytest.mark.parametrize(
-    "value", ["on", "true", "yes", "1", "ON", "True", "  yes  "]
-)
+@pytest.mark.parametrize("value", ["on", "true", "yes", "1", "ON", "True", "  yes  "])
 def test_production_starts_when_gateway_mode_is_explicitly_on(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, value: str
 ) -> None:
