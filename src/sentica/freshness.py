@@ -341,6 +341,11 @@ async def forget(
     documents = await _with_descendants(db, workspace_name, documents)
     texts = [document.content for document in documents if document.content]
     message_ids, public_ids = _message_keys(documents)
+    session_names = {
+        document.session_name
+        for document in documents
+        if document.session_name is not None
+    }
     if peer_name is not None:
         peer_messages = (
             await db.execute(_peer_message_stmt(workspace_name, peer_name))
@@ -349,7 +354,13 @@ async def forget(
             message_ids.add(int(message_id))
             public_ids.add(str(public_id))
     embedding_count = await _count_embeddings(db, workspace_name, public_ids)
-    summary_count = await _scrub_summaries(db, workspace_name, message_ids, texts=texts)
+    summary_count = await _scrub_summaries(
+        db,
+        workspace_name,
+        message_ids,
+        texts=texts,
+        session_names=session_names,
+    )
     forgotten_ids = {document.id for document in documents}
     await _scrub_digests(db, workspace_name, texts, forgotten_ids)
     await _delete_messages(db, workspace_name, message_ids)
@@ -571,9 +582,23 @@ async def _scrub_summaries(
     message_ids: set[int],
     *,
     texts: list[str] | None = None,
+    session_names: set[str] | None = None,
 ) -> int:
     if not message_ids and not texts:
         return 0
+    earliest_by_session: dict[str, int] = {}
+    if message_ids:
+        located = await db.execute(
+            select(models.Message.id, models.Message.session_name)
+            .where(models.Message.workspace_name == workspace_name)
+            .where(models.Message.id.in_(sorted(message_ids)))
+            .order_by(models.Message.id)
+        )
+        for message_id, session_name in located:
+            current = earliest_by_session.get(str(session_name))
+            numbered = int(message_id)
+            if current is None or numbered < current:
+                earliest_by_session[str(session_name)] = numbered
     removed = 0
     sessions = list(
         await db.scalars(
@@ -592,22 +617,23 @@ async def _scrub_summaries(
             continue
         kept: dict[str, Any] = {}
         session_removed = 0
+        cutoff = earliest_by_session.get(session.name)
+        in_scope = cutoff is not None or session.name in (session_names or set())
         summary_map = cast(dict[object, object], summaries)
         for key, value in summary_map.items():
             payload = cast(dict[str, Any], value) if isinstance(value, dict) else {}
             message_id = payload.get("message_id")
-            start_id = payload.get("message_start_id")
             content = payload.get("content")
-            contains_deleted = isinstance(content, str) and any(
-                text and text in content for text in texts or []
+            contains_deleted = (
+                in_scope
+                and isinstance(content, str)
+                and any(text and text in content for text in texts or [])
             )
-            covers_deleted = False
-            if isinstance(start_id, int) and isinstance(message_id, int):
-                covers_deleted = any(
-                    start_id <= deleted <= message_id for deleted in message_ids
-                )
-            elif isinstance(message_id, int) and message_id in message_ids:
-                covers_deleted = True
+            covers_deleted = (
+                cutoff is not None
+                and isinstance(message_id, int)
+                and message_id >= cutoff
+            )
             if covers_deleted or contains_deleted:
                 session_removed += 1
                 continue

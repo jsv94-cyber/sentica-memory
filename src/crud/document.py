@@ -1338,7 +1338,7 @@ async def create_observations(
                 content=obs.content,
                 level="explicit",  # Manually created observations are always explicit
                 times_derived=1,
-                internal_metadata={},  # No message_ids since not derived from messages
+                internal_metadata={"source_trust": "owner"},
                 session_name=obs.session_id,
                 embedding=embedding,
             )
@@ -1350,7 +1350,7 @@ async def create_observations(
                 content=obs.content,
                 level="explicit",  # Manually created observations are always explicit
                 times_derived=1,
-                internal_metadata={},  # No message_ids since not derived from messages
+                internal_metadata={"source_trust": "owner"},
                 session_name=obs.session_id,
             )
         doc.subject_ref = obs.subject_ref

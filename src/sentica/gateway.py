@@ -851,15 +851,21 @@ def _append_tools(
 async def _execute_tools(
     calls: list[dict[str, Any]],
     tool_executor: Callable[[str, dict[str, Any]], Any],
+    offered: set[str],
 ) -> tuple[list[dict[str, Any]], list[tuple[str, str]]]:
+    from src.utils.agent_tools import unoffered_tool_refusal
+
     made: list[dict[str, Any]] = []
     results: list[tuple[str, str]] = []
     for call in calls:
         name = str(call["name"])
         parsed = cast(dict[str, Any], call["input"])
-        result = tool_executor(name, parsed)
-        if isinstance(result, Awaitable):
-            result = await result
+        if name not in offered:
+            result: Any = unoffered_tool_refusal(name)
+        else:
+            result = tool_executor(name, parsed)
+            if isinstance(result, Awaitable):
+                result = await result
         made.append({"tool_name": name, "tool_input": parsed, "name": name})
         results.append((str(call["id"]), str(result)))
     return made, results
@@ -1061,7 +1067,12 @@ async def complete_llm(
             final_output = completion_tokens
             parsed = await _accept(tools, tool_choice, fetched=True)
             break
-        made, results = await _execute_tools(calls, tool_executor)
+        offered = {
+            name
+            for tool in (tools or [])
+            if isinstance((name := tool.get("name")), str)
+        }
+        made, results = await _execute_tools(calls, tool_executor, offered)
         tool_calls_made.extend(made)
         _append_tools(history, calls, results)
         tool_output += completion_tokens

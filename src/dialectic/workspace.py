@@ -226,6 +226,11 @@ class WorkspaceDialecticAgent(DialecticAgent):
             agent_type="workspace_dialectic",
             parent_category="dialectic",
             evidence=self.evidence,
+            offered={
+                name
+                for tool in self._select_tools()
+                if isinstance((name := tool.get("name")), str)
+            },
         )
 
     # Workspace chat shares the base "dialectic_chat" reasoning-trace name;

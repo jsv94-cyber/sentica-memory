@@ -1360,7 +1360,7 @@
           "peers"
         ],
         "summary": "Set Peer Card",
-        "description": "Set a peer card for a specific peer relationship.\n\nSets the peer card that the observer peer has for the target peer.\nIf no target is specified, sets the observer's own peer card.",
+        "description": "Set a peer card for a specific peer relationship.\n\nSets the peer card that the observer peer has for the target peer.\nIf no target is specified, sets the observer's own peer card.\nProduction refuses the write. An owner correction is a trusted conclusion,\nwhich the rebuild keeps.",
         "operationId": "set_peer_card_v3_workspaces__workspace_id__peers__peer_id__card_put",
         "security": [
           {

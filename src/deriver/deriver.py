@@ -224,7 +224,7 @@ async def process_representation_tasks_batch(
             )
             synthesis_on = inference_enabled(workspace_row.configuration)
     except ResourceNotFoundException:
-        synthesis_on = True
+        synthesis_on = False
     if not synthesis_on:
         observations.deductive = []
         observations.inductive = []

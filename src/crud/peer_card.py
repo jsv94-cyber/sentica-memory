@@ -124,6 +124,12 @@ async def set_peer_card(
     await safe_cache_delete(cache_key)
 
 
+def card_trust_clauses() -> list[Any]:
+    """Keep a conclusion off the card when its trust is missing or external."""
+    trust = models.Document.internal_metadata["source_trust"].astext
+    return [trust.is_not(None), trust != "external"]
+
+
 async def replace_peer_card_from_conclusions(
     db: AsyncSession,
     workspace_name: str,
@@ -132,20 +138,18 @@ async def replace_peer_card_from_conclusions(
     observed: str,
 ) -> list[str]:
     """Rebuild a card from untainted conclusions. External text never lands on it."""
-    trust = models.Document.internal_metadata["source_trust"].astext
-    rows = (
-        await db.scalars(
-            select(models.Document.content)
-            .where(models.Document.workspace_name == workspace_name)
-            .where(models.Document.observer == observer)
-            .where(models.Document.observed == observed)
-            .where(models.Document.deleted_at.is_(None))
-            .where(models.Document.superseded_by.is_(None))
-            .where(trust.is_not(None))
-            .where(trust != "external")
-            .order_by(models.Document.created_at.asc(), models.Document.id.asc())
-        )
-    ).all()
+    statement = (
+        select(models.Document.content)
+        .where(models.Document.workspace_name == workspace_name)
+        .where(models.Document.observer == observer)
+        .where(models.Document.observed == observed)
+        .where(models.Document.deleted_at.is_(None))
+        .where(models.Document.superseded_by.is_(None))
+        .order_by(models.Document.created_at.asc(), models.Document.id.asc())
+    )
+    for clause in card_trust_clauses():
+        statement = statement.where(clause)
+    rows = (await db.scalars(statement)).all()
     await set_peer_card(
         db,
         workspace_name,

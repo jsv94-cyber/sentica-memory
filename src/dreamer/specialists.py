@@ -368,6 +368,7 @@ If you update it, send the full deduplicated list and remove stale entries.
             ]
 
             # Create tool executor with telemetry context
+            specialist_tools = self.get_tools(peer_card_enabled=peer_card_enabled)
             tool_executor: Callable[
                 [str, dict[str, Any]], Any
             ] = await create_tool_executor(
@@ -380,6 +381,11 @@ If you update it, send the full deduplicated list and remove stale entries.
                 run_id=run_id,
                 agent_type=self.name,
                 parent_category="dream",
+                offered={
+                    name
+                    for tool in specialist_tools
+                    if isinstance((name := tool.get("name")), str)
+                },
             )
 
             model_config = self.get_model_config()
@@ -411,7 +417,7 @@ If you update it, send the full deduplicated list and remove stale entries.
                     model_config=model_config,
                     prompt="",  # Ignored since we pass messages
                     max_tokens=effective_max_tokens,
-                    tools=self.get_tools(peer_card_enabled=peer_card_enabled),
+                    tools=specialist_tools,
                     tool_choice=None,
                     tool_executor=tool_executor,
                     max_tool_iterations=self.get_max_iterations(),

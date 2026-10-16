@@ -384,7 +384,6 @@ async def test_external_paraphrase_never_reaches_the_card(
     from src.deriver.deriver import process_representation_tasks_batch
     from src.dreamer.orchestrator import run_dream
     from src.llm.api import honcho_llm_call as real_llm_call
-    from src.utils.agent_tools import DEDUCTION_SPECIALIST_TOOLS, TOOLS
     from src.utils.config_helpers import get_configuration
     from tests.sentica.mock_gateway import (
         MockGateway,
@@ -529,7 +528,13 @@ async def test_external_paraphrase_never_reaches_the_card(
         ).one()
         assert derived.source_trust == "external"
 
-        DEDUCTION_SPECIALIST_TOOLS.append(TOOLS["update_peer_card"])
+        def _keep_every_conclusion() -> list[object]:
+            return []
+
+        monkeypatch.setattr(
+            "src.crud.peer_card.card_trust_clauses",
+            _keep_every_conclusion,
+        )
         await run_dream(
             workspace_name=workspace,
             observer="p1",
@@ -543,8 +548,6 @@ async def test_external_paraphrase_never_reaches_the_card(
         assert restored is not None
         assert "evil.example" in " ".join(restored)
     finally:
-        if TOOLS["update_peer_card"] in DEDUCTION_SPECIALIST_TOOLS:
-            DEDUCTION_SPECIALIST_TOOLS.remove(TOOLS["update_peer_card"])
         gateway.close()
         reset_workspace(token)
 
@@ -1074,31 +1077,46 @@ async def test_weekly_window_and_history_are_bounded(
 async def test_safety_model_check_fails_closed_in_production(
     client: TestClient, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """create_observations. A runtime error propagates and is not a ban."""
     workspace = _name("safe")
     await _open(client, db_session, workspace)
     monkeypatch.delenv("SENTICA_SAFETY_MODEL_CHECK", raising=False)
     monkeypatch.setattr("src.sentica.runtime.production_enabled", lambda: True)
 
+    from src.sentica.safety import drops, reset_drops
+
     async def _down(**_kwargs: object) -> HonchoLLMCallResponse[str]:
         raise RuntimeError("model down")
 
     monkeypatch.setattr("src.llm.api.honcho_llm_call", _down)
+    reset_drops()
+    before = drops()
     token = set_workspace(workspace)
     try:
-        stored = await crud.create_observations(
-            db_session,
-            [
-                schemas.ConclusionCreate(
-                    content="likes tea",
-                    observer_id="p1",
-                    observed_id="p1",
-                    session_id="s1",
-                )
-            ],
-            workspace,
-        )
+        with pytest.raises(RuntimeError, match="model down"):
+            await crud.create_observations(
+                db_session,
+                [
+                    schemas.ConclusionCreate(
+                        content="likes tea",
+                        observer_id="p1",
+                        observed_id="p1",
+                        session_id="s1",
+                    )
+                ],
+                workspace,
+            )
     finally:
         reset_workspace(token)
+    assert drops() == before
+    stored = list(
+        await db_session.scalars(
+            select(models.Document.content).where(
+                models.Document.workspace_name == workspace,
+                models.Document.content == "likes tea",
+            )
+        )
+    )
     assert stored == []
 
 
@@ -1778,3 +1796,276 @@ async def test_budget_pause_keeps_the_queue_item_pending(
         assert item.processed is False
     finally:
         reset_workspace(token)
+
+
+async def test_dream_budget_leaves_the_dream_unprocessed(
+    client: TestClient, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """process_item dream task. A budget error inside the specialist is retried."""
+    from src.deriver.consumer import process_item
+    from src.deriver.queue_manager import QueueManager
+    from src.exceptions import GatewayBudgetExceeded
+    from src.llm.api import honcho_llm_call as real_llm_call
+    from tests.sentica.mock_gateway import (
+        MockGateway,
+        apply_gateway_env,
+        chat_message,
+        function_names,
+        message_has_tool,
+    )
+
+    workspace = _name("dreambudget")
+    await _open(client, db_session, workspace)
+    monkeypatch.setenv("SENTICA_SAFETY_MODEL_CHECK", "on")
+    monkeypatch.setattr(settings.DREAM, "ENABLED", True)
+    asked = {"count": 0}
+
+    async def _ask(prompt: str, *, workspace_name: str) -> str:
+        del prompt, workspace_name
+        asked["count"] += 1
+        if asked["count"] == 1:
+            raise GatewayBudgetExceeded("token budget exhausted")
+        return "no"
+
+    monkeypatch.setattr("src.sentica.safety._ask", _ask)
+    gateway = MockGateway(strict=True)
+    cited = {"id": ""}
+
+    def decide(
+        path: str, body: dict[str, Any], headers: dict[str, str]
+    ) -> dict[str, Any]:
+        del headers
+        if path.endswith("/embeddings"):
+            return gateway._default_decide(path, body, {})  # pyright: ignore[reportPrivateUsage]
+        names = function_names(body)
+        if "create_observations_deductive" in names and not message_has_tool(body):
+            return chat_message(
+                None,
+                [
+                    (
+                        "deduce-1",
+                        "create_observations_deductive",
+                        {
+                            "observations": [
+                                {
+                                    "content": "therefore likes the window",
+                                    "source_ids": [cited["id"]],
+                                    "premises": ["likes tea"],
+                                }
+                            ]
+                        },
+                    )
+                ],
+            )
+        return chat_message("done")
+
+    gateway.decide = decide
+    apply_gateway_env(monkeypatch, gateway.start())
+    monkeypatch.setattr("src.dreamer.specialists.honcho_llm_call", real_llm_call)
+    token = set_workspace(workspace)
+    try:
+        await crud.create_documents(
+            db_session,
+            [
+                schemas.DocumentCreate(
+                    content="likes tea",
+                    session_name="s1",
+                    level="explicit",
+                    metadata=schemas.DocumentMetadata(
+                        message_ids=[],
+                        message_created_at="2026-01-02T00:00:00Z",
+                        source_trust="owner",
+                    ),
+                    embedding=_vector(1),
+                )
+            ],
+            workspace,
+            observer="p1",
+            observed="p1",
+        )
+        clean = (
+            await db_session.scalars(
+                select(models.Document).where(
+                    models.Document.workspace_name == workspace,
+                    models.Document.content == "likes tea",
+                )
+            )
+        ).one()
+        cited["id"] = clean.id
+        session = await crud.get_session(
+            db_session, session_name="s1", workspace_name=workspace
+        )
+        item = models.QueueItem(
+            work_unit_key=f"dream:omni:{workspace}:p1:p1",
+            task_type="dream",
+            payload={
+                "dream_type": "omni",
+                "observer": "p1",
+                "observed": "p1",
+                "session_name": "s1",
+            },
+            workspace_name=workspace,
+            session_id=session.id,
+        )
+        db_session.add(item)
+        await db_session.commit()
+        caught: Exception | None = None
+        try:
+            await process_item(item)
+        except Exception as exc:  # noqa: BLE001
+            caught = exc
+        assert isinstance(caught, GatewayBudgetExceeded)
+        paused = await QueueManager()._handle_processing_error(  # pyright: ignore[reportPrivateUsage]
+            caught,
+            [item],
+            item.work_unit_key,
+            "processing dream",
+        )
+        assert paused is True
+        await db_session.refresh(item)
+        assert item.processed is False
+        missing = list(
+            await db_session.scalars(
+                select(models.Document.content).where(
+                    models.Document.workspace_name == workspace,
+                    models.Document.content == "therefore likes the window",
+                )
+            )
+        )
+        assert missing == []
+        await process_item(item)
+        db_session.expire_all()
+        stored = list(
+            await db_session.scalars(
+                select(models.Document.content).where(
+                    models.Document.workspace_name == workspace,
+                    models.Document.content == "therefore likes the window",
+                )
+            )
+        )
+        assert stored == ["therefore likes the window"]
+    finally:
+        gateway.close()
+        reset_workspace(token)
+
+
+async def test_forget_drops_later_summaries_in_the_session(
+    client: TestClient, db_session: AsyncSession
+) -> None:
+    """POST /deletions. A later summary in the same session is removed."""
+    from sqlalchemy.orm.attributes import flag_modified
+
+    workspace = _name("later")
+    await _open(client, db_session, workspace)
+    token = set_workspace(workspace)
+    try:
+        early = models.Message(
+            session_name="s1",
+            peer_name="p1",
+            content="book the first flight",
+            workspace_name=workspace,
+            token_count=3,
+            seq_in_session=1,
+            source_trust="owner",
+        )
+        later = models.Message(
+            session_name="s1",
+            peer_name="p1",
+            content="and the return",
+            workspace_name=workspace,
+            token_count=3,
+            seq_in_session=2,
+            source_trust="owner",
+        )
+        other_session = models.Session(name="s2", workspace_name=workspace)
+        db_session.add(other_session)
+        await db_session.flush()
+        other = models.Message(
+            session_name="s2",
+            peer_name="p1",
+            content="other session text",
+            workspace_name=workspace,
+            token_count=3,
+            seq_in_session=1,
+            source_trust="owner",
+        )
+        db_session.add_all([early, later, other])
+        await db_session.flush()
+        await crud.create_documents(
+            db_session,
+            [
+                schemas.DocumentCreate(
+                    content="book the first flight",
+                    session_name="s1",
+                    level="explicit",
+                    subject_ref="booking",
+                    metadata=schemas.DocumentMetadata(
+                        message_ids=[early.id],
+                        message_created_at="2026-01-02T00:00:00Z",
+                        source_trust="owner",
+                    ),
+                    embedding=_vector(2),
+                )
+            ],
+            workspace,
+            observer="p1",
+            observed="p1",
+        )
+        first = (
+            await db_session.scalars(
+                select(models.Session).where(
+                    models.Session.workspace_name == workspace,
+                    models.Session.name == "s1",
+                )
+            )
+        ).one()
+        first.internal_metadata = {
+            "summaries": {
+                "early": {
+                    "content": "opened with the first flight",
+                    "message_start_id": early.id,
+                    "message_id": early.id,
+                    "created_at": "2026-10-02T00:00:00Z",
+                },
+                "later": {
+                    "content": "rolling summary of the return",
+                    "message_start_id": later.id,
+                    "message_id": later.id,
+                    "created_at": "2026-10-03T00:00:00Z",
+                },
+            }
+        }
+        flag_modified(first, "internal_metadata")
+        other_session.internal_metadata = {
+            "summaries": {
+                "short": {
+                    "content": "other session summary",
+                    "message_start_id": other.id,
+                    "message_id": other.id,
+                    "created_at": "2026-10-04T00:00:00Z",
+                }
+            }
+        }
+        flag_modified(other_session, "internal_metadata")
+        await db_session.commit()
+    finally:
+        reset_workspace(token)
+    deleted = client.post(
+        f"/v3/workspaces/{workspace}/deletions",
+        json={"subject_ref": "booking"},
+    )
+    assert deleted.status_code == 201, deleted.text
+    token = set_workspace(workspace)
+    try:
+        rows = list(
+            await db_session.scalars(
+                select(models.Session).where(models.Session.workspace_name == workspace)
+            )
+        )
+        by_name = {row.name: row.internal_metadata for row in rows}
+    finally:
+        reset_workspace(token)
+    same = by_name["s1"]["summaries"]
+    assert "later" not in same
+    assert "early" not in same
+    assert by_name["s2"]["summaries"]["short"]["content"] == "other session summary"

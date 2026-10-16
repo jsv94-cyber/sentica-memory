@@ -155,7 +155,7 @@ message insert. The reconciler fills `pending` rows
 A peer card is a list of strings on the observer peer, not a table.
 `src/crud/peer_card.py:22` `get_peer_card` reads `peers.internal_metadata`.
 The key is `peer_card` when observer and observed are the same, otherwise
-`{observed}_peer_card` (`src/crud/peer_card.py:123`).
+`{observed}_peer_card` (`src/crud/peer_card.py:169`).
 `src/crud/peer_card.py:55` `set_peer_card` JSONB-merges that key. A scope may
 observe, but a card is never about a scope.
 
@@ -240,12 +240,12 @@ run inside the API process unless `DERIVER.SCHEDULER` is set to `api`.
 
 ## Where every model call is made
 
-New conclusions pass `src/sentica/safety.py:73` `banned_category` before
+New conclusions pass `src/sentica/safety.py:74` `banned_category` before
 they are stored. The deriver, summary, and dream prompts include that rule.
 
 Chat completions go through `src/llm/api.py:147` `honcho_llm_call`. When
 `SENTICA_GATEWAY_MODE` is on, `src/llm/api.py:201` returns before any
-provider is chosen. `src/sentica/gateway.py:868` `complete_llm` posts to
+provider is chosen. `src/sentica/gateway.py:874` `complete_llm` posts to
 that function's OpenAI-compatible URL and keeps the same model on every
 retry. Gateway mode off resolves a model config, retries, and either calls
 `src/llm/executor.py` `honcho_llm_call_inner` or the tool loop in
@@ -263,15 +263,15 @@ Call sites of `honcho_llm_call`:
 | Purpose | Call |
 | --- | --- |
 | Deriver batch | `src/deriver/deriver.py:162` |
-| Dialectic answer | `src/dialectic/core.py:589` |
-| Dialectic stream | `src/dialectic/core.py:682` |
+| Dialectic answer | `src/dialectic/core.py:594` |
+| Dialectic stream | `src/dialectic/core.py:687` |
 | Short summary | `src/utils/summarizer.py:289` |
 | Long summary | `src/utils/summarizer.py:325` |
-| Dream specialists | `src/dreamer/specialists.py:410` |
+| Dream specialists | `src/dreamer/specialists.py:416` |
 
 Dialectic is reached from `POST /v3/.../peers/{peer_id}/chat`
-(`src/routers/peers.py:244`), which calls `src/dialectic/chat.py:50`
-`agentic_chat`. The agent builds its prompt in `src/dialectic/core.py:122`
+(`src/routers/peers.py:271`), which calls `src/dialectic/chat.py:50`
+`agentic_chat`. The agent builds its prompt in `src/dialectic/core.py:126`
 and then loops on tools until it can answer.
 
 Embeddings do not use `honcho_llm_call`. `src/embedding_client.py:711`
@@ -298,9 +298,9 @@ Callers are message create (fast path), the reconciler
 | Short session summary | `src/utils/summarizer.py:149` `short_summary_prompt` |
 | Long session summary | `src/utils/summarizer.py:189` `long_summary_prompt` |
 | Dream peer-card rules | `src/dreamer/specialists.py:79` `PEER_CARD_SYSTEM_SECTION` |
-| Deduction specialist | `src/dreamer/specialists.py:631` |
-| Induction specialist | `src/dreamer/specialists.py:765` |
-| Peer-card maintenance dream | `src/dreamer/specialists.py:905` |
+| Deduction specialist | `src/dreamer/specialists.py:637` |
+| Induction specialist | `src/dreamer/specialists.py:771` |
+| Peer-card maintenance dream | `src/dreamer/specialists.py:934` |
 
 Dream user prompts are the `build_user_prompt` methods on those specialist
 classes, next to the system prompts above. Custom instructions from workspace

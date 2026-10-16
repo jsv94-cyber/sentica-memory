@@ -10,7 +10,6 @@ import logging
 import os
 import re
 import threading
-from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -144,31 +143,6 @@ def model_check_enabled() -> bool:
     )
 
 
-def _conclusion_text_query(workspace_name: str) -> Any:
-    """Recent conclusion text for one workspace. The model check uses this."""
-    from sqlalchemy import select
-
-    from src import models
-
-    return (
-        select(models.Document.content)
-        .where(models.Document.workspace_name == workspace_name)
-        .where(models.Document.deleted_at.is_(None))
-        .where(models.Document.superseded_by.is_(None))
-        .order_by(models.Document.created_at.desc())
-        .limit(40)
-    )
-
-
-async def _recent_conclusion_texts(workspace_name: str) -> list[str]:
-    """Load conclusion text, then return. The caller must not hold this session."""
-    from src.dependencies import tracked_db
-
-    async with tracked_db("safety.conclusions", read_only=True) as db:
-        rows = (await db.scalars(_conclusion_text_query(workspace_name))).all()
-    return [str(row) for row in rows]
-
-
 def is_safety_outage(exc: BaseException) -> bool:
     """True when the queue item must be retried instead of dropping the text."""
     return _propagates(exc)
@@ -185,6 +159,20 @@ def _propagates(exc: BaseException) -> bool:
     except ImportError:
         return False
     return isinstance(exc, redis_errors.RedisError)
+
+
+def _unparseable_failure(exc: BaseException) -> bool:
+    """A gateway validation error, a malformed 200, or a 4xx is not a ban."""
+    from src.exceptions import ValidationException
+
+    if isinstance(exc, ValidationException):
+        return True
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int) and 400 <= status < 500:
+        return True
+    response = getattr(exc, "response", None)
+    code = getattr(response, "status_code", None)
+    return isinstance(code, int) and 400 <= code < 500
 
 
 def _classify(answer: str) -> str:
@@ -218,9 +206,10 @@ async def model_check_bans(text: str, *, workspace_name: str | None) -> str:
     """Ask the configured model when the optional check is on.
 
     Returns ``yes``, ``no``, or ``unparseable``. Only ``yes`` is a ban.
-    An unparseable reply is asked once more. Gateway, budget, and Redis
-    errors propagate so the queue item is retried. The prompt is this line
-    only. A workspace-scoped read still runs and its text is not appended.
+    An unparseable reply, a gateway validation error, a malformed 200, or a
+    4xx is asked once more and then dropped with the unparseable counter.
+    Gateway, budget, and Redis errors propagate. Any other exception is
+    raised and is not counted as a ban. The prompt is this line only.
     An open database session is a programming error.
     """
     if not model_check_enabled():
@@ -228,8 +217,6 @@ async def model_check_bans(text: str, *, workspace_name: str | None) -> str:
     if not workspace_name:
         logger.warning("Safety model check refused a conclusion with no workspace")
         return "yes"
-    scoped = await _recent_conclusion_texts(workspace_name)
-    logger.debug("Safety check scoped conclusion count=%s", len(scoped))
     from src.dependencies import open_db_sessions
 
     if open_db_sessions() > 0:
@@ -241,15 +228,19 @@ async def model_check_bans(text: str, *, workspace_name: str | None) -> str:
         + "medical reason for leave. Reply no otherwise.\n\n"
         + text
     )
-    try:
-        verdict = _classify(await _ask(prompt, workspace_name=workspace_name))
-        if verdict == "unparseable":
+    verdict = "unparseable"
+    for _attempt in range(2):
+        try:
             verdict = _classify(await _ask(prompt, workspace_name=workspace_name))
-    except Exception as exc:
-        if _propagates(exc):
-            raise
-        logger.warning("Safety model check failed closed")
-        return "yes"
+        except Exception as exc:
+            if _propagates(exc):
+                raise
+            if _unparseable_failure(exc):
+                verdict = "unparseable"
+            else:
+                raise
+        if verdict != "unparseable":
+            return verdict
     return verdict
 
 

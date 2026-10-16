@@ -75,7 +75,6 @@ EXPECTED_M2_NODE_IDS: frozenset[str] = frozenset(
         "tests/sentica/test_m2_partitions.py::test_subject_change_and_deletion_leave_no_canary_text",
         "tests/sentica/test_m2_partitions.py::test_synthesis_stays_inside_the_callers_workspace",
         "tests/sentica/test_m2_partitions.py::test_run_dreams_stays_inside_the_callers_workspace",
-        "tests/sentica/test_m2_partitions.py::test_safety_model_check_does_not_see_the_other_workspace",
         "tests/sentica/test_m2_carryover.py::test_status_check_fails_when_the_runtime_role_job_fails",
         "tests/sentica/test_m2_carryover.py::test_workflows_pin_ubuntu_2404_and_node24_actions",
         "tests/sentica/test_m2_carryover.py::test_bounded_session_method_times_out[rollback]",
@@ -114,6 +113,8 @@ EXPECTED_M2_NODE_IDS: frozenset[str] = frozenset(
         "tests/sentica/test_m2_data.py::test_summary_check_runs_before_the_save_session",
         "tests/sentica/test_m2_data.py::test_forget_route_drops_descendants_digests_summaries_and_the_card",
         "tests/sentica/test_m2_data.py::test_budget_pause_keeps_the_queue_item_pending",
+        "tests/sentica/test_m2_data.py::test_dream_budget_leaves_the_dream_unprocessed",
+        "tests/sentica/test_m2_data.py::test_forget_drops_later_summaries_in_the_session",
     }
 )
 

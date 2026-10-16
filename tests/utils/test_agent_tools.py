@@ -23,7 +23,6 @@ from src.utils.agent_tools import (
     DIALECTIC_TOOLS,
     DIALECTIC_TOOLS_MINIMAL,
     MAX_PEER_CARD_ENTRY_LENGTH,
-    MAX_PEER_CARD_FACTS,
     PEER_CARD_ALLOWED_PREFIXES,
     WORKSPACE_DIALECTIC_TOOLS,
     WORKSPACE_TOOLS_MINIMAL,
@@ -44,12 +43,11 @@ from src.utils.agent_tools import (
     _handle_search_memory,  # pyright: ignore[reportPrivateUsage]
     _handle_search_messages,  # pyright: ignore[reportPrivateUsage]
     _handle_search_messages_temporal,  # pyright: ignore[reportPrivateUsage]
-    _handle_update_peer_card,  # pyright: ignore[reportPrivateUsage]
     _normalize_observation_id,  # pyright: ignore[reportPrivateUsage]
-    _validate_peer_card_entry,  # pyright: ignore[reportPrivateUsage]
     create_observations,
     create_tool_executor,
     get_observation_context,
+    validate_peer_card_entry,
 )
 from src.utils.evidence import EvidenceAccumulator
 
@@ -1672,229 +1670,6 @@ class TestGetReasoningChain:
 
 
 @pytest.mark.asyncio
-class TestUpdatePeerCard:
-    """Tests for _handle_update_peer_card."""
-
-    async def test_creates_peer_card(
-        self,
-        db_session: AsyncSession,
-        tool_test_data: Any,
-        make_tool_context: Callable[..., ToolContext],
-    ):
-        """Creates/updates peer card with facts."""
-        workspace, peer1, peer2, _, _, _ = tool_test_data
-        ctx = make_tool_context()
-
-        result = await _handle_update_peer_card(
-            ctx,
-            {
-                "content": [
-                    "IDENTITY: Name: John",
-                    "ATTRIBUTE: Location: NYC",
-                    "ATTRIBUTE: Occupation: Engineer",
-                ]
-            },
-        )
-
-        assert "Updated peer card" in result
-
-        # Refresh the observer so the identity map picks up the committed update
-        await db_session.refresh(peer1)
-        # Verify DB state
-        peer_card = await crud.get_peer_card(
-            db_session,
-            workspace_name=workspace.name,
-            observer=peer1.name,
-            observed=peer2.name,
-        )
-        assert peer_card is not None
-        assert "IDENTITY: Name: John" in peer_card
-
-    async def test_deduplicates_and_caps_peer_card(
-        self,
-        db_session: AsyncSession,
-        tool_test_data: Any,
-        make_tool_context: Callable[..., ToolContext],
-    ):
-        """Normalizes peer card updates to avoid unbounded growth."""
-        workspace, peer1, peer2, _, _, _ = tool_test_data
-        ctx = make_tool_context()
-
-        oversized = [
-            "IDENTITY: Name: John",
-            "  IDENTITY: Name: John  ",
-            "",
-            "   ",
-        ]
-        oversized.extend(
-            [f"IDENTITY: Aliases: alias-{i}" for i in range(MAX_PEER_CARD_FACTS + 5)]
-        )
-
-        await _handle_update_peer_card(ctx, {"content": oversized})
-
-        # Refresh the observer so the identity map picks up the committed update
-        await db_session.refresh(peer1)
-        peer_card = await crud.get_peer_card(
-            db_session,
-            workspace_name=workspace.name,
-            observer=peer1.name,
-            observed=peer2.name,
-        )
-        assert peer_card is not None
-        assert len(peer_card) == MAX_PEER_CARD_FACTS
-        assert all(line.strip() for line in peer_card)
-        assert peer_card.count("IDENTITY: Name: John") == 1
-
-    async def test_none_content_preserves_existing_card(
-        self,
-        db_session: AsyncSession,
-        tool_test_data: Any,
-        make_tool_context: Callable[..., ToolContext],
-    ):
-        """None content should not overwrite the existing peer card."""
-        workspace, peer1, peer2, _, _, _ = tool_test_data
-        ctx = make_tool_context()
-
-        # First, create a valid peer card
-        await _handle_update_peer_card(
-            ctx,
-            {"content": ["IDENTITY: Name: Alice", "ATTRIBUTE: Location: NYC"]},
-        )
-
-        # Now attempt to update with None — should be a no-op
-        result = await _handle_update_peer_card(ctx, {"content": None})
-        assert "empty" in str(result).lower()
-
-        # Refresh the observer so the identity map picks up the committed update
-        await db_session.refresh(peer1)
-        # Verify original card is preserved
-        peer_card = await crud.get_peer_card(
-            db_session,
-            workspace_name=workspace.name,
-            observer=peer1.name,
-            observed=peer2.name,
-        )
-        assert peer_card is not None
-        assert "IDENTITY: Name: Alice" in peer_card
-
-    async def test_empty_list_preserves_existing_card(
-        self,
-        db_session: AsyncSession,
-        tool_test_data: Any,
-        make_tool_context: Callable[..., ToolContext],
-    ):
-        """Empty list should not clear the existing peer card."""
-        workspace, peer1, peer2, _, _, _ = tool_test_data
-        ctx = make_tool_context()
-
-        # First, create a valid peer card
-        await _handle_update_peer_card(
-            ctx,
-            {"content": ["IDENTITY: Name: Bob", "ATTRIBUTE: Age: 30"]},
-        )
-
-        # Now attempt to update with empty list — should be a no-op
-        result = await _handle_update_peer_card(ctx, {"content": []})
-        assert "empty" in str(result).lower()
-
-        # Refresh the observer so the identity map picks up the committed update
-        await db_session.refresh(peer1)
-        # Verify original card is preserved
-        peer_card = await crud.get_peer_card(
-            db_session,
-            workspace_name=workspace.name,
-            observer=peer1.name,
-            observed=peer2.name,
-        )
-        assert peer_card is not None
-        assert "IDENTITY: Name: Bob" in peer_card
-
-    async def test_rejects_entries_without_allowed_prefix(
-        self,
-        db_session: AsyncSession,
-        tool_test_data: Any,
-        make_tool_context: Callable[..., ToolContext],
-    ):
-        """Entries without an allowed prefix are dropped; valid entries pass through."""
-        from src.utils.types import ToolResult
-
-        workspace, peer1, peer2, _, _, _ = tool_test_data
-        ctx = make_tool_context()
-
-        result = await _handle_update_peer_card(
-            ctx,
-            {
-                "content": [
-                    "IDENTITY: Name: Carol",
-                    "Age: 39+",  # rejected: no prefix
-                    "Daughter: Keyan",  # rejected: no prefix
-                    "TRAIT: Methodical",  # rejected: TRAIT not allowed
-                    "PREFERENCE: Tea",  # rejected: bare PREFERENCE not allowed
-                    "ATTRIBUTE: Location: Germantown, TN",
-                ]
-            },
-        )
-
-        # Partial-reject success path must surface the rejection in the tool
-        # response so the model can re-emit the dropped entries (with correct
-        # prefixes) on a retry instead of silently losing them.
-        assert isinstance(result, ToolResult)
-        content_lower = str(result).lower()
-        assert "updated peer card" in content_lower
-        assert "rejected 4 of 6" in content_lower
-        # At least one rejected sample should appear so the model knows what
-        # to fix.
-        assert "age: 39+" in content_lower or "trait: methodical" in content_lower
-        assert result.metadata is not None
-        assert result.metadata["peer_card_updated"] is True
-        assert result.metadata["facts_count"] == 2
-        assert result.metadata["rejected_count"] == 4
-
-        await db_session.refresh(peer1)
-        peer_card = await crud.get_peer_card(
-            db_session,
-            workspace_name=workspace.name,
-            observer=peer1.name,
-            observed=peer2.name,
-        )
-        assert peer_card is not None
-        assert peer_card == [
-            "IDENTITY: Name: Carol",
-            "ATTRIBUTE: Location: Germantown, TN",
-        ]
-
-    async def test_all_entries_rejected_preserves_existing_card(
-        self,
-        db_session: AsyncSession,
-        tool_test_data: Any,
-        make_tool_context: Callable[..., ToolContext],
-    ):
-        """When every entry fails validation, the existing card is preserved."""
-        workspace, peer1, peer2, _, _, _ = tool_test_data
-        ctx = make_tool_context()
-
-        await _handle_update_peer_card(ctx, {"content": ["IDENTITY: Name: Dana"]})
-
-        result = await _handle_update_peer_card(
-            ctx,
-            {
-                "content": [
-                    "TRAIT: Detail-oriented",
-                    "PREFERENCE: Coffee",
-                    "Random unprefixed line",
-                ]
-            },
-        )
-        assert "rejected" in str(result).lower()
-
-        await db_session.refresh(peer1)
-        peer_card = await crud.get_peer_card(
-            db_session,
-            workspace_name=workspace.name,
-            observer=peer1.name,
-            observed=peer2.name,
-        )
-        assert peer_card == ["IDENTITY: Name: Dana"]
 
 
 class TestPeerCardEntryValidator:
@@ -1913,7 +1688,7 @@ class TestPeerCardEntryValidator:
         ],
     )
     def test_accepts_well_formed_entries(self, entry: str):
-        assert _validate_peer_card_entry(entry) is True
+        assert validate_peer_card_entry(entry) is True
 
     @pytest.mark.parametrize(
         "entry",
@@ -1932,17 +1707,17 @@ class TestPeerCardEntryValidator:
         ],
     )
     def test_rejects_malformed_entries(self, entry: str):
-        assert _validate_peer_card_entry(entry) is False
+        assert validate_peer_card_entry(entry) is False
 
     def test_rejects_over_length_cap(self):
         long_value = "x" * (MAX_PEER_CARD_ENTRY_LENGTH + 1)
-        assert _validate_peer_card_entry(f"IDENTITY: Name: {long_value}") is False
+        assert validate_peer_card_entry(f"IDENTITY: Name: {long_value}") is False
 
     def test_accepts_at_length_cap(self):
         # Build an entry exactly at the cap.
         prefix = "IDENTITY: "
         body = "x" * (MAX_PEER_CARD_ENTRY_LENGTH - len(prefix))
-        assert _validate_peer_card_entry(prefix + body) is True
+        assert validate_peer_card_entry(prefix + body) is True
 
     def test_allowed_prefixes_constant_is_complete(self):
         # Guard against silent drift between the prompt and the validator.

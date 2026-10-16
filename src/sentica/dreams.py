@@ -61,7 +61,12 @@ _WEEKLY_HISTORY = 12
 
 
 def inference_enabled(configuration: dict[str, Any] | None) -> bool:
-    """Synthesis off stops dreams, including the upstream dreamer."""
+    """Synthesis off stops dreams, including the upstream dreamer.
+
+    A missing workspace configuration is off. An empty configuration is on.
+    """
+    if configuration is None:
+        return False
     if not synthesis_enabled(configuration):
         return False
     if not configuration:
