@@ -4045,7 +4045,7 @@
           "conclusions"
         ],
         "summary": "Create Conclusions",
-        "description": "Create one or more Conclusions.\n\nConclusions are logical certainties derived from interactions between Peers. They form the basis of a Peer's Representation.",
+        "description": "Create one or more Conclusions.\n\nConclusions are logical certainties derived from interactions between Peers. They form the basis of a Peer's Representation.\nThe safety check runs before a database session is opened.",
         "operationId": "create_conclusions_v3_workspaces__workspace_id__conclusions_post",
         "security": [
           {

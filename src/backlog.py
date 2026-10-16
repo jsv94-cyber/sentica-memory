@@ -211,7 +211,10 @@ class DeriverMetricsPoller:
                             models.Workspace.name == due_dream.workspace_name
                         )
                     )
-                if workspace is None or not inference_enabled(workspace.configuration):
+                    synthesis_on = workspace is not None and inference_enabled(
+                        workspace.configuration
+                    )
+                if not synthesis_on:
                     continue
                 await enqueue_dream(
                     due_dream.workspace_name,

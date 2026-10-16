@@ -40,8 +40,12 @@ def _resolved_config(*, dream_enabled: bool = False) -> ResolvedConfiguration:
 
 
 @asynccontextmanager
-async def _fake_tracked_db(_name: str):
-    yield object()
+async def _fake_tracked_db(_name: str, **_kwargs: object):
+    workspace = MagicMock()
+    workspace.configuration = {}
+    session = MagicMock()
+    session.scalar = AsyncMock(return_value=workspace)
+    yield session
 
 
 def _saved_observations(mock_save: AsyncMock):
