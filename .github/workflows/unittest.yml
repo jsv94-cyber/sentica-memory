@@ -291,6 +291,7 @@ jobs:
           test "$ready_gateway" = 1
           uv run pytest tests/sentica/test_m2_rls.py tests/sentica/test_m2_fix.py \
             tests/sentica/test_m2_partitions.py tests/sentica/test_m2_carryover.py \
+            tests/sentica/test_m2_data.py \
             -n0 -v --tb=short
 
   # Status check for branch protection rules
