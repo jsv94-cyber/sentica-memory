@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import threading
 import time
 from collections import defaultdict
@@ -773,12 +774,45 @@ class EmbeddingClient:
             settings.EMBEDDING.resolve_encoding_format(),
         )
 
+    def _local_encoding(self) -> tiktoken.Encoding:
+        """Tiktoken for the configured model. No provider client."""
+        model = os.environ.get("SENTICA_GATEWAY_EMBED_MODEL", "").strip()
+        if not model:
+            model = self._resolve_runtime_config().model
+        try:
+            return tiktoken.encoding_for_model(model)
+        except KeyError:
+            return tiktoken.get_encoding("cl100k_base")
+
+    def _local_token_cap(self) -> int:
+        return settings.EMBEDDING.MAX_INPUT_TOKENS
+
+    def _chunks_for(self, text: str) -> list[str]:
+        encoding = self.encoding
+        cap = self.max_embedding_tokens
+        tokens = encoding.encode(text)
+        if len(tokens) <= cap:
+            return [text]
+        return [
+            chunk
+            for chunk, _count in _chunk_text_with_tokens(text, tokens, cap, encoding)
+        ]
+
     async def embed(self, query: str) -> list[float]:
         """Embed a single query string."""
         from src.sentica.gateway import embed_texts, gateway_enabled
 
         if gateway_enabled():
-            vectors = await embed_texts([query])
+            token_count = len(self.encoding.encode(query))
+            if token_count > self.max_embedding_tokens:
+                raise EmbeddingTokenLimitError(
+                    "Query exceeds maximum token limit of "
+                    + str(self.max_embedding_tokens)
+                    + " tokens (got "
+                    + str(token_count)
+                    + " tokens)"
+                )
+            vectors = await embed_texts([query], operation="embed")
             return vectors[0]
         return await self._get_client().embed(query)
 
@@ -792,17 +826,60 @@ class EmbeddingClient:
         from src.sentica.gateway import embed_texts, gateway_enabled
 
         if gateway_enabled():
-            return await embed_texts(texts)
+            if not texts:
+                return []
+            prepared: list[str] = []
+            encoding = self.encoding
+            cap = self.max_embedding_tokens
+            for idx, text in enumerate(texts):
+                token_ids = encoding.encode(text)
+                if len(token_ids) > cap:
+                    if on_oversize == "truncate":
+                        text = self.truncate_to_token_limit(text)
+                    else:
+                        raise EmbeddingTokenLimitError(
+                            "Text at index "
+                            + str(idx)
+                            + " exceeds maximum token limit of "
+                            + str(cap)
+                            + " tokens (got "
+                            + str(len(token_ids))
+                            + " tokens)"
+                        )
+                prepared.append(text)
+            return await embed_texts(prepared, operation="simple_batch_embed")
         return await self._get_client().simple_batch_embed(
             texts, on_oversize=on_oversize
         )
 
     def prepare_chunks(self, id_resource_dict: dict[str, str]) -> dict[str, list[str]]:
         """Chunk texts using the same rules as `batch_embed` (no network)."""
+        from src.sentica.gateway import gateway_enabled
+
+        if gateway_enabled():
+            return {
+                text_id: self._chunks_for(text)
+                for text_id, text in id_resource_dict.items()
+            }
         return self._get_client().prepare_chunks(id_resource_dict)
 
     def truncate_to_token_limit(self, text: str) -> str:
         """Truncate text to the embedding token cap (no network)."""
+        from src.sentica.gateway import gateway_enabled
+
+        if gateway_enabled():
+            encoding = self.encoding
+            cap = self.max_embedding_tokens
+            token_ids = encoding.encode(text)
+            keep = cap
+            while len(token_ids) > cap:
+                keep = min(keep, len(token_ids) - 1)
+                if keep < 1:
+                    return ""
+                text = encoding.decode(token_ids[:keep])
+                token_ids = encoding.encode(text)
+                keep -= 1
+            return text
         return self._get_client().truncate_to_token_limit(text)[0]
 
     async def batch_embed(
@@ -812,34 +889,67 @@ class EmbeddingClient:
         from src.sentica.gateway import embed_texts, gateway_enabled
 
         if gateway_enabled():
+            if not id_resource_dict:
+                return {}
             ordered = list(id_resource_dict)
-            vectors = await embed_texts([id_resource_dict[key] for key in ordered])
-            return {key: [vector] for key, vector in zip(ordered, vectors, strict=True)}
+            grouped = {key: self._chunks_for(id_resource_dict[key]) for key in ordered}
+            flat = [piece for key in ordered for piece in grouped[key]]
+            vectors = await embed_texts(flat, operation="batch_embed")
+            cursor = 0
+            out: dict[str, list[list[float]]] = {}
+            for key in ordered:
+                count = len(grouped[key])
+                out[key] = vectors[cursor : cursor + count]
+                cursor += count
+            return out
         return await self._get_client().batch_embed(id_resource_dict)
 
     @property
     def provider(self) -> str:
         """Get the provider name."""
+        from src.sentica.gateway import gateway_enabled
+
+        if gateway_enabled():
+            return self._resolve_runtime_config().transport
         return self._get_client().provider
 
     @property
     def model(self) -> str:
         """Get the model name."""
+        from src.sentica.gateway import gateway_enabled
+
+        if gateway_enabled():
+            configured = os.environ.get("SENTICA_GATEWAY_EMBED_MODEL", "").strip()
+            if configured:
+                return configured
+            return self._resolve_runtime_config().model
         return self._get_client().model
 
     @property
     def transport(self) -> str:
         """Get the transport name."""
+        from src.sentica.gateway import gateway_enabled
+
+        if gateway_enabled():
+            return self.provider
         return self._get_client().transport
 
     @property
     def max_embedding_tokens(self) -> int:
         """Get the maximum embedding tokens."""
+        from src.sentica.gateway import gateway_enabled
+
+        if gateway_enabled():
+            return self._local_token_cap()
         return self._get_client().max_embedding_tokens
 
     @property
     def vector_dimensions(self) -> int:
         """Get the configured embedding dimensions."""
+        from src.sentica.gateway import gateway_enabled
+
+        if gateway_enabled():
+            return settings.EMBEDDING.VECTOR_DIMENSIONS
         return self._get_client().vector_dimensions
 
     @property
@@ -851,6 +961,10 @@ class EmbeddingClient:
         must work in environments with no embedding credentials, such as CI for
         pull requests from forks.
         """
+        from src.sentica.gateway import gateway_enabled
+
+        if gateway_enabled():
+            return self._local_encoding()
         if self._instance is not None:
             return self._instance.encoding
         try:

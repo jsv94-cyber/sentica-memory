@@ -228,6 +228,16 @@ jobs:
           SENTICA_BIND_HOST: 127.0.0.1
           SENTICA_RLS_ADMIN_DSN: postgresql+psycopg://postgres@localhost:5432/tenant_rls
           HOME: /tmp/rls-home
+          SENTICA_GATEWAY_MODE: "on"
+          SENTICA_GATEWAY_BASE_URL: http://127.0.0.1:8099/v1
+          SENTICA_GATEWAY_DERIVER_MODEL: sentica-deriver
+          SENTICA_GATEWAY_SUMMARY_MODEL: sentica-summary
+          SENTICA_GATEWAY_DIALECTIC_MODEL: sentica-dialectic
+          SENTICA_GATEWAY_DREAM_MODEL: sentica-dream
+          SENTICA_GATEWAY_EMBED_MODEL: sentica-embed
+          SENTICA_GATEWAY_RETRY_ATTEMPTS: "2"
+          SENTICA_GATEWAY_RETRY_WAIT_SECONDS: "0"
+          SENTICA_MOCK_EMBED_DIMENSIONS: "1536"
         run: |
           set -eu
           mkdir -p /tmp/rls-certs /tmp/rls-home
@@ -269,6 +279,16 @@ jobs:
             sleep 1
           done
           test "$ready" = 1
+          uv run python -c "from tests.sentica.mock_gateway import serve; serve(8099)" &
+          ready_gateway=0
+          for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+            if curl -fsS http://127.0.0.1:8099/health >/dev/null; then
+              ready_gateway=1
+              break
+            fi
+            sleep 0.25
+          done
+          test "$ready_gateway" = 1
           uv run pytest tests/sentica/test_m2_rls.py tests/sentica/test_m2_fix.py \
             tests/sentica/test_m2_partitions.py tests/sentica/test_m2_carryover.py \
             -n0 -v --tb=short
@@ -288,6 +308,10 @@ jobs:
           fi
           if [[ "${{ needs.test-m1-stack.result }}" != "success" ]]; then
             echo "M1 stack proof failed or was cancelled"
+            exit 1
+          fi
+          if [[ "${{ needs.test-m2-rls.result }}" != "success" ]]; then
+            echo "Runtime-role proof failed or was cancelled"
             exit 1
           fi
           echo "All required tests passed!"

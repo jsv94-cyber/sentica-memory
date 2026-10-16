@@ -131,6 +131,7 @@ def _llm_api_key_env_names() -> tuple[str, ...]:
 def _fingerprint() -> tuple[tuple[str, str | None], ...]:
     names = (
         "SENTICA_MODE",
+        "SENTICA_GATEWAY_MODE",
         "PGPASSFILE",
         "HOME",
         "DB_SQL_DEBUG",
@@ -268,11 +269,24 @@ def _truthy(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _gateway_mode_on() -> bool:
+    """True only for the same on-set the gateway client accepts."""
+    raw = os.environ.get("SENTICA_GATEWAY_MODE")
+    if raw is None:
+        return False
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _refuse_unsafe_runtime() -> None:
     """Refuse settings that would write memory content or names outside Postgres."""
     from src.config import settings
     from src.telemetry.prometheus import metrics as prometheus_metrics
 
+    if not _gateway_mode_on():
+        raise SenticaStartupError(
+            "Refusing to start: SENTICA_GATEWAY_MODE must be explicitly on "
+            + "in production"
+        )
     if _truthy("DB_SQL_DEBUG") or settings.DB.SQL_DEBUG:
         raise SenticaStartupError("Refusing to start: SQL debug is enabled")
     if _truthy("COLLECT_METRICS_LOCAL") or settings.COLLECT_METRICS_LOCAL:

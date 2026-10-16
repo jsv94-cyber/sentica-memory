@@ -31,6 +31,13 @@ x-no-disk-logs: &no-disk-logs
 
 x-common-env: &common-env
   SENTICA_MODE: production
+  SENTICA_GATEWAY_MODE: "on"
+  SENTICA_GATEWAY_BASE_URL: http://embeddings:8080/v1
+  SENTICA_GATEWAY_DERIVER_MODEL: sentica-deriver
+  SENTICA_GATEWAY_SUMMARY_MODEL: sentica-summary
+  SENTICA_GATEWAY_DIALECTIC_MODEL: sentica-dialectic
+  SENTICA_GATEWAY_DREAM_MODEL: sentica-dream
+  SENTICA_GATEWAY_EMBED_MODEL: sentica-embed
   SENTICA_DB_PROXY_PORT: "6432"
   SENTICA_PROXY_CA_PATH: /certs/ca.crt
   CACHE_ENABLED: "true"

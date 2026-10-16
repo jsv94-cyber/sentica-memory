@@ -50,6 +50,7 @@ def _production(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         "SENTICA_TOKEN_PUBLIC_KEY_PATH": str(public),
         "SENTICA_TOKEN_ISSUER": "sentica-broker",
         "SENTICA_BIND_HOST": "127.0.0.1",
+        "SENTICA_GATEWAY_MODE": "on",
         "HOME": str(tmp_path),
     }
     for key, value in env.items():
@@ -362,6 +363,7 @@ def test_slow_llm_chat_streams_fully(
     monkeypatch.setenv("SENTICA_TOKEN_PUBLIC_KEY_PATH", str(public))
     monkeypatch.setenv("SENTICA_TOKEN_ISSUER", "sentica-broker")
     monkeypatch.setenv("SENTICA_BIND_HOST", "127.0.0.1")
+    monkeypatch.setenv("SENTICA_GATEWAY_MODE", "on")
     monkeypatch.setenv("HOME", str(tmp_path))
     for name in (
         "DB_CONNECTION_URI",

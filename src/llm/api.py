@@ -210,6 +210,7 @@ async def honcho_llm_call(
             max_tool_iterations=max_tool_iterations,
             messages=messages,
             telemetry=telemetry,
+            json_mode=json_mode,
         )
 
     runtime_model_config = resolve_runtime_model_config(model_config)

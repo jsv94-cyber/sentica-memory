@@ -164,7 +164,7 @@ observe, but a card is never about a scope.
 Summaries are not a table. `src/utils/summarizer.py:95` uses the key
 `summaries` inside `sessions.internal_metadata`. Each value is a short or long
 summary object (content, message id, token count, timestamps).
-`src/utils/summarizer.py:769` `_save_summary` merges that JSONB.
+`src/utils/summarizer.py:771` `_save_summary` merges that JSONB.
 `src/utils/summarizer.py:340` `summarize_if_needed` runs from the queue when
 the message sequence hits the short or long interval.
 
@@ -226,9 +226,9 @@ copy of the queue. The message text in that column is in the database, which
 is the store.
 
 The worker process is `python -m src.deriver` (`src/deriver/__main__.py:22`
-calls `src/deriver/queue_manager.py:1369` `main`). `src/deriver/queue_manager.py:140`
-`QueueManager.polling_loop` (`src/deriver/queue_manager.py:546`) claims work
-units (`src/deriver/queue_manager.py:323`) and processes them in order.
+calls `src/deriver/queue_manager.py:1404` `main`). `src/deriver/queue_manager.py:140`
+`QueueManager.polling_loop` (`src/deriver/queue_manager.py:549`) claims work
+units (`src/deriver/queue_manager.py:326`) and processes them in order.
 `src/deriver/consumer.py:47` `process_item` dispatches on `task_type`.
 Representation batches go to `src/deriver/deriver.py:44`
 `process_representation_tasks_batch`, which makes one structured model call
@@ -245,7 +245,7 @@ they are stored. The deriver, summary, and dream prompts include that rule.
 
 Chat completions go through `src/llm/api.py:147` `honcho_llm_call`. When
 `SENTICA_GATEWAY_MODE` is on, `src/llm/api.py:201` returns before any
-provider is chosen. `src/sentica/gateway.py:282` `complete_llm` posts to
+provider is chosen. `src/sentica/gateway.py:810` `complete_llm` posts to
 that function's OpenAI-compatible URL and keeps the same model on every
 retry. Gateway mode off resolves a model config, retries, and either calls
 `src/llm/executor.py` `honcho_llm_call_inner` or the tool loop in
@@ -274,15 +274,15 @@ Dialectic is reached from `POST /v3/.../peers/{peer_id}/chat`
 `agentic_chat`. The agent builds its prompt in `src/dialectic/core.py:122`
 and then loops on tools until it can answer.
 
-Embeddings do not use `honcho_llm_call`. `src/embedding_client.py:710`
-`EmbeddingClient` wraps `src/embedding_client.py:196` `_EmbeddingClient`.
-With gateway mode on, `src/embedding_client.py:776` `embed` calls
-`src/sentica/gateway.py:386` `embed_texts` and does not construct a
-provider client. With gateway mode off, `src/embedding_client.py:308`
+Embeddings do not use `honcho_llm_call`. `src/embedding_client.py:711`
+`EmbeddingClient` wraps `src/embedding_client.py:197` `_EmbeddingClient`.
+With gateway mode on, `src/embedding_client.py:801` `embed` calls
+`src/sentica/gateway.py:1050` `embed_texts` and does not construct a
+provider client. With gateway mode off, `src/embedding_client.py:309`
 `embed` calls the provider.
 The default transport is OpenAI `text-embedding-3-small`
 (`src/config.py` `EmbeddingSettings`). The OpenAI request is
-`src/embedding_client.py:351` `embeddings.create`. Gemini uses
+`src/embedding_client.py:352` `embeddings.create`. Gemini uses
 `embed_content` in the same class when the transport is `gemini`.
 Callers are message create (fast path), the reconciler
 (`src/reconciler/sync_vectors.py`), and document insert in

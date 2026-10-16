@@ -48,6 +48,13 @@ def test_workflows_pin_ubuntu_2404_and_node24_actions() -> None:
     assert all(seen.values())
 
 
+def test_status_check_fails_when_the_runtime_role_job_fails() -> None:
+    """test-status exits when the runtime-role job does not succeed."""
+    text = (WORKFLOWS / "unittest.yml").read_text(encoding="utf-8")
+    assert 'if [[ "${{ needs.test-m2-rls.result }}" != "success" ]]; then' in text
+    assert "Runtime-role proof failed or was cancelled" in text
+
+
 _BOUNDED_METHODS = (
     "rollback",
     "close",
