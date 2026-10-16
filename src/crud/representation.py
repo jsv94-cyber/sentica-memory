@@ -133,7 +133,7 @@ class RepresentationManager:
                     models.Workspace.name == self.workspace_name
                 )
             )
-            synthesis_on = workspace_row is not None and inference_enabled(
+            synthesis_on = workspace_row is None or inference_enabled(
                 workspace_row.configuration
             )
         source_observations: list[ExplicitObservation | DeductiveObservation] = []

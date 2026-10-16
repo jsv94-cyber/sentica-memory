@@ -1008,7 +1008,7 @@ async def test_canary_written_only_to_r_stays_out_of_other_workspaces(
         )
         if formatted.get("type") == "json_schema":
             return chat_message('{"explicit":[{"content":"local hello"}]}')
-        if purpose == "summary.safety":
+        if "Reply yes if the conclusion" in json.dumps(body):
             return chat_message("no")
         return chat_message("ok")
 

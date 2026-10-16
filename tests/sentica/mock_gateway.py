@@ -77,7 +77,7 @@ class MockGateway(ThreadingHTTPServer):
     def _default_decide(
         self, path: str, body: dict[str, Any], headers: dict[str, str]
     ) -> dict[str, Any]:
-        purpose = headers.get("X-Sentica-Purpose", "")
+        del headers
         if path.rstrip("/").endswith("/embeddings"):
             incoming = body.get("input", [])
             texts = [incoming] if isinstance(incoming, str) else list(incoming)
@@ -92,7 +92,7 @@ class MockGateway(ThreadingHTTPServer):
                 "usage": {"prompt_tokens": 2, "completion_tokens": 0},
             }
         response_format = body.get("response_format")
-        content = "no" if purpose == "summary.safety" else "ok"
+        content = "no" if "Reply yes if the conclusion" in json.dumps(body) else "ok"
         if (
             isinstance(response_format, dict)
             and cast(dict[str, Any], response_format).get("type") == "json_schema"

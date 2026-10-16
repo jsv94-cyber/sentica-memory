@@ -7,7 +7,7 @@ from src import crud
 from src.config import ConfiguredModelSettings, settings
 from src.crud.representation import RepresentationManager
 from src.dependencies import tracked_db
-from src.exceptions import RepresentationSaveError
+from src.exceptions import RepresentationSaveError, ResourceNotFoundException
 from src.llm import honcho_llm_call
 from src.llm.types import LLMTelemetryContext
 from src.models import Message
@@ -217,11 +217,14 @@ async def process_representation_tasks_batch(
     from src.sentica.dreams import inference_enabled
     from src.sentica.taint import bind_run_trust, messages_run_trust
 
-    async with tracked_db("deriver.synthesis", read_only=True) as db:
-        workspace_row = await crud.get_workspace(
-            db, workspace_name=latest_message.workspace_name
-        )
-        synthesis_on = inference_enabled(workspace_row.configuration)
+    try:
+        async with tracked_db("deriver.synthesis", read_only=True) as db:
+            workspace_row = await crud.get_workspace(
+                db, workspace_name=latest_message.workspace_name
+            )
+            synthesis_on = inference_enabled(workspace_row.configuration)
+    except ResourceNotFoundException:
+        synthesis_on = True
     if not synthesis_on:
         observations.deductive = []
         observations.inductive = []
