@@ -713,7 +713,6 @@ DEDUCTION_SPECIALIST_TOOLS: list[dict[str, Any]] = [
     # Action tools
     TOOLS["create_observations_deductive"],
     TOOLS["delete_observations"],
-    TOOLS["update_peer_card"],
 ]
 
 # Tools for the induction specialist (dreamer phase 2)
@@ -730,15 +729,14 @@ INDUCTION_SPECIALIST_TOOLS: list[dict[str, Any]] = [
 ]
 
 # Tools for the card-refresh specialist (card_refresh dream type).
-# Card-only maintenance: discovery plus update_peer_card. Deliberately
+# Card-only maintenance: discovery tools. The card is rebuilt afterwards. Deliberately
 # excludes every observation-mutating tool (create_observations*,
 # delete_observations) — a card refresh must never touch observations.
 CARD_REFRESH_SPECIALIST_TOOLS: list[dict[str, Any]] = [
-    # Discovery tools
+    # Discovery tools. The card is rebuilt from untainted conclusions
+    # after the run. The model does not write it.
     TOOLS["get_recent_observations"],
     TOOLS["search_memory"],
-    # Action tool
-    TOOLS["update_peer_card"],
 ]
 
 

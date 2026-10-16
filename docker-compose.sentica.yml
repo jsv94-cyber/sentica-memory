@@ -31,6 +31,7 @@ x-no-disk-logs: &no-disk-logs
 
 x-common-env: &common-env
   SENTICA_MODE: production
+  SENTICA_TENANT_HASH_KEY: sentica-local-proof-hash-key-32b!!
   SENTICA_GATEWAY_MODE: "on"
   SENTICA_GATEWAY_BASE_URL: http://embeddings:8080/v1
   SENTICA_GATEWAY_DERIVER_MODEL: sentica-deriver

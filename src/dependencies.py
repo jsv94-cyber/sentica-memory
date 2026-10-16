@@ -11,7 +11,7 @@ _OPEN_SESSIONS: ContextVar[int] = ContextVar("sentica_open_db_sessions", default
 
 
 def open_db_sessions() -> int:
-    """How many tracked_db blocks are open on this task."""
+    """How many request or tracked_db sessions are open on this task."""
     return _OPEN_SESSIONS.get()
 
 
@@ -21,15 +21,18 @@ async def get_db():
     The session is lazy: it does NOT check out a pooled connection here. The
     AsyncSession checks one out on the first DB-touching call, so a handler doing
     non-DB work (embedding/file/LLM) before its first query does not pin a
-    connection across it.
+    connection across it. The generator still counts as an open session so a
+    model check cannot run while the request is holding it.
     """
     db: AsyncSession = SessionLocal()
+    depth = _OPEN_SESSIONS.set(_OPEN_SESSIONS.get() + 1)
     try:
         yield db
     except Exception:
         await db.rollback()
         raise
     finally:
+        _OPEN_SESSIONS.reset(depth)
         # Always send ROLLBACK unconditionally so the wire-level transaction
         # is closed before the TCP connection drops.  Supavisor v2 does NOT
         # clean up orphaned transactions on client disconnect in transaction-
@@ -51,9 +54,11 @@ async def get_read_db():
     MUST only be used by handlers that never mutate; see ReadSessionLocal.
     """
     db: AsyncSession = ReadSessionLocal()
+    depth = _OPEN_SESSIONS.set(_OPEN_SESSIONS.get() + 1)
     try:
         yield db
     finally:
+        _OPEN_SESSIONS.reset(depth)
         # Ends the read-only transaction so the workspace setting dies with it.
         await db.rollback()
         await db.close()

@@ -112,6 +112,8 @@ EXPECTED_M2_NODE_IDS: frozenset[str] = frozenset(
         "tests/sentica/test_m2_data.py::test_source_trust_is_required_in_production",
         "tests/sentica/test_m2_data.py::test_rls_policy_expression_excludes_extra_policies",
         "tests/sentica/test_m2_data.py::test_summary_check_runs_before_the_save_session",
+        "tests/sentica/test_m2_data.py::test_forget_route_drops_descendants_digests_summaries_and_the_card",
+        "tests/sentica/test_m2_data.py::test_budget_pause_keeps_the_queue_item_pending",
     }
 )
 

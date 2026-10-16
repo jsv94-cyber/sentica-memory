@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Any, cast
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -141,7 +141,8 @@ async def replace_peer_card_from_conclusions(
             .where(models.Document.observed == observed)
             .where(models.Document.deleted_at.is_(None))
             .where(models.Document.superseded_by.is_(None))
-            .where(or_(trust.is_(None), trust != "external"))
+            .where(trust.is_not(None))
+            .where(trust != "external")
             .order_by(models.Document.created_at.asc(), models.Document.id.asc())
         )
     ).all()

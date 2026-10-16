@@ -239,50 +239,56 @@ async def _note(
 async def apply_decay(db: AsyncSession, *, workspace_name: str, now: datetime) -> int:
     """Halve unused weights and soft-delete anything under the floor.
 
-    One call applies every interval that has elapsed since the last decay,
-    so a clock jump of two intervals halves twice.
+    One server-side UPDATE applies every elapsed interval. It does not lock
+    rows ahead of the write.
     """
     interval = decay_interval()
     floor = decay_floor()
     now = _aware(now)
-    rows = (
-        await db.execute(
-            select(
-                models.Document.id,
-                models.Document.weight,
-                models.Document.decayed_at,
-                models.Document.last_used_at,
-                models.Document.created_at,
-            )
-            .where(models.Document.workspace_name == workspace_name)
-            .where(models.Document.deleted_at.is_(None))
-            .where(models.Document.superseded_by.is_(None))
-            .order_by(models.Document.id)
-            .with_for_update()
-        )
-    ).all()
-    changed = 0
-    for row in rows:
-        anchor = _aware(row.decayed_at or row.last_used_at or row.created_at)
-        steps = int((now - anchor).total_seconds() // interval.total_seconds())
-        if steps < 1:
-            continue
-        weight = float(row.weight)
-        for _ in range(steps):
-            weight = weight / 2
-        values: dict[str, Any] = {
-            "weight": weight,
-            "decayed_at": anchor + (interval * steps),
-        }
-        if weight < floor:
-            values["deleted_at"] = now
-        await db.execute(
-            update(models.Document)
-            .where(models.Document.workspace_name == workspace_name)
-            .where(models.Document.id == row.id)
-            .values(**values)
-        )
-        changed += 1
+    table = models.Document.__table__
+    qualified = f"{table.schema}.{table.name}" if table.schema else table.name
+    result = await db.execute(
+        text(
+            f"""
+            UPDATE {qualified} AS document
+            SET
+                weight = document.weight * power(0.5, stepped.steps),
+                decayed_at = stepped.anchor
+                    + make_interval(secs => :interval_seconds * stepped.steps),
+                deleted_at = CASE
+                    WHEN document.weight * power(0.5, stepped.steps) < :floor
+                    THEN :now
+                    ELSE document.deleted_at
+                END
+            FROM (
+                SELECT
+                    id,
+                    COALESCE(decayed_at, last_used_at, created_at) AS anchor,
+                    floor(
+                        EXTRACT(
+                            EPOCH FROM (
+                                :now - COALESCE(decayed_at, last_used_at, created_at)
+                            )
+                        ) / :interval_seconds
+                    )::integer AS steps
+                FROM {qualified}
+                WHERE workspace_name = :workspace_name
+                    AND deleted_at IS NULL
+                    AND superseded_by IS NULL
+            ) AS stepped
+            WHERE document.id = stepped.id
+                AND document.workspace_name = :workspace_name
+                AND stepped.steps >= 1
+            """
+        ),
+        {
+            "workspace_name": workspace_name,
+            "now": now,
+            "floor": floor,
+            "interval_seconds": interval.total_seconds(),
+        },
+    )
+    changed = int(getattr(result, "rowcount", 0) or 0)
     await db.commit()
     from src.sentica.ops_metrics import note_decay
 
@@ -344,14 +350,14 @@ async def forget(
             public_ids.add(str(public_id))
     embedding_count = await _count_embeddings(db, workspace_name, public_ids)
     summary_count = await _scrub_summaries(db, workspace_name, message_ids, texts=texts)
-    await _scrub_peer_cards(db, workspace_name, texts)
-    await _scrub_digests(
-        db, workspace_name, texts, {document.id for document in documents}
-    )
+    forgotten_ids = {document.id for document in documents}
+    await _scrub_digests(db, workspace_name, texts, forgotten_ids)
     await _delete_messages(db, workspace_name, message_ids)
     await _delete_documents(
         db, [document.id for document in documents], workspace_name=workspace_name
     )
+    pairs = {(document.observer, document.observed) for document in documents}
+    await _rebuild_cards(db, workspace_name, pairs)
     record = DeletionCounts(
         id=generate_nanoid(),
         peer_name=peer_name,
@@ -366,10 +372,14 @@ async def forget(
 
 
 def identifier_hash(value: str) -> str:
-    """Hash an identifier. The stored record never keeps the name."""
+    """HMAC-SHA256 of an identifier with this tenant's key. The name is not stored."""
     import hashlib
+    import hmac
 
-    return hashlib.sha256(value.encode()).hexdigest()
+    from src.sentica.runtime import tenant_hash_key
+
+    digest = hmac.new(tenant_hash_key(), value.encode(), hashlib.sha256)
+    return digest.hexdigest()
 
 
 async def _store_deletion(
@@ -392,6 +402,7 @@ async def _store_deletion(
             document_count=record.document_count,
             embedding_count=record.embedding_count,
             summary_count=record.summary_count,
+            legacy=False,
         )
     )
 
@@ -444,12 +455,19 @@ async def _with_descendants(
             )
         )
         copied_from = models.Document.internal_metadata["copied_from"].astext
+        premise_ids = models.Document.internal_metadata["premise_ids"]
+        metadata_sources = models.Document.internal_metadata["source_ids"]
         legacy_clauses = [
             models.Document.legacy_source_ids.contains([item]) for item in frontier
         ]
+        premise_clauses = [premise_ids.contains([item]) for item in sorted(frontier)]
+        source_clauses = [
+            metadata_sources.contains([item]) for item in sorted(frontier)
+        ]
         extra_filters = [copied_from.in_(sorted(frontier))]
-        if legacy_clauses:
-            extra_filters.append(or_(*legacy_clauses))
+        extra_filters.extend(legacy_clauses)
+        extra_filters.extend(premise_clauses)
+        extra_filters.extend(source_clauses)
         copied = list(
             await db.scalars(
                 select(models.Document)
@@ -465,43 +483,21 @@ async def _with_descendants(
     return list(found.values())
 
 
-async def _scrub_peer_cards(
-    db: AsyncSession, workspace_name: str, texts: list[str]
+async def _rebuild_cards(
+    db: AsyncSession,
+    workspace_name: str,
+    pairs: set[tuple[str, str]],
 ) -> None:
-    if not texts:
-        return
-    peers = list(
-        await db.scalars(
-            select(models.Peer)
-            .where(models.Peer.workspace_name == workspace_name)
-            .order_by(models.Peer.id)
+    """Rebuild cards from the conclusions that remain. Model text is not kept."""
+    from src.crud.peer_card import replace_peer_card_from_conclusions
+
+    for observer, observed in sorted(pairs):
+        await replace_peer_card_from_conclusions(
+            db,
+            workspace_name,
+            observer=observer,
+            observed=observed,
         )
-    )
-    for peer in peers:
-        raw_meta: Any = peer.internal_metadata or {}
-        if not isinstance(raw_meta, dict):
-            continue
-        metadata = cast(dict[str, Any], raw_meta)
-        updated = dict(metadata)
-        changed = False
-        for key, value in metadata.items():
-            if not isinstance(value, list):
-                continue
-            kept: list[object] = []
-            removed = False
-            for line in cast(list[object], value):
-                if isinstance(line, str) and any(
-                    text and text in line for text in texts
-                ):
-                    removed = True
-                    continue
-                kept.append(line)
-            if removed:
-                updated[str(key)] = kept
-                changed = True
-        if changed:
-            peer.internal_metadata = updated
-            flag_modified(peer, "internal_metadata")
 
 
 async def _scrub_digests(
@@ -510,18 +506,26 @@ async def _scrub_digests(
     texts: list[str],
     document_ids: set[str],
 ) -> None:
-    rows = list(
-        await db.scalars(
-            select(models.DreamDigest)
-            .where(models.DreamDigest.workspace_name == workspace_name)
-            .order_by(models.DreamDigest.id)
+    forgotten = set(document_ids)
+    changed = True
+    while changed:
+        changed = False
+        rows = list(
+            await db.scalars(
+                select(models.DreamDigest)
+                .where(models.DreamDigest.workspace_name == workspace_name)
+                .order_by(models.DreamDigest.id)
+            )
         )
-    )
-    for row in rows:
-        sources = {str(item) for item in row.source_ids or []}
-        contains = any(text and text in row.content for text in texts)
-        if contains or sources & document_ids:
-            await db.delete(row)
+        for row in rows:
+            sources = {str(item) for item in row.source_ids or []}
+            contains = any(text and text in row.content for text in texts)
+            if contains or sources & forgotten:
+                forgotten.add(row.id)
+                await db.delete(row)
+                changed = True
+        if changed:
+            await db.flush()
 
 
 def _message_keys(
@@ -590,22 +594,21 @@ async def _scrub_summaries(
         session_removed = 0
         summary_map = cast(dict[object, object], summaries)
         for key, value in summary_map.items():
-            message_id = (
-                cast(dict[str, Any], value).get("message_id")
-                if isinstance(value, dict)
-                else None
-            )
-            content = (
-                cast(dict[str, Any], value).get("content")
-                if isinstance(value, dict)
-                else None
-            )
+            payload = cast(dict[str, Any], value) if isinstance(value, dict) else {}
+            message_id = payload.get("message_id")
+            start_id = payload.get("message_start_id")
+            content = payload.get("content")
             contains_deleted = isinstance(content, str) and any(
                 text and text in content for text in texts or []
             )
-            if (
-                isinstance(message_id, int) and message_id in message_ids
-            ) or contains_deleted:
+            covers_deleted = False
+            if isinstance(start_id, int) and isinstance(message_id, int):
+                covers_deleted = any(
+                    start_id <= deleted <= message_id for deleted in message_ids
+                )
+            elif isinstance(message_id, int) and message_id in message_ids:
+                covers_deleted = True
+            if covers_deleted or contains_deleted:
                 session_removed += 1
                 continue
             kept[str(key)] = value

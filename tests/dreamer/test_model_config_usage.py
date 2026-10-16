@@ -77,7 +77,7 @@ def test_deduction_specialist_can_update_peer_card() -> None:
     assert specialist.can_update_peer_card is True
 
     tool_names = {t["name"] for t in specialist.get_tools(peer_card_enabled=True)}
-    assert "update_peer_card" in tool_names
+    assert "update_peer_card" not in tool_names
 
     disabled_names = {t["name"] for t in specialist.get_tools(peer_card_enabled=False)}
     assert "update_peer_card" not in disabled_names

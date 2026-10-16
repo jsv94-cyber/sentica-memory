@@ -210,7 +210,6 @@ class TestCardRefreshSpecialist:
             assert tool_names == {
                 "get_recent_observations",
                 "search_memory",
-                "update_peer_card",
             }
             assert not tool_names & OBSERVATION_MUTATION_TOOLS
 

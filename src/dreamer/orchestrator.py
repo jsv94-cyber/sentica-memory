@@ -361,6 +361,7 @@ async def run_dream(
         except Exception:  # pragma: no cover - telemetry must not raise
             logger.debug("Failed to emit DreamRunEvent", exc_info=True)
 
+    await _rebuild_peer_card(workspace_name, observer=observer, observed=observed)
     return DreamResult(
         run_id=run_id,
         specialists_run=["deduction", "induction"],
@@ -527,6 +528,7 @@ async def run_card_refresh_dream(
         except Exception:  # pragma: no cover - telemetry must not raise
             logger.debug("Failed to emit DreamRunEvent", exc_info=True)
 
+    await _rebuild_peer_card(workspace_name, observer=observer, observed=observed)
     return DreamResult(
         run_id=run_id,
         specialists_run=["card_refresh"],
@@ -669,3 +671,48 @@ DREAM: {payload.dream_type} documents for {workspace_name}/{payload.observer}/{p
         if settings.SENTRY.ENABLED:
             sentry_sdk.capture_exception(e)
         # Don't re-raise - we want to mark the dream task as processed even if it fails
+
+
+def _model_can_write_peer_card() -> bool:
+    """True only when a specialist tool list still offers the card write."""
+    from src.utils.agent_tools import (
+        CARD_REFRESH_SPECIALIST_TOOLS,
+        DEDUCTION_SPECIALIST_TOOLS,
+        INDUCTION_SPECIALIST_TOOLS,
+    )
+
+    lists = (
+        DEDUCTION_SPECIALIST_TOOLS,
+        INDUCTION_SPECIALIST_TOOLS,
+        CARD_REFRESH_SPECIALIST_TOOLS,
+    )
+    return any(
+        tool.get("name") == "update_peer_card" for tools in lists for tool in tools
+    )
+
+
+async def _rebuild_peer_card(
+    workspace_name: str, *, observer: str, observed: str
+) -> None:
+    """Replace the card from untainted conclusions.
+
+    When a specialist tool list includes update_peer_card, that path is left
+    in place so a restored tool can still write. Production lists do not.
+    """
+    if _model_can_write_peer_card():
+        return
+    from src.crud.peer_card import replace_peer_card_from_conclusions
+    from src.dependencies import tracked_db
+    from src.sentica.workspace_scope import reset_workspace, set_workspace
+
+    token = set_workspace(workspace_name)
+    try:
+        async with tracked_db("dream.rebuild_card") as db:
+            await replace_peer_card_from_conclusions(
+                db,
+                workspace_name,
+                observer=observer,
+                observed=observed,
+            )
+    finally:
+        reset_workspace(token)

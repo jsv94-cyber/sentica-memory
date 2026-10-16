@@ -224,6 +224,7 @@ jobs:
           SENTICA_PROXY_CA_PATH: /tmp/rls-certs/ca.crt
           SENTICA_TOKEN_PUBLIC_KEY_PATH: /tmp/rls-certs/tenant-rls.token.pub
           SENTICA_TOKEN_SIGNING_KEY: /tmp/rls-certs/tenant-rls.token.key
+          SENTICA_TENANT_HASH_KEY: sentica-rls-tenant-hash-key-32b!!
           SENTICA_TOKEN_ISSUER: sentica-rls-issuer
           SENTICA_BIND_HOST: 127.0.0.1
           SENTICA_RLS_ADMIN_DSN: postgresql+psycopg://postgres@localhost:5432/tenant_rls

@@ -20,6 +20,8 @@ the groups at the end of this file. A name not listed here is not read.
 | `SENTICA_TOKEN_PUBLIC_KEY_PATH` | Broker token verification key. |
 | `SENTICA_TOKEN_ISSUER` | Expected token issuer. |
 | `SENTICA_TOKEN_SIGNING_KEY` | Test-only signing key path. Production does not use it. |
+| `SENTICA_TENANT_HASH_KEY` | HMAC key for deletion identifiers. At least 32 bytes. |
+| `SENTICA_TENANT_HASH_KEY_PATH` | Broker key file used when `SENTICA_TENANT_HASH_KEY` is unset. |
 | `SENTICA_BIND_HOST` | Private address the API binds. Required in production. |
 | `SENTICA_REDIS_HOST` | This instance's Redis hostname. |
 | `SENTICA_MIGRATION_TIMEOUT_SECONDS` | How long startup waits for migrations. Default 360. |

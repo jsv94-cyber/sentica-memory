@@ -219,6 +219,22 @@ async def _save(
         return _as_record(row)
 
 
+def _source_conclusion_query(workspace_name: str) -> Any:
+    """Conclusions one dream run may read. Scoped to the caller's workspace."""
+    return (
+        select(
+            models.Document.id,
+            models.Document.content,
+            models.Document.internal_metadata,
+        )
+        .where(models.Document.workspace_name == workspace_name)
+        .where(models.Document.deleted_at.is_(None))
+        .where(models.Document.superseded_by.is_(None))
+        .order_by(models.Document.created_at.desc())
+        .limit(40)
+    )
+
+
 async def run_dreams(
     workspace_name: str, *, now: datetime | None = None
 ) -> list[dict[str, Any]]:
@@ -239,25 +255,13 @@ async def run_dreams(
         if workspace is None or not inference_enabled(workspace.configuration):
             return []
         existing = await _load(db, workspace_name)
-        rows = (
-            await db.execute(
-                select(
-                    models.Document.id,
-                    models.Document.content,
-                    models.Document.internal_metadata,
-                )
-                .where(models.Document.workspace_name == workspace_name)
-                .where(models.Document.deleted_at.is_(None))
-                .where(models.Document.superseded_by.is_(None))
-                .order_by(models.Document.created_at.desc())
-                .limit(40)
-            )
-        ).all()
+        rows = (await db.execute(_source_conclusion_query(workspace_name))).all()
     conclusions: list[tuple[str, str, bool]] = []
     for row in rows:
         raw_meta: Any = row.internal_metadata
         meta = cast(dict[str, Any], raw_meta) if isinstance(raw_meta, dict) else {}
-        tainted = meta.get("source_trust") == "external"
+        trust = meta.get("source_trust")
+        tainted = trust is None or trust == "external"
         conclusions.append((str(row.id), str(row.content), tainted is True))
     created: list[dict[str, Any]] = []
     digests = [row for row in existing if row["kind"] == "daily"]
@@ -316,6 +320,7 @@ async def run_dreams(
             now=clock,
         )
         created.append(record)
+    await _rebuild_cards(workspace_name)
     return created
 
 
@@ -375,3 +380,25 @@ async def dreams_due() -> None:
                 reset_workspace(token)
     except Exception:
         logger.exception("dream pass failed")
+
+
+async def _rebuild_cards(workspace_name: str) -> None:
+    """Rebuild every card in the workspace from untainted conclusions."""
+    from src.crud.peer_card import replace_peer_card_from_conclusions
+
+    async with tracked_db("dreams.cards") as db:
+        pairs = (
+            await db.execute(
+                select(models.Document.observer, models.Document.observed)
+                .where(models.Document.workspace_name == workspace_name)
+                .distinct()
+                .order_by(models.Document.observer, models.Document.observed)
+            )
+        ).all()
+        for observer, observed in pairs:
+            await replace_peer_card_from_conclusions(
+                db,
+                workspace_name,
+                observer=str(observer),
+                observed=str(observed),
+            )

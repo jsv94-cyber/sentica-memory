@@ -27,7 +27,7 @@ Request and worker code opens sessions in `src/dependencies.py`:
 
 - `src/dependencies.py:18` `get_db` is the FastAPI write dependency.
 - `src/dependencies.py:43` `get_read_db` is the read dependency.
-- `src/dependencies.py:63` `tracked_db` is the context manager for background
+- `src/dependencies.py:68` `tracked_db` is the context manager for background
   work. `read_only=True` binds `ReadSessionLocal`.
 
 Migrations: `docker/migrate-entrypoint.sh:41` runs `scripts/provision_db.py:14`, which
@@ -161,7 +161,7 @@ observe, but a card is never about a scope.
 
 ## Summaries
 
-Summaries are not a table. `src/utils/summarizer.py:95` uses the key
+Summaries are not a table. `src/utils/summarizer.py:96` uses the key
 `summaries` inside `sessions.internal_metadata`. Each value is a short or long
 summary object (content, message id, token count, timestamps).
 `src/utils/summarizer.py:778` `_save_summary` merges that JSONB.
@@ -265,9 +265,9 @@ Call sites of `honcho_llm_call`:
 | Deriver batch | `src/deriver/deriver.py:162` |
 | Dialectic answer | `src/dialectic/core.py:589` |
 | Dialectic stream | `src/dialectic/core.py:682` |
-| Short summary | `src/utils/summarizer.py:288` |
-| Long summary | `src/utils/summarizer.py:324` |
-| Dream specialists | `src/dreamer/specialists.py:403` |
+| Short summary | `src/utils/summarizer.py:289` |
+| Long summary | `src/utils/summarizer.py:325` |
+| Dream specialists | `src/dreamer/specialists.py:410` |
 
 Dialectic is reached from `POST /v3/.../peers/{peer_id}/chat`
 (`src/routers/peers.py:244`), which calls `src/dialectic/chat.py:50`
@@ -295,11 +295,11 @@ Callers are message create (fast path), the reconciler
 | Deriver observation extraction | `src/deriver/prompts.py:47` `minimal_deriver_prompt` |
 | Dialectic pair recall | `src/dialectic/prompts.py:119` `agent_system_prompt` |
 | Dialectic workspace recall | `src/dialectic/prompts.py:350` `workspace_agent_system_prompt` |
-| Short session summary | `src/utils/summarizer.py:148` `short_summary_prompt` |
-| Long session summary | `src/utils/summarizer.py:188` `long_summary_prompt` |
+| Short session summary | `src/utils/summarizer.py:149` `short_summary_prompt` |
+| Long session summary | `src/utils/summarizer.py:189` `long_summary_prompt` |
 | Dream peer-card rules | `src/dreamer/specialists.py:79` `PEER_CARD_SYSTEM_SECTION` |
-| Deduction specialist | `src/dreamer/specialists.py:622` |
-| Induction specialist | `src/dreamer/specialists.py:756` |
+| Deduction specialist | `src/dreamer/specialists.py:631` |
+| Induction specialist | `src/dreamer/specialists.py:765` |
 | Peer-card maintenance dream | `src/dreamer/specialists.py:905` |
 
 Dream user prompts are the `build_user_prompt` methods on those specialist

@@ -645,6 +645,7 @@ def test_removing_a_workspace_from_the_token_refuses_the_next_request(
     monkeypatch.setenv("SENTICA_TOKEN_ISSUER", "sentica-broker")
     monkeypatch.setenv("SENTICA_BIND_HOST", "127.0.0.1")
     monkeypatch.setenv("SENTICA_GATEWAY_MODE", "on")
+    monkeypatch.setenv("SENTICA_TENANT_HASH_KEY", "sentica-test-tenant-hash-key-32b!!")
     monkeypatch.setenv("HOME", str(root))
     for name in (
         "DB_CONNECTION_URI",
@@ -733,6 +734,7 @@ def test_production_refuses_external_vector_stores(
     monkeypatch.setenv("SENTICA_TOKEN_ISSUER", "sentica-broker")
     monkeypatch.setenv("SENTICA_BIND_HOST", "127.0.0.1")
     monkeypatch.setenv("SENTICA_GATEWAY_MODE", "on")
+    monkeypatch.setenv("SENTICA_TENANT_HASH_KEY", "sentica-test-tenant-hash-key-32b!!")
     monkeypatch.setenv("HOME", str(root))
     monkeypatch.setenv("VECTOR_STORE_TYPE", store)
     for name in (
@@ -2356,17 +2358,21 @@ async def test_run_dreams_stays_inside_the_callers_workspace(
     gateway = MockGateway(strict=True)
     apply_gateway_env(monkeypatch, gateway.start())
     forbid_provider_sdks(monkeypatch)
+    from sqlalchemy import select
+
+    from src import models
+    from src.sentica import dreams as dreams_module
     from src.sentica.dreams import run_dreams
     from src.sentica.workspace_scope import reset_workspace, set_workspace
 
     # dreams_due sets the workspace before run_dreams. Without that setting,
     # row-level security hides the workspace and the dream never calls the model.
+
     bound = set_workspace(left)
     try:
         created = await run_dreams(left, now=datetime(2026, 10, 15, tzinfo=UTC))
     finally:
         reset_workspace(bound)
-        gateway.close()
     blob = repr(created) + _captured(gateway)
     assert "local hello" in blob
     assert canary not in blob
@@ -2374,6 +2380,37 @@ async def test_run_dreams_stays_inside_the_callers_workspace(
         record["headers"].get("X-Sentica-Purpose") == "dream"
         for record in gateway.records
     )
+
+    def _unscoped_conclusions(workspace_name: str) -> Any:
+        del workspace_name
+        return (
+            select(
+                models.Document.id,
+                models.Document.content,
+                models.Document.internal_metadata,
+            )
+            .where(models.Document.deleted_at.is_(None))
+            .where(models.Document.superseded_by.is_(None))
+            .order_by(models.Document.created_at.desc())
+            .limit(40)
+        )
+
+    monkeypatch.setattr(
+        dreams_module,
+        "_source_conclusion_query",
+        _unscoped_conclusions,
+    )
+    gateway.records.clear()
+    await _release_locks(db_session)
+    bound = set_workspace(left)
+    try:
+        with _relax_rls("documents"):
+            await _release_locks(db_session)
+            leaked = await run_dreams(left, now=datetime(2026, 10, 16, tzinfo=UTC))
+    finally:
+        reset_workspace(bound)
+        gateway.close()
+    assert canary in repr(leaked) + _captured(gateway)
 
 
 async def test_safety_model_check_does_not_see_the_other_workspace(
@@ -2389,6 +2426,7 @@ async def test_safety_model_check_does_not_see_the_other_workspace(
     from tests.sentica.mock_gateway import (
         MockGateway,
         apply_gateway_env,
+        chat_message,
         forbid_provider_sdks,
         use_real_embeddings,
     )
@@ -2400,6 +2438,15 @@ async def test_safety_model_check_does_not_see_the_other_workspace(
     forbid_provider_sdks(monkeypatch)
     use_real_embeddings(monkeypatch)
     monkeypatch.setenv("SENTICA_SAFETY_MODEL_CHECK", "on")
+
+    def _keep(
+        path: str, body: dict[str, Any], headers: dict[str, str]
+    ) -> dict[str, Any]:
+        if path.endswith("/embeddings"):
+            return gateway._default_decide(path, body, headers)  # pyright: ignore[reportPrivateUsage]
+        return chat_message("no")
+
+    gateway.decide = _keep
 
     async def _store(text: str) -> None:
         bound = set_workspace(left)
@@ -2420,11 +2467,24 @@ async def test_safety_model_check_does_not_see_the_other_workspace(
             reset_workspace(bound)
         assert created
 
+    seen: list[str] = []
+    from src.sentica import safety as safety_module
+
+    real_texts = safety_module._recent_conclusion_texts  # pyright: ignore[reportPrivateUsage]
+
+    async def _record(workspace_name: str) -> list[str]:
+        rows = await real_texts(workspace_name)
+        seen.extend(rows)
+        return rows
+
+    monkeypatch.setattr(safety_module, "_recent_conclusion_texts", _record)
     try:
         await _store("local hello")
         blob = _captured(gateway)
-        assert "local hello" in blob
+        assert "local hello" in seen
+        assert canary not in seen
         assert canary not in blob
+        assert "local hello" in blob
 
         def _unscoped_texts(workspace_name: str) -> Any:
             del workspace_name
@@ -2443,6 +2503,7 @@ async def test_safety_model_check_does_not_see_the_other_workspace(
         with _relax_rls("documents"):
             await _store("local hello again")
             await _release_locks(db_session)
-        assert canary in _captured(gateway)
+        assert canary in seen
+        assert canary not in _captured(gateway)
     finally:
         gateway.close()

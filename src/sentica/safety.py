@@ -69,6 +69,7 @@ _RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
 
 _LOCK = threading.Lock()
 _DROPS: dict[str, int] = {}
+_UNPARSEABLE: dict[str, int] = {}
 
 
 def banned_category(text: str) -> str | None:
@@ -104,10 +105,25 @@ def drops(tenant: str | None = None) -> int:
         return _DROPS.get(key, 0)
 
 
+def note_unparseable() -> None:
+    """Count a drop caused by an unparseable safety reply, not by a ban."""
+    tenant = _tenant()
+    with _LOCK:
+        _UNPARSEABLE[tenant] = _UNPARSEABLE.get(tenant, 0) + 1
+
+
+def unparseable_drops(tenant: str | None = None) -> int:
+    """How many conclusions were dropped because the reply was not yes or no."""
+    key = tenant if tenant is not None else _tenant()
+    with _LOCK:
+        return _UNPARSEABLE.get(key, 0)
+
+
 def reset_drops() -> None:
     """Clear counters. Tests call this between cases."""
     with _LOCK:
         _DROPS.clear()
+        _UNPARSEABLE.clear()
 
 
 def model_check_enabled() -> bool:
@@ -153,27 +169,71 @@ async def _recent_conclusion_texts(workspace_name: str) -> list[str]:
     return [str(row) for row in rows]
 
 
-async def model_check_bans(text: str, *, workspace_name: str | None) -> bool:
-    """Ask the configured model when the optional check is on.
+def is_safety_outage(exc: BaseException) -> bool:
+    """True when the queue item must be retried instead of dropping the text."""
+    return _propagates(exc)
 
-    A missing workspace, a transport failure, or a yes answer drops the text.
-    The text itself is not logged. Recent conclusions from the same workspace
-    are part of the prompt, loaded before the model call.
-    """
-    if not model_check_enabled():
-        return False
-    if not workspace_name:
-        logger.warning("Safety model check refused a conclusion with no workspace")
+
+def _propagates(exc: BaseException) -> bool:
+    """Outages retry the queue item. They do not drop the conclusion."""
+    from src.exceptions import GatewayBudgetExceeded, GatewayUnavailable
+
+    if isinstance(exc, (GatewayUnavailable, GatewayBudgetExceeded)):
         return True
+    try:
+        import redis.exceptions as redis_errors
+    except ImportError:
+        return False
+    return isinstance(exc, redis_errors.RedisError)
+
+
+def _classify(answer: str) -> str:
+    folded = answer.strip().casefold()
+    if folded.startswith("yes"):
+        return "yes"
+    if folded.startswith("no"):
+        return "no"
+    return "unparseable"
+
+
+async def _ask(prompt: str, *, workspace_name: str) -> str:
     from src.config import settings
     from src.llm.api import honcho_llm_call
     from src.llm.types import LLMTelemetryContext
 
-    try:
-        context = await _recent_conclusion_texts(workspace_name)
-    except Exception:
-        logger.warning("Safety model check failed closed")
-        return True
+    response = await honcho_llm_call(
+        model_config=settings.SUMMARY.MODEL_CONFIG,
+        prompt=prompt,
+        max_tokens=8,
+        telemetry=LLMTelemetryContext(
+            workspace_name=workspace_name,
+            call_purpose="summary.safety",
+            parent_category="summary",
+        ),
+    )
+    return response.content
+
+
+async def model_check_bans(text: str, *, workspace_name: str | None) -> str:
+    """Ask the configured model when the optional check is on.
+
+    Returns ``yes``, ``no``, or ``unparseable``. Only ``yes`` is a ban.
+    An unparseable reply is asked once more. Gateway, budget, and Redis
+    errors propagate so the queue item is retried. The prompt is this line
+    only. A workspace-scoped read still runs and its text is not appended.
+    An open database session is a programming error.
+    """
+    if not model_check_enabled():
+        return "no"
+    if not workspace_name:
+        logger.warning("Safety model check refused a conclusion with no workspace")
+        return "yes"
+    scoped = await _recent_conclusion_texts(workspace_name)
+    logger.debug("Safety check scoped conclusion count=%s", len(scoped))
+    from src.dependencies import open_db_sessions
+
+    if open_db_sessions() > 0:
+        raise RuntimeError("Refusing the safety check: a database session is open")
     prompt = (
         "Reply yes if the conclusion states or implies a health condition, "
         + "sexual orientation or activity, religion, political view, "
@@ -181,28 +241,16 @@ async def model_check_bans(text: str, *, workspace_name: str | None) -> bool:
         + "medical reason for leave. Reply no otherwise.\n\n"
         + text
     )
-    if context:
-        prompt = prompt + "\n" + "\n".join(context)
-    from src.dependencies import open_db_sessions
-
-    if open_db_sessions() > 0:
-        logger.warning("Safety model check refused while a database session is open")
-        return True
     try:
-        response = await honcho_llm_call(
-            model_config=settings.SUMMARY.MODEL_CONFIG,
-            prompt=prompt,
-            max_tokens=8,
-            telemetry=LLMTelemetryContext(
-                workspace_name=workspace_name,
-                call_purpose="summary.safety",
-                parent_category="summary",
-            ),
-        )
-    except Exception:
+        verdict = _classify(await _ask(prompt, workspace_name=workspace_name))
+        if verdict == "unparseable":
+            verdict = _classify(await _ask(prompt, workspace_name=workspace_name))
+    except Exception as exc:
+        if _propagates(exc):
+            raise
         logger.warning("Safety model check failed closed")
-        return True
-    return response.content.strip().casefold().startswith("yes")
+        return "yes"
+    return verdict
 
 
 async def keep_conclusion(text: str, *, workspace_name: str | None) -> bool:
@@ -212,8 +260,13 @@ async def keep_conclusion(text: str, *, workspace_name: str | None) -> bool:
         logger.info("Dropped a conclusion category=%s", category)
         note_drop(category)
         return False
-    if await model_check_bans(text, workspace_name=workspace_name):
+    verdict = await model_check_bans(text, workspace_name=workspace_name)
+    if verdict == "yes":
         logger.info("Dropped a conclusion category=%s", "model")
         note_drop("model")
+        return False
+    if verdict == "unparseable":
+        logger.info("Dropped a conclusion category=%s", "unparseable")
+        note_unparseable()
         return False
     return True

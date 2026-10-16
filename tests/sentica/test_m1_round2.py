@@ -51,6 +51,7 @@ def _production(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         "SENTICA_TOKEN_ISSUER": "sentica-broker",
         "SENTICA_BIND_HOST": "127.0.0.1",
         "SENTICA_GATEWAY_MODE": "on",
+        "SENTICA_TENANT_HASH_KEY": "sentica-test-tenant-hash-key-32b!!",
         "HOME": str(tmp_path),
     }
     for key, value in env.items():

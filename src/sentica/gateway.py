@@ -899,6 +899,7 @@ async def complete_llm(
     total_input = 0
     tool_output = 0
     iterations = 0
+    next_round = 0
     limit = max(1, max_tool_iterations)
     parsed: Any = ""
     finish = "stop"
@@ -912,6 +913,9 @@ async def complete_llm(
     ) -> tuple[
         dict[str, Any], str, list[dict[str, Any]], str, int, int, str, int, float
     ]:
+        del round_index
+        nonlocal next_round
+        next_round += 1
         return await _chat(
             purpose=purpose,
             workspace=workspace,
@@ -923,7 +927,7 @@ async def complete_llm(
             json_mode=json_mode,
             telemetry=telemetry,
             mark_stream=stream,
-            round_index=round_index,
+            round_index=next_round,
         )
 
     def _note(

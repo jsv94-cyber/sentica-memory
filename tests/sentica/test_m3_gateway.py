@@ -49,6 +49,7 @@ class _Gateway(ThreadingHTTPServer):
     omit_usage: bool
     delay: float
     scripted: dict[str, str] | None
+    replies: list[str] | None
 
     def __init__(self) -> None:
         super().__init__(("127.0.0.1", 0), _Handler)
@@ -59,6 +60,7 @@ class _Gateway(ThreadingHTTPServer):
         self.omit_usage = False
         self.delay = 0.0
         self.scripted = None
+        self.replies = None
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -95,6 +97,18 @@ class _Handler(BaseHTTPRequestHandler):
                     {"index": index, "embedding": [0.25, 0.5]} for index in range(count)
                 ],
                 "usage": {"prompt_tokens": 2, "completion_tokens": 0},
+            }
+        elif gateway.replies:
+            index = len(gateway.requests) - 1
+            content = gateway.replies[min(index, len(gateway.replies) - 1)]
+            payload = {
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": content},
+                    }
+                ],
+                "usage": {"prompt_tokens": 4, "completion_tokens": 2},
             }
         elif gateway.scripted is not None:
             message: dict[str, Any] = {
@@ -353,6 +367,62 @@ async def test_gateway_outage_pauses_without_deleting_messages(
     assert [item.rsplit(":a", 1)[-1] for item in request_ids] == ["1", "2", "3"]
     paused = await _pause(GatewayUnavailable("model gateway unavailable"))
     assert paused is True
+
+
+def _round_indexes(request_ids: list[str]) -> list[str]:
+    return [item.rsplit(":a", 1)[0].rsplit(":r", 1)[-1] for item in request_ids]
+
+
+async def test_each_round_gets_its_own_request_id(gateway: _Gateway) -> None:
+    """Structured-output retry and the final no-tools call use a new round."""
+    from pydantic import BaseModel
+
+    class _Line(BaseModel):
+        content: str
+
+    gateway.replies = ["not-json", '{"content":"kept"}']
+    parsed = await honcho_llm_call(
+        model_config=settings.SUMMARY.MODEL_CONFIG,
+        prompt="hello",
+        max_tokens=16,
+        response_model=_Line,
+        telemetry=LLMTelemetryContext(
+            workspace_name="left",
+            call_purpose="summary.short",
+            parent_category="summary",
+        ),
+    )
+    assert isinstance(parsed.content, _Line)
+    assert parsed.content.content == "kept"
+    structured_ids = [str(row["request_id"]) for row in gateway.requests]
+    assert _round_indexes(structured_ids) == ["1", "2"]
+    assert [item.rsplit(":a", 1)[-1] for item in structured_ids] == ["1", "1"]
+    assert len(set(structured_ids)) == len(structured_ids)
+
+    gateway.replies = None
+    gateway.requests.clear()
+    gateway.always_tools = True
+
+    async def _search(_name: str, _arguments: dict[str, Any]) -> str:
+        return "found"
+
+    await honcho_llm_call(
+        model_config=settings.SUMMARY.MODEL_CONFIG,
+        prompt="find it",
+        max_tokens=16,
+        tools=[{"type": "function", "function": {"name": "search_memory"}}],
+        tool_executor=_search,
+        max_tool_iterations=1,
+        telemetry=LLMTelemetryContext(
+            workspace_name="left",
+            call_purpose="dialectic.answer",
+            parent_category="dialectic",
+        ),
+    )
+    loop_ids = [str(row["request_id"]) for row in gateway.requests]
+    assert _round_indexes(loop_ids) == ["1", "2"]
+    assert [item.rsplit(":a", 1)[-1] for item in loop_ids] == ["1", "1"]
+    assert len(set(loop_ids)) == len(loop_ids)
 
 
 async def test_missing_tenant_workspace_or_model_does_not_call(
@@ -644,6 +714,7 @@ async def test_empty_capped_summary_is_not_replaced(
             SummaryType.SHORT,
             10,
             "m1",
+            1,
             1,
             "local hello",
             1,

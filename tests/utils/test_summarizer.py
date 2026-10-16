@@ -87,6 +87,7 @@ async def _call_create_summary(
         input_tokens=input_tokens,
         message_public_id=_MESSAGE_PUBLIC_ID,
         last_message_id=_LAST_MESSAGE_ID,
+        message_start_id=1,
         last_message_content_preview=_LAST_MESSAGE_CONTENT_PREVIEW,
         message_count=message_count,
     )

@@ -200,6 +200,19 @@ class DeriverMetricsPoller:
         cap = settings.DREAM.MAX_ENQUEUED_PER_POLL
         for due_dream in self._due_dreams[:cap]:
             try:
+                from sqlalchemy import select
+
+                from src import models
+                from src.sentica.dreams import inference_enabled
+
+                async with tracked_db("backlog.dream.synthesis", read_only=True) as db:
+                    workspace = await db.scalar(
+                        select(models.Workspace).where(
+                            models.Workspace.name == due_dream.workspace_name
+                        )
+                    )
+                if workspace is None or not inference_enabled(workspace.configuration):
+                    continue
                 await enqueue_dream(
                     due_dream.workspace_name,
                     observer=due_dream.observer,

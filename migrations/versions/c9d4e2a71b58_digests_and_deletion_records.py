@@ -105,6 +105,7 @@ def upgrade() -> None:
                 document_count INTEGER NOT NULL,
                 embedding_count INTEGER NOT NULL,
                 summary_count INTEGER NOT NULL,
+                legacy BOOLEAN NOT NULL DEFAULT false,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                 CONSTRAINT deletion_records_id_length CHECK (length(id) = 21)
             )
@@ -149,26 +150,17 @@ def upgrade() -> None:
             f"""
             INSERT INTO {deletions} (
                 id, workspace_name, peer_hash, subject_hash,
-                document_count, embedding_count, summary_count, created_at
+                document_count, embedding_count, summary_count, legacy, created_at
             )
             SELECT
                 elem->>'id',
                 w.name,
-                CASE
-                    WHEN elem->>'peer_name' IS NULL THEN NULL
-                    ELSE encode(
-                        sha256(convert_to(elem->>'peer_name', 'UTF8')), 'hex'
-                    )
-                END,
-                CASE
-                    WHEN elem->>'subject_ref' IS NULL THEN NULL
-                    ELSE encode(
-                        sha256(convert_to(elem->>'subject_ref', 'UTF8')), 'hex'
-                    )
-                END,
+                NULL,
+                NULL,
                 COALESCE((elem->>'document_count')::integer, 0),
                 COALESCE((elem->>'embedding_count')::integer, 0),
                 COALESCE((elem->>'summary_count')::integer, 0),
+                true,
                 now()
             FROM {workspaces} AS w
             CROSS JOIN LATERAL jsonb_array_elements(
@@ -215,5 +207,51 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     schema = _quote(settings.DB.SCHEMA)
-    op.execute(sa.text(f"DROP TABLE IF EXISTS {schema}.deletion_records"))
-    op.execute(sa.text(f"DROP TABLE IF EXISTS {schema}.dream_digests"))
+    digests = schema + ".dream_digests"
+    deletions = schema + ".deletion_records"
+    workspaces = schema + ".workspaces"
+    op.execute(
+        sa.text(
+            f"""
+            UPDATE {workspaces} AS workspace
+            SET internal_metadata = COALESCE(workspace.internal_metadata, '{{}}'::jsonb)
+                || jsonb_build_object(
+                    'dreams',
+                    COALESCE((
+                        SELECT jsonb_agg(
+                            jsonb_build_object(
+                                'id', digest.id,
+                                'kind', digest.kind,
+                                'period', digest.period,
+                                'content', digest.content,
+                                'source_ids', digest.source_ids,
+                                'tokens', digest.tokens,
+                                'external', digest.external,
+                                'skipped', digest.skipped
+                            )
+                            ORDER BY digest.created_at, digest.id
+                        )
+                        FROM {digests} AS digest
+                        WHERE digest.workspace_name = workspace.name
+                    ), '[]'::jsonb),
+                    'deletion_records',
+                    COALESCE((
+                        SELECT jsonb_agg(
+                            jsonb_build_object(
+                                'id', record.id,
+                                'document_count', record.document_count,
+                                'embedding_count', record.embedding_count,
+                                'summary_count', record.summary_count,
+                                'legacy', record.legacy
+                            )
+                            ORDER BY record.created_at, record.id
+                        )
+                        FROM {deletions} AS record
+                        WHERE record.workspace_name = workspace.name
+                    ), '[]'::jsonb)
+                )
+            """
+        )
+    )
+    op.execute(sa.text(f"DROP TABLE IF EXISTS {deletions}"))
+    op.execute(sa.text(f"DROP TABLE IF EXISTS {digests}"))

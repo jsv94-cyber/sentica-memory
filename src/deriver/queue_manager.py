@@ -647,19 +647,18 @@ class QueueManager:
         """
         from src.exceptions import GatewayBudgetExceeded, GatewayUnavailable
 
-        if isinstance(error, GatewayUnavailable):
+        outage = isinstance(error, (GatewayUnavailable, GatewayBudgetExceeded))
+        if not outage:
+            try:
+                import redis.exceptions as redis_errors
+            except ImportError:
+                redis_errors = None  # type: ignore[assignment]
+            if redis_errors is not None and isinstance(error, redis_errors.RedisError):
+                outage = True
+        if outage:
             # The next poll waits out the grown interval instead of claiming
-            # this unit again on the base interval.
-            self._gateway_outage_pending = True
-            logger.warning(
-                "Gateway pause for work unit %s during %s: %s",
-                work_unit_key,
-                context,
-                error.__class__.__name__,
-            )
-            return True
-
-        if isinstance(error, GatewayBudgetExceeded):
+            # this unit again on the base interval. A budget or Redis failure
+            # during the safety check is the same pause: nothing was stored.
             self._gateway_outage_pending = True
             logger.warning(
                 "Gateway pause for work unit %s during %s: %s",
