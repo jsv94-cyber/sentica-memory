@@ -25,9 +25,9 @@ that schema.
 
 Request and worker code opens sessions in `src/dependencies.py`:
 
-- `src/dependencies.py:10` `get_db` is the FastAPI write dependency.
-- `src/dependencies.py:35` `get_read_db` is the read dependency.
-- `src/dependencies.py:55` `tracked_db` is the context manager for background
+- `src/dependencies.py:18` `get_db` is the FastAPI write dependency.
+- `src/dependencies.py:43` `get_read_db` is the read dependency.
+- `src/dependencies.py:63` `tracked_db` is the context manager for background
   work. `read_only=True` binds `ReadSessionLocal`.
 
 Migrations: `docker/migrate-entrypoint.sh:41` runs `scripts/provision_db.py:14`, which
@@ -164,7 +164,7 @@ observe, but a card is never about a scope.
 Summaries are not a table. `src/utils/summarizer.py:95` uses the key
 `summaries` inside `sessions.internal_metadata`. Each value is a short or long
 summary object (content, message id, token count, timestamps).
-`src/utils/summarizer.py:771` `_save_summary` merges that JSONB.
+`src/utils/summarizer.py:778` `_save_summary` merges that JSONB.
 `src/utils/summarizer.py:340` `summarize_if_needed` runs from the queue when
 the message sequence hits the short or long interval.
 
@@ -183,12 +183,12 @@ runs the deduction specialist, then the induction specialist.
 calls. Surprisal sampling, when enabled, is `src/dreamer/surprisal.py`.
 
 Workspace synthesis is separate from that collection dream.
-`src/sentica/dreams.py:140` `run_dreams` writes a daily digest from that
+`src/sentica/dreams.py:222` `run_dreams` writes a daily digest from that
 workspace's conclusions, then a weekly insight from those digests. The
-records live on the workspace. `PUT /workspaces/{id}/synthesis`
+records live in `dream_digests`. `PUT /workspaces/{id}/synthesis`
 (`src/routers/workspaces.py:255` `set_workspace_synthesis`) turns new
-dreams off and leaves earlier ones in place. The reconciler calls
-`src/sentica/dreams.py:230` `dreams_due`.
+dreams off and leaves earlier ones in place. The reconciler enqueues
+`src/sentica/dreams.py:356` `dreams_due`.
 
 ## Evaluation
 
@@ -245,7 +245,7 @@ they are stored. The deriver, summary, and dream prompts include that rule.
 
 Chat completions go through `src/llm/api.py:147` `honcho_llm_call`. When
 `SENTICA_GATEWAY_MODE` is on, `src/llm/api.py:201` returns before any
-provider is chosen. `src/sentica/gateway.py:810` `complete_llm` posts to
+provider is chosen. `src/sentica/gateway.py:868` `complete_llm` posts to
 that function's OpenAI-compatible URL and keeps the same model on every
 retry. Gateway mode off resolves a model config, retries, and either calls
 `src/llm/executor.py` `honcho_llm_call_inner` or the tool loop in
@@ -277,7 +277,7 @@ and then loops on tools until it can answer.
 Embeddings do not use `honcho_llm_call`. `src/embedding_client.py:711`
 `EmbeddingClient` wraps `src/embedding_client.py:197` `_EmbeddingClient`.
 With gateway mode on, `src/embedding_client.py:801` `embed` calls
-`src/sentica/gateway.py:1050` `embed_texts` and does not construct a
+`src/sentica/gateway.py:1121` `embed_texts` and does not construct a
 provider client. With gateway mode off, `src/embedding_client.py:309`
 `embed` calls the provider.
 The default transport is OpenAI `text-embedding-3-small`

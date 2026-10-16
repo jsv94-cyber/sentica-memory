@@ -72,7 +72,7 @@ async def process_item(queue_item: models.QueueItem) -> None:
                 queue_payload,
             )
             raise ValueError(f"Invalid payload structure: {str(e)}") from e
-        await process_reconciler(validated)
+        await process_reconciler(validated, workspace_name)
         return
 
     if task_type == "webhook":
@@ -382,7 +382,9 @@ async def process_deletion(
         )
 
 
-async def process_reconciler(payload: ReconcilerPayload) -> None:
+async def process_reconciler(
+    payload: ReconcilerPayload, workspace_name: str | None = None
+) -> None:
     """
     Process a reconciler task from the queue.
 
@@ -465,5 +467,17 @@ async def process_reconciler(payload: ReconcilerPayload) -> None:
             )
         )
 
+    elif reconciler_type == ReconcilerType.DREAMS:
+        if not workspace_name:
+            raise ValueError("dreams reconciler requires a workspace")
+        from src.sentica.dreams import run_dreams
+
+        await run_dreams(workspace_name)
+    elif reconciler_type == ReconcilerType.DECAY:
+        if not workspace_name:
+            raise ValueError("decay reconciler requires a workspace")
+        from src.sentica.freshness import run_decay
+
+        await run_decay(workspace_name)
     else:
         raise ValueError(f"Unsupported reconciler type: {reconciler_type}")

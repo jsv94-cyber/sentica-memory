@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import logging
 import re
 from typing import cast
 
@@ -15,10 +16,12 @@ from src import models, schemas
 from src.config import settings
 from src.crud.peer_card import get_peer_card
 from src.dependencies import tracked_db
-from src.sentica.freshness import note_retrieved
+from src.sentica.freshness import note_retrieved, note_used
 from src.utils.formatting import ILIKE_ESCAPE_CHAR, escape_ilike_pattern
 from src.utils.search import reciprocal_rank_fusion
 from src.utils.tokens import estimate_tokens, tokenizer
+
+logger = logging.getLogger(__name__)
 
 _SPECIAL = re.compile(r"[~`!@#$%^&*()_+=\[\]{};':\"\\|,.<>/?-]")
 # Orthogonal test vectors sit at distance 1. Real paraphrases sit well below this.
@@ -210,7 +213,9 @@ async def _latest_summary(
         )
         .where(models.session_peers_table.c.workspace_name == workspace_name)
         .where(models.session_peers_table.c.peer_name == peer_name)
-        .order_by(models.Session.created_at.desc())
+        .where(models.session_peers_table.c.left_at.is_(None))
+        .where(models.Session.is_active.is_(True))
+        .order_by(models.Session.created_at.desc(), models.Session.id.desc())
         .limit(20)
     )
     rows = (await db.execute(stmt)).scalars().all()
@@ -393,6 +398,10 @@ async def prepare_brief(
         )
     ids = [item.id for item in brief.conclusions]
     if ids:
-        async with tracked_db("peers.brief.retrieved") as write_db:
-            await note_retrieved(write_db, ids, workspace_name=workspace_name)
+        try:
+            async with tracked_db("peers.brief.used") as write_db:
+                await note_retrieved(write_db, ids, workspace_name=workspace_name)
+                await note_used(write_db, ids, workspace_name=workspace_name)
+        except Exception:
+            logger.warning("brief use note skipped")
     return brief

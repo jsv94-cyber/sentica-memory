@@ -65,8 +65,9 @@ class MockGateway(ThreadingHTTPServer):
         dimensions: int = 1536,
         strict: bool = True,
         port: int = 0,
+        host: str = "127.0.0.1",
     ) -> None:
-        super().__init__(("127.0.0.1", port), _Handler)
+        super().__init__((host, port), _Handler)
         self.records = []
         self.dimensions = dimensions
         self.strict = strict
@@ -164,11 +165,56 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(encoded)
 
 
-def serve(port: int) -> None:
+def serve(port: int, host: str = "127.0.0.1") -> None:
     """Block. The runtime-role job points gateway mode at this process."""
     dimensions = int(os.environ.get("SENTICA_MOCK_EMBED_DIMENSIONS", "1536"))
-    server = MockGateway(dimensions=dimensions, strict=True, port=port)
+    server = MockGateway(dimensions=dimensions, strict=True, port=port, host=host)
+    server.decide = _stack_decide(server)
     server.serve_forever()
+
+
+def _explicit_enabled() -> bool:
+    return os.environ.get("SENTICA_MOCK_EXPLICIT", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _stack_decide(server: MockGateway) -> Decide:
+    """Default answers, plus one explicit fact when the stack asks for it."""
+
+    def decide(
+        path: str, body: dict[str, Any], headers: dict[str, str]
+    ) -> dict[str, Any]:
+        response_format = body.get("response_format")
+        if (
+            _explicit_enabled()
+            and isinstance(response_format, dict)
+            and cast(dict[str, Any], response_format).get("type") == "json_schema"
+        ):
+            return {
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {
+                            "role": "assistant",
+                            "content": '{"explicit":[{"content":"likes tea"}]}',
+                        },
+                    }
+                ],
+                "usage": {"prompt_tokens": 4, "completion_tokens": 2},
+            }
+        return server._default_decide(path, body, headers)  # pyright: ignore[reportPrivateUsage]
+
+    return decide
+
+
+if __name__ == "__main__":
+    main_host = os.environ.get("SENTICA_MOCK_HOST", "0.0.0.0")
+    main_port = int(os.environ.get("SENTICA_MOCK_PORT", "8080"))
+    serve(main_port, main_host)
 
 
 _MODELS = {
@@ -294,7 +340,7 @@ def apply_gateway_env(
     if not os.environ.get("SENTICA_TENANT_ID", "").strip():
         monkeypatch.setenv("SENTICA_TENANT_ID", tenant)
     monkeypatch.setenv("SENTICA_GATEWAY_RETRY_ATTEMPTS", "3")
-    monkeypatch.setenv("SENTICA_GATEWAY_RETRY_WAIT_SECONDS", "0")
+    monkeypatch.setenv("SENTICA_GATEWAY_RETRY_WAIT_SECONDS", "0.001")
     monkeypatch.delenv("SENTICA_GATEWAY_DAILY_TOKEN_BUDGET", raising=False)
     for name, model in _MODELS.items():
         monkeypatch.setenv(name, model)

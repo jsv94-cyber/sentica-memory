@@ -157,7 +157,10 @@ async def run_dream(
         workspace = await crud.get_workspace(db, workspace_name=workspace_name)
         configuration = get_configuration(None, session, workspace)
         resolved_session_id = session.id if session else None
-    if not configuration.dream.enabled:
+        raw_configuration = dict(workspace.configuration or {})
+    from src.sentica.dreams import inference_enabled
+
+    if not configuration.dream.enabled or not inference_enabled(raw_configuration):
         logger.info(
             f"[{run_id}] Dreams disabled for {workspace_name}/{session_name}, skipping dream"
         )
@@ -423,7 +426,10 @@ async def run_card_refresh_dream(
         workspace = await crud.get_workspace(db, workspace_name=workspace_name)
         configuration = get_configuration(None, session, workspace)
         resolved_session_id = session.id if session else None
-    if not configuration.dream.enabled:
+        raw_configuration = dict(workspace.configuration or {})
+    from src.sentica.dreams import inference_enabled
+
+    if not configuration.dream.enabled or not inference_enabled(raw_configuration):
         logger.info(
             f"[{run_id}] Dreams disabled for {workspace_name}/{session_name}, skipping card refresh"
         )

@@ -257,7 +257,11 @@ class DreamScheduler:
 
             configuration = get_configuration(None, session, workspace)
 
-            if not configuration.dream.enabled:
+            from src.sentica.dreams import inference_enabled
+
+            if not configuration.dream.enabled or not inference_enabled(
+                workspace.configuration
+            ):
                 logger.debug(
                     f"Dreams disabled for {workspace_name}/{session_name}, skipping dream"
                 )
@@ -311,6 +315,16 @@ async def check_and_schedule_dream(
         True if a dream timer was scheduled, False otherwise
     """
     if not settings.DREAM.ENABLED or settings.DERIVER.SCHEDULER == "api":
+        return False
+
+    from src.sentica.dreams import inference_enabled
+
+    workspace = await db.scalar(
+        select(models.Workspace).where(
+            models.Workspace.name == collection.workspace_name
+        )
+    )
+    if workspace is None or not inference_enabled(workspace.configuration):
         return False
 
     dream_metadata = collection.internal_metadata.get("dream", {})

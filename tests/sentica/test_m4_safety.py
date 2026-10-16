@@ -8,7 +8,7 @@ from sqlalchemy import select
 
 from src import crud, models, schemas
 from src.config import settings
-from src.crud.peer_card import get_peer_card, set_peer_card
+from src.crud.peer_card import get_peer_card, replace_peer_card_from_conclusions
 from src.deriver.prompts import minimal_deriver_prompt
 from src.dreamer.specialists import (
     DeductionSpecialist,
@@ -75,7 +75,14 @@ def test_prompts_forbid_the_banned_categories() -> None:
     long = long_summary_prompt("hello", 20, "")
     deduction = DeductionSpecialist().build_system_prompt("peer")
     induction = InductionSpecialist().build_system_prompt("peer")
-    for prompt in (deriver, short, long, deduction, induction):
+    from src.dialectic.prompts import (
+        agent_system_prompt,
+        workspace_agent_system_prompt,
+    )
+
+    pair = agent_system_prompt("observer", "observed", None, None)
+    workspace_prompt = workspace_agent_system_prompt()
+    for prompt in (deriver, short, long, deduction, induction, pair, workspace_prompt):
         assert PROMPT_RULES in prompt
 
 
@@ -191,17 +198,25 @@ async def test_external_conclusions_keep_message_ids_and_leave_the_card(
     conclusion = schemas.Conclusion.model_validate(stored)
     assert conclusion.message_ids == [message.public_id]
     assert conclusion.source_trust == "external"
-    await set_peer_card(
+    await crud.create_documents(
         db_session,
-        workspace.name,
-        [fact, "ATTRIBUTE: Likes tea", "has diabetes"],
-        observer=peer.name,
-        observed=peer.name,
-    )
-    card = await get_peer_card(
-        db_session,
+        [_document("likes tea")],
         workspace.name,
         observer=peer.name,
         observed=peer.name,
     )
-    assert card == ["ATTRIBUTE: Likes tea"]
+    card = await replace_peer_card_from_conclusions(
+        db_session,
+        workspace.name,
+        observer=peer.name,
+        observed=peer.name,
+    )
+    stored_card = await get_peer_card(
+        db_session,
+        workspace.name,
+        observer=peer.name,
+        observed=peer.name,
+    )
+    assert card == ["likes tea"]
+    assert stored_card == ["likes tea"]
+    assert fact not in card

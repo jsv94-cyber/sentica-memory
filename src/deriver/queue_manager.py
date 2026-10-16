@@ -660,6 +660,7 @@ class QueueManager:
             return True
 
         if isinstance(error, GatewayBudgetExceeded):
+            self._gateway_outage_pending = True
             logger.warning(
                 "Gateway pause for work unit %s during %s: %s",
                 work_unit_key,

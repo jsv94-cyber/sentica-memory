@@ -695,8 +695,12 @@ def test_revocation_rolls_back_and_reports_unavailable(stack: Path) -> None:
             headers=headers,
             json={
                 "messages": [
-                    {"peer_id": "p1", "content": canary},
-                    {"peer_id": "p1", "content": canary + "-2"},
+                    {"peer_id": "p1", "content": canary, "source_trust": "owner"},
+                    {
+                        "peer_id": "p1",
+                        "content": canary + "-2",
+                        "source_trust": "owner",
+                    },
                 ]
             },
             timeout=12,
@@ -1634,7 +1638,9 @@ def test_posted_message_embedding_leaves_pending(stack: Path) -> None:
     posted = httpx.post(
         f"{API_A}/v3/workspaces/{workspace}/sessions/s1/messages",
         headers=headers,
-        json={"messages": [{"peer_id": "p1", "content": content}]},
+        json={
+            "messages": [{"peer_id": "p1", "content": content, "source_trust": "owner"}]
+        },
         timeout=20,
     )
     assert posted.status_code in (200, 201), posted.text
@@ -1787,3 +1793,91 @@ def test_api_refuses_a_stale_schema_and_a_runtime_cert_as_ddl(stack: Path) -> No
             conn.commit()
     with pytest.raises(psycopg.OperationalError):
         _connect(PROXY_A, stack, "tenant_a_ddl", "tenant_a", "tenant_a").close()
+
+
+def test_deriver_reaches_the_mock_gateway_with_the_four_headers(stack: Path) -> None:
+    workspace = "m2gate" + uuid.uuid4().hex[:8]
+    content = "derive-" + uuid.uuid4().hex
+    private = _token_key(stack, "a")
+    token = _token(
+        private,
+        issuer="sentica-test-issuer-a",
+        tenant="tenant-a",
+        workspace=workspace,
+    )
+    headers = {"Authorization": f"Bearer {token}"}
+    created = httpx.post(
+        f"{API_A}/v3/workspaces",
+        headers=headers,
+        json={"name": workspace},
+        timeout=20,
+    )
+    assert created.status_code in (200, 201), created.text
+    assert httpx.post(
+        f"{API_A}/v3/workspaces/{workspace}/sessions",
+        headers=headers,
+        json={"id": "s1"},
+        timeout=20,
+    ).status_code in (200, 201)
+    assert httpx.post(
+        f"{API_A}/v3/workspaces/{workspace}/peers",
+        headers=headers,
+        json={"name": "p1"},
+        timeout=20,
+    ).status_code in (200, 201)
+    posted = httpx.post(
+        f"{API_A}/v3/workspaces/{workspace}/sessions/s1/messages",
+        headers=headers,
+        json={
+            "messages": [{"peer_id": "p1", "content": content, "source_trust": "owner"}]
+        },
+        timeout=20,
+    )
+    assert posted.status_code in (200, 201), posted.text
+    deadline = time.monotonic() + 90
+    found = False
+    while time.monotonic() < deadline and not found:
+        with (
+            _connect(PROXY_A, stack, "tenant_a", "tenant_a", "tenant_a") as conn,
+            conn.cursor() as cur,
+        ):
+            _bind_workspace(cur, workspace)
+            cur.execute(
+                "SELECT content FROM memory.documents WHERE workspace_name = %s",
+                (workspace,),
+            )
+            found = any(row[0] == "likes tea" for row in cur.fetchall())
+        if not found:
+            time.sleep(1)
+    assert found
+    captured = _compose(
+        [
+            "exec",
+            "-T",
+            "embeddings",
+            "python",
+            "-c",
+            "import urllib.request; "
+            "print(urllib.request.urlopen("
+            "'http://127.0.0.1:8080/__capture', timeout=5).read().decode())",
+        ],
+        timeout=30,
+    )
+    payload = json.loads(captured.stdout)
+    requests = payload["requests"]
+    assert requests
+    wanted = {
+        "X-Sentica-Tenant",
+        "X-Sentica-Workspace",
+        "X-Sentica-Purpose",
+        "X-Sentica-Request-Id",
+    }
+    matched = [
+        row
+        for row in requests
+        if wanted <= set(row["headers"])
+        and all(row["headers"][name] for name in wanted)
+        and row["headers"]["X-Sentica-Workspace"] == workspace
+    ]
+    assert matched
+    assert any(row["headers"]["X-Sentica-Purpose"] == "deriver" for row in matched)

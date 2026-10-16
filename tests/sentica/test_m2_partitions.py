@@ -168,6 +168,21 @@ def test_runtime_role_cannot_cross_workspaces(
                     "http://" + workspace + ".example",
                 ),
             )
+            conn.execute(
+                """
+                INSERT INTO dream_digests (id, workspace_name, kind, period, content)
+                VALUES (%s, %s, 'daily', '2026-10-01', 'digest')
+                """,
+                (("g" + uuid.uuid4().hex)[:21], workspace),
+            )
+            conn.execute(
+                """
+                INSERT INTO deletion_records (
+                    id, workspace_name, document_count, embedding_count, summary_count
+                ) VALUES (%s, %s, 1, 0, 0)
+                """,
+                (("h" + uuid.uuid4().hex)[:21], workspace),
+            )
         covered = {
             "collections",
             "document_sources",
@@ -179,6 +194,8 @@ def test_runtime_role_cannot_cross_workspaces(
             "session_peers",
             "sessions",
             "webhook_endpoints",
+            "dream_digests",
+            "deletion_records",
         }
         tables = [
             row[0]
@@ -288,6 +305,8 @@ def test_runtime_role_cannot_cross_workspaces(
             "webhook_endpoints",
             "peers",
             "sessions",
+            "dream_digests",
+            "deletion_records",
         ):
             _run(
                 conn,
@@ -318,6 +337,8 @@ def _prove_migrated_runtime_isolation() -> None:
         "session_peers",
         "sessions",
         "webhook_endpoints",
+        "dream_digests",
+        "deletion_records",
     }
     with psycopg.connect(runtime_dsn()) as conn:
         for workspace, workspace_id in ((left, left_id), (right, right_id)):
@@ -407,6 +428,21 @@ def _prove_migrated_runtime_isolation() -> None:
                     workspace,
                     "http://" + workspace + ".example",
                 ),
+            )
+            conn.execute(
+                """
+                INSERT INTO dream_digests (id, workspace_name, kind, period, content)
+                VALUES (%s, %s, 'daily', '2026-10-01', 'digest')
+                """,
+                (("g" + uuid.uuid4().hex)[:21], workspace),
+            )
+            conn.execute(
+                """
+                INSERT INTO deletion_records (
+                    id, workspace_name, document_count, embedding_count, summary_count
+                ) VALUES (%s, %s, 1, 0, 0)
+                """,
+                (("h" + uuid.uuid4().hex)[:21], workspace),
             )
             conn.commit()
         tables = [
@@ -505,6 +541,8 @@ def _prove_migrated_runtime_isolation() -> None:
                 "webhook_endpoints",
                 "peers",
                 "sessions",
+                "dream_digests",
+                "deletion_records",
             ):
                 _run(
                     conn,
@@ -729,7 +767,9 @@ def test_search_tags_each_workspace(client: object) -> None:
         assert peer.status_code in (200, 201), peer.text
     stored = client.post(
         f"/v3/workspaces/{right}/sessions/s1/messages",
-        json={"messages": [{"content": canary, "peer_id": "p1"}]},
+        json={
+            "messages": [{"content": canary, "peer_id": "p1", "source_trust": "owner"}]
+        },
     )
     assert stored.status_code in (200, 201), stored.text
     searched = client.post(
@@ -790,11 +830,17 @@ async def test_canary_written_only_to_r_stays_out_of_other_workspaces(
         ).status_code in (200, 201)
     assert client.post(
         f"/v3/workspaces/{left}/sessions/s1/messages",
-        json={"messages": [{"content": "local hello", "peer_id": "p1"}]},
+        json={
+            "messages": [
+                {"content": "local hello", "peer_id": "p1", "source_trust": "owner"}
+            ]
+        },
     ).status_code in (200, 201)
     assert client.post(
         f"/v3/workspaces/{right}/sessions/s1/messages",
-        json={"messages": [{"content": canary, "peer_id": "p1"}]},
+        json={
+            "messages": [{"content": canary, "peer_id": "p1", "source_trust": "owner"}]
+        },
     ).status_code in (200, 201)
     assert (
         client.put(
@@ -1200,7 +1246,9 @@ def test_harness_flags_the_canary_when_the_request_includes_its_workspace(
     ).status_code in (200, 201)
     assert client.post(
         f"/v3/workspaces/{name}/sessions/s1/messages",
-        json={"messages": [{"content": canary, "peer_id": "p1"}]},
+        json={
+            "messages": [{"content": canary, "peer_id": "p1", "source_trust": "owner"}]
+        },
     ).status_code in (200, 201)
     recorded: list[str] = []
 
@@ -1256,7 +1304,11 @@ def test_membership_noop_lets_the_canary_through(
     ).status_code in (200, 201)
     stored = client.post(
         f"/v3/workspaces/{name}/sessions/s1/messages",
-        json={"messages": [{"content": canary, "peer_id": "owner"}]},
+        json={
+            "messages": [
+                {"content": canary, "peer_id": "owner", "source_trust": "owner"}
+            ]
+        },
     )
     assert stored.status_code in (200, 201), stored.text
     previous_auth = settings.AUTH.USE_AUTH
@@ -1319,12 +1371,18 @@ def test_search_scope_is_resolved_per_workspace(client: object) -> None:
     authorize(client, [left, right], primary=left)
     stored = client.post(
         f"/v3/workspaces/{right}/sessions/beta/messages",
-        json={"messages": [{"content": canary, "peer_id": "p1"}]},
+        json={
+            "messages": [{"content": canary, "peer_id": "p1", "source_trust": "owner"}]
+        },
     )
     assert stored.status_code in (200, 201), stored.text
     decoy = client.post(
         f"/v3/workspaces/{right}/sessions/alpha/messages",
-        json={"messages": [{"content": "ordinary", "peer_id": "p1"}]},
+        json={
+            "messages": [
+                {"content": "ordinary", "peer_id": "p1", "source_trust": "owner"}
+            ]
+        },
     )
     assert decoy.status_code in (200, 201), decoy.text
     searched = client.post(
@@ -1631,7 +1689,11 @@ async def _message_layer(
         ).status_code in (200, 201)
         posted = client.post(
             f"/v3/workspaces/{name}/sessions/s1/messages",
-            json={"messages": [{"content": content, "peer_id": "p1"}]},
+            json={
+                "messages": [
+                    {"content": content, "peer_id": "p1", "source_trust": "owner"}
+                ]
+            },
         )
         assert posted.status_code in (200, 201), posted.text
 
@@ -1847,7 +1909,11 @@ async def _seed_canary_pair(
         ).status_code in (200, 201)
         posted = client.post(
             f"/v3/workspaces/{name}/sessions/s1/messages",
-            json={"messages": [{"content": text, "peer_id": peer}]},
+            json={
+                "messages": [
+                    {"content": text, "peer_id": peer, "source_trust": "owner"}
+                ]
+            },
         )
         assert posted.status_code in (200, 201), posted.text
         bound = set_workspace(name)
@@ -2142,8 +2208,31 @@ async def test_subject_change_and_deletion_leave_no_canary_text(
         monkeypatch.setattr(
             "src.sentica.freshness._peer_message_stmt", _unscoped_messages
         )
+
+        async def _unscoped_delete_documents(
+            db: Any, document_ids: list[str], *, workspace_name: str
+        ) -> None:
+            from sqlalchemy import delete, or_
+
+            del workspace_name
+            if not document_ids:
+                return
+            ids = sorted(document_ids)
+            await db.execute(
+                delete(models.DocumentSource).where(
+                    or_(
+                        models.DocumentSource.derived_id.in_(ids),
+                        models.DocumentSource.source_id.in_(ids),
+                    )
+                )
+            )
+            await db.execute(delete(models.Document).where(models.Document.id.in_(ids)))
+
         monkeypatch.setattr(
             "src.sentica.freshness._delete_messages", _unscoped_delete_messages
+        )
+        monkeypatch.setattr(
+            "src.sentica.freshness._delete_documents", _unscoped_delete_documents
         )
         leaked_delete = client.post(
             f"/v3/workspaces/{other_left}/deletions",

@@ -1,10 +1,18 @@
 import uuid
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 
 from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.db import ReadSessionLocal, SessionLocal, request_context
+
+_OPEN_SESSIONS: ContextVar[int] = ContextVar("sentica_open_db_sessions", default=0)
+
+
+def open_db_sessions() -> int:
+    """How many tracked_db blocks are open on this task."""
+    return _OPEN_SESSIONS.get()
 
 
 async def get_db():
@@ -71,12 +79,14 @@ async def tracked_db(operation_name: str | None = None, *, read_only: bool = Fal
         token = request_context.set(context)
 
     db = (ReadSessionLocal if read_only else SessionLocal)()
+    depth = _OPEN_SESSIONS.set(_OPEN_SESSIONS.get() + 1)
     try:
         yield db
     except Exception:
         await db.rollback()
         raise
     finally:
+        _OPEN_SESSIONS.reset(depth)
         # Always send ROLLBACK. A read-only session is a real transaction
         # (BEGIN READ ONLY), so rollback ends it and checkin clears
         # sentica.workspace. It is not AUTOCOMMIT and it is not a no-op.
@@ -84,6 +94,11 @@ async def tracked_db(operation_name: str | None = None, *, read_only: bool = Fal
         await db.close()
         if token:  # Only reset if we set it
             request_context.reset(token)
+
+
+# The test harness replaces the name tracked_db. This alias stays the
+# implementation that counts open sessions.
+real_tracked_db = tracked_db
 
 
 db: AsyncSession = Depends(get_db)

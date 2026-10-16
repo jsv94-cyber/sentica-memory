@@ -550,6 +550,13 @@ async def _create_and_save_summary(
         ),
     )
 
+    from src.sentica.safety import keep_conclusion
+
+    if not is_fallback and not await keep_conclusion(
+        new_summary["content"], workspace_name=workspace_name
+    ):
+        return
+
     # Compute scaffold tokens up front (cheap + idempotent) so both the
     # save-summary path and the telemetry emit below can use it
     # without basedpyright tripping on a possibly-unbound name.

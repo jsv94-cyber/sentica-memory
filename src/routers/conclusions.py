@@ -143,10 +143,14 @@ async def query_conclusions(
     ids = [document.id for document in documents]
     if ids:
         from src.dependencies import tracked_db
-        from src.sentica.freshness import note_retrieved
+        from src.sentica.freshness import note_retrieved, note_used
 
-        async with tracked_db("conclusion_retrieved") as write_db:
-            await note_retrieved(write_db, ids, workspace_name=workspace_id)
+        try:
+            async with tracked_db("conclusion_used") as write_db:
+                await note_retrieved(write_db, ids, workspace_name=workspace_id)
+                await note_used(write_db, ids, workspace_name=workspace_id)
+        except Exception:
+            logger.warning("conclusion use note skipped")
     return [schemas.Conclusion.model_validate(doc) for doc in documents]
 
 

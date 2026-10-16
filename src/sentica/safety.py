@@ -111,9 +111,21 @@ def reset_drops() -> None:
 
 
 def model_check_enabled() -> bool:
-    """Return whether the optional second check is on."""
-    raw = os.environ.get("SENTICA_SAFETY_MODEL_CHECK", "").strip().lower()
-    return raw in {"1", "true", "yes", "on"}
+    """On in production unless explicitly turned off. Malformed values refuse."""
+    from src.exceptions import ValidationException
+    from src.sentica.runtime import production_enabled
+
+    raw = os.environ.get("SENTICA_SAFETY_MODEL_CHECK")
+    if raw is None or raw.strip() == "":
+        return production_enabled()
+    value = raw.strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    raise ValidationException(
+        "Refusing to start: SENTICA_SAFETY_MODEL_CHECK is not a boolean"
+    )
 
 
 def _conclusion_text_query(workspace_name: str) -> Any:
@@ -171,6 +183,11 @@ async def model_check_bans(text: str, *, workspace_name: str | None) -> bool:
     )
     if context:
         prompt = prompt + "\n" + "\n".join(context)
+    from src.dependencies import open_db_sessions
+
+    if open_db_sessions() > 0:
+        logger.warning("Safety model check refused while a database session is open")
+        return True
     try:
         response = await honcho_llm_call(
             model_config=settings.SUMMARY.MODEL_CONFIG,

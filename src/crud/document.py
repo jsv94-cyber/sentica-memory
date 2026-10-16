@@ -596,11 +596,7 @@ async def _stamp_message_provenance(
         updates: dict[str, Any] = {}
         if public_ids:
             updates["message_public_ids"] = public_ids
-        if (
-            ids
-            and len(trusts) == len(ids)
-            and all(trust == "external" for trust in trusts)
-        ):
+        if any(trust == "external" for trust in trusts):
             updates["source_trust"] = "external"
         if updates:
             stamped.append(
@@ -611,6 +607,51 @@ async def _stamp_message_provenance(
         else:
             stamped.append(doc)
     return stamped
+
+
+async def _inherit_document_taint(
+    db: AsyncSession,
+    documents: list[schemas.DocumentCreate],
+    workspace_name: str,
+) -> list[schemas.DocumentCreate]:
+    """A derived conclusion is external when any premise is external."""
+    parent_ids = [
+        source_id for document in documents for source_id in (document.source_ids or [])
+    ]
+    if not parent_ids:
+        return documents
+    rows = (
+        await db.execute(
+            select(models.Document.id, models.Document.internal_metadata).where(
+                models.Document.workspace_name == workspace_name,
+                models.Document.id.in_(sorted(set(parent_ids))),
+            )
+        )
+    ).all()
+    tainted: set[str] = set()
+    for row in rows:
+        raw_meta: Any = row.internal_metadata
+        meta = cast(dict[str, Any], raw_meta) if isinstance(raw_meta, dict) else {}
+        if meta.get("source_trust") == "external":
+            tainted.add(str(row.id))
+    if not tainted:
+        return documents
+    inherited: list[schemas.DocumentCreate] = []
+    for document in documents:
+        sources = document.source_ids or []
+        if any(source_id in tainted for source_id in sources):
+            inherited.append(
+                document.model_copy(
+                    update={
+                        "metadata": document.metadata.model_copy(
+                            update={"source_trust": "external"}
+                        )
+                    }
+                )
+            )
+        else:
+            inherited.append(document)
+    return inherited
 
 
 async def create_documents(
@@ -720,6 +761,7 @@ async def create_documents(
     # Provenance reads messages after any external vector call, so that call
     # is not held open on this session.
     documents = await _stamp_message_provenance(db, documents)
+    documents = await _inherit_document_taint(db, documents, workspace_name)
 
     # exact-content dedup (independent of `deduplicate`): pre-fetch
     # existing live documents whose normalized content matches anything in this
@@ -1871,6 +1913,7 @@ def get_child_observations(
     linked = (
         select(literal(1))
         .where(
+            models.DocumentSource.workspace_name == workspace_name,
             models.DocumentSource.derived_id == models.Document.id,
             models.DocumentSource.source_id == parent_id,
         )

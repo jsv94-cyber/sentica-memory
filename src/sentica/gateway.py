@@ -199,7 +199,7 @@ async def _reserve(tenant: str, purpose: str) -> None:
         return
     client = _async_client()
     if client is None:
-        raise ValidationException(
+        raise GatewayUnavailable(
             "Refusing to call: a gateway budget is set and Redis is not configured"
         )
     try:
@@ -208,7 +208,7 @@ async def _reserve(tenant: str, purpose: str) -> None:
         except GatewayBudgetExceeded:
             raise
         except Exception as exc:
-            raise ValidationException(
+            raise GatewayUnavailable(
                 "Refusing to call: the gateway budget store is unavailable"
             ) from exc
     finally:
@@ -226,7 +226,7 @@ async def _charge(tenant: str, purpose: str, tokens: int) -> None:
     client = _async_client()
     if client is None:
         if total_limit is not None or purpose_limit is not None:
-            raise ValidationException(
+            raise GatewayUnavailable(
                 "Refusing to call: a gateway budget is set and Redis is not configured"
             )
         return
@@ -238,7 +238,7 @@ async def _charge(tenant: str, purpose: str, tokens: int) -> None:
             await client.expire(_purpose_key(tenant, purpose), _BUDGET_TTL_SECONDS)
         except Exception as exc:
             if total_limit is not None or purpose_limit is not None:
-                raise ValidationException(
+                raise GatewayUnavailable(
                     "Refusing to call: the gateway budget store is unavailable"
                 ) from exc
             logger.warning("gateway budget store did not record tokens")
@@ -297,28 +297,66 @@ def _purpose(telemetry: LLMTelemetryContext | None) -> str:
     raise ValidationException("Refusing to call: the gateway purpose is missing")
 
 
-def _timeout_seconds(purpose: str) -> float:
-    specific = "SENTICA_GATEWAY_" + purpose.upper() + "_TIMEOUT_SECONDS"
-    raw = os.environ.get(specific, "").strip()
-    if not raw:
-        raw = os.environ.get("SENTICA_GATEWAY_TIMEOUT_SECONDS", "").strip() or "10"
+_PURPOSE_TIMEOUTS = {
+    "deriver": 120.0,
+    "dream": 180.0,
+    "dialectic": 60.0,
+    "summary": 60.0,
+    "embed": 30.0,
+}
+_UNAVAILABLE_STATUS = {401, 403, 404, 408, 429}
+
+
+def _positive_number(raw: str, message: str) -> float:
     try:
         value = float(raw)
     except ValueError as exc:
-        raise ValidationException(
-            "Refusing to call: gateway timeout is not a number"
-        ) from exc
+        raise ValidationException(message) from exc
     if value <= 0:
-        raise ValidationException("Refusing to call: gateway timeout must be positive")
+        raise ValidationException(message)
     return value
 
 
+def _timeout_seconds(purpose: str) -> float:
+    specific = "SENTICA_GATEWAY_" + purpose.upper() + "_TIMEOUT_SECONDS"
+    raw = os.environ.get(specific)
+    if raw is not None and raw.strip():
+        return _positive_number(
+            raw.strip(), "Refusing to call: gateway timeout is not a number"
+        )
+    fallback = os.environ.get("SENTICA_GATEWAY_TIMEOUT_SECONDS")
+    if fallback is not None and fallback.strip():
+        return _positive_number(
+            fallback.strip(), "Refusing to call: gateway timeout is not a number"
+        )
+    return _PURPOSE_TIMEOUTS.get(purpose, 60.0)
+
+
 def _attempts() -> int:
-    return max(1, int(os.environ.get("SENTICA_GATEWAY_RETRY_ATTEMPTS", "3")))
+    raw = os.environ.get("SENTICA_GATEWAY_RETRY_ATTEMPTS")
+    if raw is None or raw.strip() == "":
+        return 3
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValidationException(
+            "Refusing to call: SENTICA_GATEWAY_RETRY_ATTEMPTS is not an integer"
+        ) from exc
+    if value < 1:
+        raise ValidationException(
+            "Refusing to call: SENTICA_GATEWAY_RETRY_ATTEMPTS must be positive"
+        )
+    return value
 
 
 def _wait() -> float:
-    return float(os.environ.get("SENTICA_GATEWAY_RETRY_WAIT_SECONDS", "0.05"))
+    raw = os.environ.get("SENTICA_GATEWAY_RETRY_WAIT_SECONDS")
+    if raw is None or raw.strip() == "":
+        return 0.05
+    return _positive_number(
+        raw.strip(),
+        "Refusing to call: SENTICA_GATEWAY_RETRY_WAIT_SECONDS is not a number",
+    )
 
 
 def _headers(
@@ -492,15 +530,21 @@ async def _post(
     model: str,
     max_tokens: int,
     has_tools: bool,
+    round_index: int = 1,
 ) -> tuple[dict[str, Any], int]:
     attempts = _attempts()
     wait = _wait()
     last = GatewayUnavailable("model gateway unavailable")
+    stem = headers["X-Sentica-Request-Id"]
     for attempt in range(1, attempts + 1):
+        stamped = dict(headers)
+        stamped["X-Sentica-Request-Id"] = (
+            stem + ":r" + str(round_index) + ":a" + str(attempt)
+        )
         started = time.perf_counter()
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
-                response = await client.post(url, json=body, headers=headers)
+                response = await client.post(url, json=body, headers=stamped)
         except httpx.HTTPError as exc:
             logger.warning(
                 "Gateway transport failure on attempt %s for %s",
@@ -525,7 +569,9 @@ async def _post(
                 duration_ms=(time.perf_counter() - started) * 1000,
             )
         else:
-            if response.status_code < 500 and response.status_code != 429:
+            status = response.status_code
+            unavailable = status in _UNAVAILABLE_STATUS or status >= 500
+            if not unavailable:
                 try:
                     response.raise_for_status()
                     payload = _mapping(cast(object, response.json()))
@@ -589,14 +635,16 @@ def _tool_calls(message: dict[str, Any]) -> list[dict[str, Any]]:
     for item in cast(list[object], calls_value):
         call = _mapping(item)
         if call is None:
-            continue
+            raise ValidationException("Refusing to call: a tool call was malformed")
         function = _mapping(call.get("function"))
         if function is None:
-            continue
+            raise ValidationException("Refusing to call: a tool call was malformed")
         name = function.get("name")
-        if not isinstance(name, str):
-            continue
+        if not isinstance(name, str) or not name:
+            raise ValidationException("Refusing to call: a tool call was malformed")
         arguments = function.get("arguments", "{}")
+        if arguments == "":
+            arguments = "{}"
         try:
             loaded: object = (
                 json.loads(arguments) if isinstance(arguments, str) else arguments
@@ -681,6 +729,14 @@ def _interpret(
     return parsed
 
 
+async def _charge_paid(tenant: str, purpose: str, tokens: int) -> None:
+    """Record a completed call. A store failure does not discard the completion."""
+    try:
+        await _charge(tenant, purpose, tokens)
+    except GatewayUnavailable:
+        logger.warning("gateway charge failed after a paid call")
+
+
 async def _chat(
     *,
     purpose: str,
@@ -693,6 +749,7 @@ async def _chat(
     json_mode: bool,
     telemetry: LLMTelemetryContext | None,
     mark_stream: bool,
+    round_index: int = 1,
 ) -> tuple[
     dict[str, Any],
     str,
@@ -733,6 +790,7 @@ async def _chat(
         model=model,
         max_tokens=max_tokens,
         has_tools=bool(tools),
+        round_index=round_index,
     )
     _choice_row, message, finish = _choice(payload)
     del _choice_row
@@ -743,7 +801,7 @@ async def _chat(
         if present
         else max(prompt_tokens + completion_tokens, 1)
     )
-    await _charge(tenant, purpose, billed)
+    await _charge_paid(tenant, purpose, billed)
     calls = _tool_calls(message)
     duration_ms = (time.perf_counter() - started) * 1000
     return (
@@ -820,6 +878,7 @@ async def complete_llm(
     messages: list[dict[str, Any]] | None,
     telemetry: LLMTelemetryContext | None,
     json_mode: bool = False,
+    max_input_tokens: int | None = None,
 ) -> HonchoLLMCallResponse[Any] | StreamingResponseWithMetadata:
     """Send one function's chat call to its configured gateway model."""
     purpose = _purpose(telemetry)
@@ -827,6 +886,15 @@ async def complete_llm(
     history: list[dict[str, Any]] = (
         list(messages) if messages else [{"role": "user", "content": prompt}]
     )
+
+    def _fit(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if max_input_tokens is None:
+            return rows
+        from src.llm.conversation import truncate_messages_to_fit
+
+        return truncate_messages_to_fit(rows, max_input_tokens)
+
+    history = _fit(history)
     tool_calls_made: list[dict[str, Any]] = []
     total_input = 0
     tool_output = 0
@@ -840,6 +908,7 @@ async def complete_llm(
     async def _once(
         active_tools: list[dict[str, Any]] | None,
         active_choice: str | dict[str, Any] | None,
+        round_index: int,
     ) -> tuple[
         dict[str, Any], str, list[dict[str, Any]], str, int, int, str, int, float
     ]:
@@ -854,6 +923,7 @@ async def complete_llm(
             json_mode=json_mode,
             telemetry=telemetry,
             mark_stream=stream,
+            round_index=round_index,
         )
 
     def _note(
@@ -905,7 +975,7 @@ async def complete_llm(
                 model,
                 _attempt,
                 duration_ms,
-            ) = await _once(active_tools, active_choice)
+            ) = await _once(active_tools, active_choice, iterations or 1)
             total_input += prompt_tokens
             final_output = completion_tokens
         while True:
@@ -945,7 +1015,7 @@ async def complete_llm(
                     model,
                     _attempt,
                     duration_ms,
-                ) = await _once(active_tools, active_choice)
+                ) = await _once(active_tools, active_choice, iterations or 1)
                 total_input += prompt_tokens
                 final_output = completion_tokens
                 continue
@@ -969,6 +1039,7 @@ async def complete_llm(
     calls: list[dict[str, Any]] = []
     for index in range(limit):
         iterations = index + 1
+        history = _fit(history)
         (
             message,
             finish,
@@ -979,7 +1050,7 @@ async def complete_llm(
             model,
             attempt,
             duration_ms,
-        ) = await _once(tools, tool_choice)
+        ) = await _once(tools, tool_choice, iterations)
         total_input += prompt_tokens
         if not calls or tool_executor is None:
             hit_limit = False
@@ -1059,9 +1130,14 @@ async def embed_texts(
     await _reserve(tenant, purpose)
     base, model = _route(purpose)
     messages = [{"role": "user", "content": "\n".join(texts)}]
+    from src.config import settings
+
+    embed_body: dict[str, Any] = {"model": model, "input": texts}
+    if settings.EMBEDDING.resolve_send_dimensions():
+        embed_body["dimensions"] = settings.EMBEDDING.VECTOR_DIMENSIONS
     payload, _attempt = await _post(
         base + "/embeddings",
-        {"model": model, "input": texts},
+        embed_body,
         _headers(
             tenant=tenant,
             workspace=workspace,
@@ -1081,7 +1157,7 @@ async def embed_texts(
         if present
         else max(prompt_tokens + completion_tokens, 1)
     )
-    await _charge(tenant, purpose, billed)
+    await _charge_paid(tenant, purpose, billed)
     rows = payload.get("data")
     if not isinstance(rows, list):
         raise ValidationException("Refusing to call: the gateway returned no vectors")

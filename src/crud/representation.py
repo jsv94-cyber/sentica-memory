@@ -257,7 +257,16 @@ class RepresentationManager:
             deduplicate=settings.DERIVER.DEDUPLICATE,
         )
 
-        if message_level_configuration.dream.enabled:
+        from src.sentica.dreams import inference_enabled
+
+        workspace = await db.scalar(
+            select(models.Workspace).where(models.Workspace.name == self.workspace_name)
+        )
+        if (
+            message_level_configuration.dream.enabled
+            and workspace is not None
+            and inference_enabled(workspace.configuration)
+        ):
             try:
                 await check_and_schedule_dream(db, collection)
             except Exception as e:

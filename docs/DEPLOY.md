@@ -59,6 +59,19 @@ That override requires the `runsc` runtime on the Docker daemon. The proof
 job in CI uses the default runtime because the hosted runner does not ship
 `runsc`.
 
+## Gateway timeouts
+
+When the timeout environment variables are unset, the defaults are
+deriver 120 seconds, dream 180 seconds, dialectic 60 seconds, summary
+60 seconds, and embed 30 seconds. Set `SENTICA_GATEWAY_TIMEOUT_SECONDS`
+to override every purpose, or set one of
+`SENTICA_GATEWAY_DERIVER_TIMEOUT_SECONDS`,
+`SENTICA_GATEWAY_DREAM_TIMEOUT_SECONDS`,
+`SENTICA_GATEWAY_DIALECTIC_TIMEOUT_SECONDS`,
+`SENTICA_GATEWAY_SUMMARY_TIMEOUT_SECONDS`, and
+`SENTICA_GATEWAY_EMBED_TIMEOUT_SECONDS` for a single purpose. A value
+that is not a positive number refuses the call.
+
 ## Network
 
 Sentica applies these rules. The compose file makes the first three

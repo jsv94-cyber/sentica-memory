@@ -236,8 +236,10 @@ async def test_decay_and_purge_follow_the_schedule(
         )
     ).one()
     await note_used(db_session, [used.id], workspace_name=workspace.name)
+    await db_session.refresh(used)
     now = datetime.now(UTC) + timedelta(days=30)
     used.last_used_at = now
+    used.decayed_at = now
     await db_session.commit()
     changed = await apply_decay(db_session, workspace_name=workspace.name, now=now)
     assert changed == 1
@@ -327,16 +329,25 @@ async def test_deletion_leaves_nothing_searchable(
     assert record.document_count == 1
     assert record.embedding_count == 1
     assert record.summary_count == 1
+    from src.sentica.freshness import identifier_hash
+
     saved = (
         await db_session.scalars(
             select(models.Workspace).where(models.Workspace.name == workspace.name)
         )
     ).one()
-    stored_records: Any = saved.internal_metadata.get("deletion_records")
-    assert isinstance(stored_records, list)
-    stored_last = cast(dict[str, Any], stored_records[-1])
-    assert stored_last["id"] == record.id
-    assert "content" not in stored_last
+    assert "deletion_records" not in (saved.internal_metadata or {})
+    stored = (
+        await db_session.scalars(
+            select(models.DeletionRecord).where(
+                models.DeletionRecord.workspace_name == workspace.name
+            )
+        )
+    ).one()
+    assert stored.id == record.id
+    assert stored.subject_hash == identifier_hash("customer:123")
+    assert stored.peer_hash is None
+    assert "customer:123" not in (stored.subject_hash or "")
     documents = (
         await db_session.scalars(
             select(models.Document).where(

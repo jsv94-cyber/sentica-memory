@@ -55,21 +55,28 @@ def synthesis_enabled(configuration: dict[str, Any] | None) -> bool:
     return configuration.get("sentica_synthesis") is not False
 
 
-def _records(metadata: dict[str, Any]) -> list[dict[str, Any]]:
-    raw = metadata.get("dreams")
-    if not isinstance(raw, list):
-        return []
-    records: list[dict[str, Any]] = []
-    for item in cast("list[object]", raw):
-        if isinstance(item, dict):
-            records.append(cast("dict[str, Any]", item))
-    return records
+_WEEKLY_WINDOW = 7
+_DAILY_HISTORY = 28
+_WEEKLY_HISTORY = 12
+
+
+def inference_enabled(configuration: dict[str, Any] | None) -> bool:
+    """Synthesis off stops dreams, including the upstream dreamer."""
+    if not synthesis_enabled(configuration):
+        return False
+    if not configuration:
+        return True
+    dream: Any = configuration.get("dream")
+    if not isinstance(dream, dict):
+        return True
+    enabled: Any = cast(dict[str, Any], dream).get("enabled")
+    return enabled is not False
 
 
 async def set_synthesis_enabled(
     db: AsyncSession, workspace_name: str, enabled: bool
 ) -> None:
-    """Turn synthesis on or off. Earlier dreams stay."""
+    """Turn synthesis on or off, including the upstream dreamer."""
     workspace = await db.scalar(
         select(models.Workspace).where(models.Workspace.name == workspace_name)
     )
@@ -77,11 +84,24 @@ async def set_synthesis_enabled(
         from src.exceptions import ResourceNotFoundException
 
         raise ResourceNotFoundException("Workspace not found")
-    configuration = dict(workspace.configuration or {})
+    stored: Any = workspace.configuration or {}
+    configuration: dict[str, Any] = (
+        dict(cast(dict[str, Any], stored)) if isinstance(stored, dict) else {}
+    )
     configuration["sentica_synthesis"] = enabled
+    dream_raw: Any = configuration.get("dream")
+    dream: dict[str, Any] = (
+        dict(cast(dict[str, Any], dream_raw)) if isinstance(dream_raw, dict) else {}
+    )
+    dream["enabled"] = enabled
+    configuration["dream"] = dream
     workspace.configuration = configuration
     flag_modified(workspace, "configuration")
     await db.commit()
+    from src.cache.client import safe_cache_delete
+    from src.crud.workspace import workspace_cache_key
+
+    await safe_cache_delete(workspace_cache_key(workspace_name))
 
 
 async def _complete(workspace_name: str, purpose: str, prompt: str) -> tuple[str, int]:
@@ -101,6 +121,54 @@ async def _complete(workspace_name: str, purpose: str, prompt: str) -> tuple[str
     return str(response.content), response.input_tokens + response.output_tokens
 
 
+def _as_record(row: models.DreamDigest) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "kind": row.kind,
+        "period": row.period,
+        "content": row.content,
+        "source_ids": list(row.source_ids or []),
+        "workspace_name": row.workspace_name,
+        "tokens": row.tokens,
+        "external": bool(row.external),
+        "skipped": bool(row.skipped),
+        "created_at": row.created_at.isoformat(),
+    }
+
+
+async def _load(db: AsyncSession, workspace_name: str) -> list[dict[str, Any]]:
+    rows = (
+        await db.scalars(
+            select(models.DreamDigest)
+            .where(models.DreamDigest.workspace_name == workspace_name)
+            .order_by(models.DreamDigest.period.asc(), models.DreamDigest.id.asc())
+        )
+    ).all()
+    return [_as_record(row) for row in rows]
+
+
+async def _trim(db: AsyncSession, workspace_name: str, kind: str, keep: int) -> None:
+    ids = list(
+        await db.scalars(
+            select(models.DreamDigest.id)
+            .where(models.DreamDigest.workspace_name == workspace_name)
+            .where(models.DreamDigest.kind == kind)
+            .order_by(models.DreamDigest.period.desc(), models.DreamDigest.id.desc())
+        )
+    )
+    extra = ids[keep:]
+    if not extra:
+        return
+    from sqlalchemy import delete
+
+    await db.execute(
+        delete(models.DreamDigest).where(
+            models.DreamDigest.workspace_name == workspace_name,
+            models.DreamDigest.id.in_(extra),
+        )
+    )
+
+
 async def _save(
     workspace_name: str,
     *,
@@ -110,31 +178,45 @@ async def _save(
     source_ids: list[str],
     tokens: int,
     now: datetime,
+    external: bool,
+    skipped: bool,
 ) -> dict[str, Any]:
-    record: dict[str, Any] = {
-        "id": generate_nanoid(),
-        "kind": kind,
-        "period": period,
-        "content": content,
-        "source_ids": source_ids,
-        "workspace_name": workspace_name,
-        "tokens": tokens,
-        "created_at": now.isoformat(),
-    }
+    record_id = generate_nanoid()
     async with tracked_db("dreams.save") as db:
-        workspace = await db.scalar(
-            select(models.Workspace).where(models.Workspace.name == workspace_name)
+        existing = await db.scalar(
+            select(models.DreamDigest).where(
+                models.DreamDigest.workspace_name == workspace_name,
+                models.DreamDigest.kind == kind,
+                models.DreamDigest.period == period,
+            )
         )
-        if workspace is None:
-            return record
-        metadata = dict(workspace.internal_metadata or {})
-        dreams = _records(metadata)
-        dreams.append(record)
-        metadata["dreams"] = dreams
-        workspace.internal_metadata = metadata
-        flag_modified(workspace, "internal_metadata")
+        if existing is None:
+            row = models.DreamDigest(
+                id=record_id,
+                workspace_name=workspace_name,
+                kind=kind,
+                period=period,
+                content=content,
+                source_ids=source_ids,
+                tokens=tokens,
+                external=external,
+                skipped=skipped,
+                created_at=now,
+            )
+            db.add(row)
+        else:
+            existing.content = content
+            existing.source_ids = source_ids
+            existing.tokens = tokens
+            existing.external = external
+            existing.skipped = skipped
+            row = existing
+        keep = _DAILY_HISTORY if kind == "daily" else _WEEKLY_HISTORY
+        await db.flush()
+        await _trim(db, workspace_name, kind, keep)
         await db.commit()
-    return record
+        await db.refresh(row)
+        return _as_record(row)
 
 
 async def run_dreams(
@@ -154,12 +236,16 @@ async def run_dreams(
         workspace = await db.scalar(
             select(models.Workspace).where(models.Workspace.name == workspace_name)
         )
-        if workspace is None or not synthesis_enabled(workspace.configuration):
+        if workspace is None or not inference_enabled(workspace.configuration):
             return []
-        existing = _records(dict(workspace.internal_metadata or {}))
+        existing = await _load(db, workspace_name)
         rows = (
             await db.execute(
-                select(models.Document.id, models.Document.content)
+                select(
+                    models.Document.id,
+                    models.Document.content,
+                    models.Document.internal_metadata,
+                )
                 .where(models.Document.workspace_name == workspace_name)
                 .where(models.Document.deleted_at.is_(None))
                 .where(models.Document.superseded_by.is_(None))
@@ -167,12 +253,20 @@ async def run_dreams(
                 .limit(40)
             )
         ).all()
-    conclusions = [(str(row.id), str(row.content)) for row in rows]
+    conclusions: list[tuple[str, str, bool]] = []
+    for row in rows:
+        raw_meta: Any = row.internal_metadata
+        meta = cast(dict[str, Any], raw_meta) if isinstance(raw_meta, dict) else {}
+        tainted = meta.get("source_trust") == "external"
+        conclusions.append((str(row.id), str(row.content), tainted is True))
     created: list[dict[str, Any]] = []
-    digests = [item for item in existing if item.get("kind") == "daily"]
+    digests = [row for row in existing if row["kind"] == "daily"]
+    inputs_external = any(tainted for _doc_id, _text, tainted in conclusions)
 
-    if conclusions and not any(item.get("period") == daily_period for item in digests):
-        lines = "\n".join(f"- {doc_id}: {text}" for doc_id, text in conclusions)
+    if conclusions and not any(row["period"] == daily_period for row in digests):
+        lines = "\n".join(
+            f"- {doc_id}: {text}" for doc_id, text, _tainted in conclusions
+        )
         prompt = (
             "Write a daily digest for this workspace only.\n"
             + "Do not infer health, religion, politics, sex, immigration, "
@@ -180,53 +274,83 @@ async def run_dreams(
             + lines
         )
         text, spent = await _complete(workspace_name, "dream.daily", prompt)
-        category = banned_category(text)
-        if category is not None:
-            logger.info("Dropped a conclusion category=%s", category)
-            note_drop(category)
-        elif text:
-            record = await _save(
-                workspace_name,
-                kind="daily",
-                period=daily_period,
-                content=text,
-                source_ids=[doc_id for doc_id, _text in conclusions],
-                tokens=spent,
-                now=clock,
-            )
-            digests.append(record)
-            created.append(record)
-
-    if digests and not any(
-        item.get("kind") == "weekly" and item.get("period") == weekly_period
-        for item in existing
-    ):
-        lines = "\n".join(
-            "- " + str(item.get("id")) + ": " + str(item.get("content"))
-            for item in digests
+        record = await _accept(
+            workspace_name,
+            kind="daily",
+            period=daily_period,
+            text=text,
+            spent=spent,
+            source_ids=[doc_id for doc_id, _text, _tainted in conclusions],
+            external=inputs_external,
+            now=clock,
         )
+        created.append(record)
+
+    async with tracked_db("dreams.read.weekly", read_only=True) as db:
+        stored = await _load(db, workspace_name)
+    daily_ready = [
+        row
+        for row in stored
+        if row["kind"] == "daily" and row["content"] and not row["skipped"]
+    ]
+    window = daily_ready[-_WEEKLY_WINDOW:]
+    weekly_done = any(
+        row["kind"] == "weekly" and row["period"] == weekly_period for row in stored
+    )
+    if window and not weekly_done:
+        lines = "\n".join("- " + row["id"] + ": " + row["content"] for row in window)
         prompt = (
             "Write a weekly insight from these daily digests only.\n"
             + "Do not use raw messages.\n"
             + lines
         )
         text, spent = await _complete(workspace_name, "dream.weekly", prompt)
-        category = banned_category(text)
-        if category is not None:
-            logger.info("Dropped a conclusion category=%s", category)
-            note_drop(category)
-        elif text:
-            record = await _save(
-                workspace_name,
-                kind="weekly",
-                period=weekly_period,
-                content=text,
-                source_ids=[str(item.get("id")) for item in digests],
-                tokens=spent,
-                now=clock,
-            )
-            created.append(record)
+        record = await _accept(
+            workspace_name,
+            kind="weekly",
+            period=weekly_period,
+            text=text,
+            spent=spent,
+            source_ids=[row["id"] for row in window],
+            external=any(bool(row["external"]) for row in window),
+            now=clock,
+        )
+        created.append(record)
     return created
+
+
+async def _accept(
+    workspace_name: str,
+    *,
+    kind: str,
+    period: str,
+    text: str,
+    spent: int,
+    source_ids: list[str],
+    external: bool,
+    now: datetime,
+) -> dict[str, Any]:
+    """Store the digest, or an empty attempt when the output cannot be kept."""
+    from src.sentica.safety import keep_conclusion
+
+    category = banned_category(text)
+    if category is not None:
+        logger.info("Dropped a conclusion category=%s", category)
+        note_drop(category)
+    kept = bool(text.strip()) and category is None
+    if kept and not await keep_conclusion(text, workspace_name=workspace_name):
+        kept = False
+    return await _save(
+        workspace_name,
+        kind=kind,
+        period=period,
+        content=text if kept else "",
+        source_ids=source_ids,
+        tokens=spent,
+        now=now,
+        external=external,
+        skipped=not kept,
+    )
 
 
 async def dreams_due() -> None:

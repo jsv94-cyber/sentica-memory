@@ -15,7 +15,7 @@ REQUIRED_CITATIONS: tuple[tuple[str, int, str], ...] = (
     ("src/db.py", 75, "create_async_engine"),
     ("src/db.py", 347, "SessionLocal"),
     ("src/db.py", 369, "ReadSessionLocal"),
-    ("src/dependencies.py", 55, "tracked_db"),
+    ("src/dependencies.py", 63, "tracked_db"),
     ("src/security.py", 31, "class JWTParams"),
     ("src/security.py", 106, "def verify_jwt"),
     ("src/security.py", 216, "USE_AUTH"),

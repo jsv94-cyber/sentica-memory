@@ -4523,6 +4523,58 @@
         }
       }
     },
+    "/v3/workspaces/{workspace_id}/digests": {
+      "get": {
+        "tags": [
+          "subjects"
+        ],
+        "summary": "List Digests",
+        "description": "Read this workspace's digests. Another workspace's rows are not visible.",
+        "operationId": "list_digests_v3_workspaces__workspace_id__digests_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Workspace Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DigestRead"
+                  },
+                  "title": "Response List Digests V3 Workspaces  Workspace Id  Digests Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v3/keys": {
       "post": {
         "tags": [
@@ -6103,6 +6155,45 @@
           "query"
         ],
         "title": "DialecticOptions"
+      },
+      "DigestRead": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "kind": {
+            "type": "string",
+            "title": "Kind"
+          },
+          "period": {
+            "type": "string",
+            "title": "Period"
+          },
+          "content": {
+            "type": "string",
+            "title": "Content"
+          },
+          "external": {
+            "type": "boolean",
+            "title": "External"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "period",
+          "content",
+          "external",
+          "created_at"
+        ],
+        "title": "DigestRead"
       },
       "DreamConfiguration": {
         "properties": {

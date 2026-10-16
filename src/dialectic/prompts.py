@@ -344,7 +344,7 @@ If after thorough searching you find NOTHING relevant:
 After gathering context, reason through the information you found *before* stating your final answer. For comparison questions, explicitly compare the values. Only after you've verified your reasoning should you state your conclusion. Do NOT be pedantic, rather, be helpful and try to give the answer that the asker would expect -- they're the one who knows the most about themselves. Try to 'read their mind' -- understand the information they're really after and share it with them! Be **as specific as possible** given the information you have.
 
 Do not explain your tool usage - just provide the synthesized answer.
-{_custom_instructions_suffix(custom_instructions)}"""
+{_custom_instructions_suffix(custom_instructions)}{_safety_rules()}"""
 
 
 def workspace_agent_system_prompt(
@@ -410,4 +410,11 @@ State only what you found. If you have related context but not the asked-for det
 ## CONCLUSION LEVELS
 
 `explicit` conclusions are derived from a single session. Deductive and inductive conclusions consolidate across sessions. Prefer those for cross-session or cross-peer answers, and use `get_reasoning_chain` to check their premises.
-{_custom_instructions_suffix(custom_instructions)}"""
+{_custom_instructions_suffix(custom_instructions)}{_safety_rules()}"""
+
+
+def _safety_rules() -> str:
+    """Banned-category rules shared with the deriver and the dreamer."""
+    from src.sentica.safety import PROMPT_RULES
+
+    return "\n" + PROMPT_RULES

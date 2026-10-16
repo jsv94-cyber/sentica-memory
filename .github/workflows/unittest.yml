@@ -236,7 +236,7 @@ jobs:
           SENTICA_GATEWAY_DREAM_MODEL: sentica-dream
           SENTICA_GATEWAY_EMBED_MODEL: sentica-embed
           SENTICA_GATEWAY_RETRY_ATTEMPTS: "2"
-          SENTICA_GATEWAY_RETRY_WAIT_SECONDS: "0"
+          SENTICA_GATEWAY_RETRY_WAIT_SECONDS: "0.001"
           SENTICA_MOCK_EMBED_DIMENSIONS: "1536"
         run: |
           set -eu
