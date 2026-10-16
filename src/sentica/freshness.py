@@ -341,6 +341,7 @@ async def forget(
     documents = await _with_descendants(db, workspace_name, documents)
     texts = [document.content for document in documents if document.content]
     message_ids, public_ids = _message_keys(documents)
+    known_earliest = _earliest_deleted_messages(documents)
     session_names = {
         document.session_name
         for document in documents
@@ -360,6 +361,7 @@ async def forget(
         message_ids,
         texts=texts,
         session_names=session_names,
+        known_earliest=known_earliest,
     )
     forgotten_ids = {document.id for document in documents}
     await _scrub_digests(db, workspace_name, texts, forgotten_ids)
@@ -539,6 +541,40 @@ async def _scrub_digests(
             await db.flush()
 
 
+def _message_number(item: object) -> int | None:
+    if isinstance(item, bool):
+        return None
+    if isinstance(item, int):
+        return item
+    if isinstance(item, str) and item.isdigit():
+        return int(item)
+    return None
+
+
+def _earliest_deleted_messages(documents: list[models.Document]) -> dict[str, int]:
+    """Earliest cited message id in each session, from the forgotten rows."""
+    earliest: dict[str, int] = {}
+    for document in documents:
+        session_name = document.session_name
+        if not isinstance(session_name, str) or not session_name:
+            continue
+        raw_meta: Any = document.internal_metadata or {}
+        if not isinstance(raw_meta, dict):
+            continue
+        metadata = cast(dict[str, Any], raw_meta)
+        raw_ids = metadata.get("message_ids")
+        if not isinstance(raw_ids, list):
+            continue
+        for item in cast(list[object], raw_ids):
+            number = _message_number(item)
+            if number is None:
+                continue
+            current = earliest.get(session_name)
+            if current is None or number < current:
+                earliest[session_name] = number
+    return earliest
+
+
 def _message_keys(
     documents: list[models.Document],
 ) -> tuple[set[int], set[str]]:
@@ -552,8 +588,9 @@ def _message_keys(
         raw_ids = metadata.get("message_ids")
         if isinstance(raw_ids, list):
             for item in cast(list[object], raw_ids):
-                if isinstance(item, int):
-                    message_ids.add(item)
+                number = _message_number(item)
+                if number is not None:
+                    message_ids.add(number)
         raw_public = metadata.get("message_public_ids")
         if isinstance(raw_public, list):
             for item in cast(list[object], raw_public):
@@ -583,6 +620,7 @@ async def _scrub_summaries(
     *,
     texts: list[str] | None = None,
     session_names: set[str] | None = None,
+    known_earliest: dict[str, int] | None = None,
 ) -> int:
     if not message_ids and not texts:
         return 0
@@ -599,6 +637,10 @@ async def _scrub_summaries(
             numbered = int(message_id)
             if current is None or numbered < current:
                 earliest_by_session[str(session_name)] = numbered
+    for session_name, message_id in (known_earliest or {}).items():
+        current = earliest_by_session.get(session_name)
+        if current is None or message_id < current:
+            earliest_by_session[session_name] = message_id
     removed = 0
     sessions = list(
         await db.scalars(

@@ -26,6 +26,32 @@ def _run(conn: Any, statement: str, params: tuple[object, ...] = ()) -> Any:
     return conn.execute(statement, params)
 
 
+def _store_own_card(client: Any, workspace: str, peer: str, lines: list[str]) -> None:
+    """Seed the observer's own card. Production refuses the HTTP write."""
+    from src.sentica.runtime import production_enabled
+
+    if not production_enabled():
+        stored = client.put(
+            f"/v3/workspaces/{workspace}/peers/{peer}/card",
+            json={"peer_card": lines},
+        )
+        assert stored.status_code == 200, stored.text
+        return
+    from tests.sentica.rls_job import runtime_dsn
+
+    payload = json.dumps({"peer_card": lines})
+    with psycopg.connect(runtime_dsn()) as conn:
+        conn.execute("SELECT set_config('sentica.workspace', %s, true)", (workspace,))
+        statement = (
+            "UPDATE peers SET internal_metadata = "
+            + "COALESCE(internal_metadata, '{}'::jsonb) || %s::jsonb "
+            + "WHERE workspace_name = %s AND name = %s"
+        )
+        updated = conn.execute(statement, (payload, workspace, peer))
+        assert updated.rowcount == 1
+        conn.commit()
+
+
 def test_runtime_role_cannot_cross_workspaces(
     db_session: object, worker_id: str
 ) -> None:
@@ -575,11 +601,7 @@ def test_cached_card_for_r_is_not_served_without_r(
         assert client.post(
             f"/v3/workspaces/{name}/peers", json={"name": "ada"}
         ).status_code in (200, 201)
-    stored = client.put(
-        f"/v3/workspaces/{right}/peers/ada/card",
-        json={"peer_card": [canary]},
-    )
-    assert stored.status_code == 200, stored.text
+    _store_own_card(client, right, "ada", [canary])
     warmed = client.get(f"/v3/workspaces/{right}/peers/ada/card")
     assert warmed.status_code == 200, warmed.text
     assert canary in warmed.text
@@ -844,13 +866,7 @@ async def test_canary_written_only_to_r_stays_out_of_other_workspaces(
             "messages": [{"content": canary, "peer_id": "p1", "source_trust": "owner"}]
         },
     ).status_code in (200, 201)
-    assert (
-        client.put(
-            f"/v3/workspaces/{right}/peers/p1/card",
-            json={"peer_card": [canary]},
-        ).status_code
-        == 200
-    )
+    _store_own_card(client, right, "p1", [canary])
     bound = set_workspace(right)
     try:
         db_session.add(
@@ -1432,11 +1448,8 @@ async def test_cold_cache_returns_each_peer_card(
         assert client.post(
             f"/v3/workspaces/{name}/peers", json={"name": "p1"}
         ).status_code in (200, 201)
-        stored = client.put(
-            f"/v3/workspaces/{name}/peers/p1/card",
-            json={"peer_card": [left_fact if name == left else right_fact]},
-        )
-        assert stored.status_code == 200, stored.text
+        fact = left_fact if name == left else right_fact
+        _store_own_card(client, name, "p1", [fact])
     await safe_cache_delete(peer_cache_key(left, "p1"))
     await safe_cache_delete(peer_cache_key(right, "p1"))
     opened: list[str] = []
