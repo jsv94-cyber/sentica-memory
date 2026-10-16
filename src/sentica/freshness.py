@@ -546,6 +546,8 @@ def _message_number(item: object) -> int | None:
         return None
     if isinstance(item, int):
         return item
+    if isinstance(item, float) and item.is_integer():
+        return int(item)
     if isinstance(item, str) and item.isdigit():
         return int(item)
     return None
@@ -664,7 +666,7 @@ async def _scrub_summaries(
         summary_map = cast(dict[object, object], summaries)
         for key, value in summary_map.items():
             payload = cast(dict[str, Any], value) if isinstance(value, dict) else {}
-            message_id = payload.get("message_id")
+            message_id = _message_number(payload.get("message_id"))
             content = payload.get("content")
             contains_deleted = (
                 in_scope
@@ -672,9 +674,7 @@ async def _scrub_summaries(
                 and any(text and text in content for text in texts or [])
             )
             covers_deleted = (
-                cutoff is not None
-                and isinstance(message_id, int)
-                and message_id >= cutoff
+                cutoff is not None and message_id is not None and message_id >= cutoff
             )
             if covers_deleted or contains_deleted:
                 session_removed += 1

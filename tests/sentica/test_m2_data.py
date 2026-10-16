@@ -2055,8 +2055,11 @@ async def test_forget_drops_later_summaries_in_the_session(
         json={"subject_ref": "booking"},
     )
     assert deleted.status_code == 201, deleted.text
+    assert deleted.json()["summary_count"] == 2, deleted.text
     token = set_workspace(workspace)
     try:
+        await db_session.rollback()
+        db_session.expire_all()
         rows = list(
             await db_session.scalars(
                 select(models.Session).where(models.Session.workspace_name == workspace)
