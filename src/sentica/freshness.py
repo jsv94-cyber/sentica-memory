@@ -289,12 +289,7 @@ async def forget(
     message_ids, public_ids = _message_keys(documents)
     if peer_name is not None:
         peer_messages = (
-            await db.execute(
-                select(models.Message.id, models.Message.public_id).where(
-                    models.Message.workspace_name == workspace_name,
-                    models.Message.peer_name == peer_name,
-                )
-            )
+            await db.execute(_peer_message_stmt(workspace_name, peer_name))
         ).all()
         for message_id, public_id in peer_messages:
             message_ids.add(int(message_id))
@@ -340,6 +335,14 @@ async def _store_deletion(
     updated["deletion_records"] = [*records, stored]
     workspace.internal_metadata = updated
     flag_modified(workspace, "internal_metadata")
+
+
+def _peer_message_stmt(workspace_name: str, peer_name: str) -> Any:
+    """Messages owned by one peer in one workspace."""
+    return select(models.Message.id, models.Message.public_id).where(
+        models.Message.workspace_name == workspace_name,
+        models.Message.peer_name == peer_name,
+    )
 
 
 def _target_documents(

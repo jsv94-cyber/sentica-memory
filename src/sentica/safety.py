@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import threading
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -115,11 +116,37 @@ def model_check_enabled() -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
+def _conclusion_text_query(workspace_name: str) -> Any:
+    """Recent conclusion text for one workspace. The model check uses this."""
+    from sqlalchemy import select
+
+    from src import models
+
+    return (
+        select(models.Document.content)
+        .where(models.Document.workspace_name == workspace_name)
+        .where(models.Document.deleted_at.is_(None))
+        .where(models.Document.superseded_by.is_(None))
+        .order_by(models.Document.created_at.desc())
+        .limit(40)
+    )
+
+
+async def _recent_conclusion_texts(workspace_name: str) -> list[str]:
+    """Load conclusion text, then return. The caller must not hold this session."""
+    from src.dependencies import tracked_db
+
+    async with tracked_db("safety.conclusions", read_only=True) as db:
+        rows = (await db.scalars(_conclusion_text_query(workspace_name))).all()
+    return [str(row) for row in rows]
+
+
 async def model_check_bans(text: str, *, workspace_name: str | None) -> bool:
     """Ask the configured model when the optional check is on.
 
     A missing workspace, a transport failure, or a yes answer drops the text.
-    The text itself is not logged.
+    The text itself is not logged. Recent conclusions from the same workspace
+    are part of the prompt, loaded before the model call.
     """
     if not model_check_enabled():
         return False
@@ -131,10 +158,23 @@ async def model_check_bans(text: str, *, workspace_name: str | None) -> bool:
     from src.llm.types import LLMTelemetryContext
 
     try:
+        context = await _recent_conclusion_texts(workspace_name)
+    except Exception:
+        logger.warning("Safety model check failed closed")
+        return True
+    prompt = (
+        "Reply yes if the conclusion states or implies a health condition, "
+        + "sexual orientation or activity, religion, political view, "
+        + "immigration status, criminal history, personal finances, or a "
+        + "medical reason for leave. Reply no otherwise.\n\n"
+        + text
+    )
+    if context:
+        prompt = prompt + "\n" + "\n".join(context)
+    try:
         response = await honcho_llm_call(
             model_config=settings.SUMMARY.MODEL_CONFIG,
-            prompt="Reply yes if the conclusion states or implies a health condition, sexual orientation or activity, religion, political view, immigration status, criminal history, personal finances, or a medical reason for leave. Reply no otherwise.\n\n"
-            + text,
+            prompt=prompt,
             max_tokens=8,
             telemetry=LLMTelemetryContext(
                 workspace_name=workspace_name,
