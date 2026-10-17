@@ -327,8 +327,12 @@ async def test_dialectic_tool_call_stays_on_the_same_model(gateway: _Gateway) ->
 async def test_budget_stop_does_not_switch_model(
     gateway: _Gateway, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """One tenant total covers every purpose. The model does not change."""
-    monkeypatch.setenv("SENTICA_GATEWAY_DAILY_TOKEN_BUDGET", "5")
+    """One tenant total covers every purpose. The model does not change.
+
+    The in-flight hold is the prompt plus ``max_tokens``. A budget of 20
+    admits that hold once, and the settled usage leaves no room for a second.
+    """
+    monkeypatch.setenv("SENTICA_GATEWAY_DAILY_TOKEN_BUDGET", "20")
     await _call("deriver.representation", "representation")
     with pytest.raises(GatewayBudgetExceeded, match="token budget exhausted") as caught:
         await _call("summary.short", "summary")
@@ -462,7 +466,7 @@ async def test_missing_tenant_workspace_or_model_does_not_call(
 async def test_purpose_limit_does_not_block_another_purpose(
     gateway: _Gateway, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("SENTICA_GATEWAY_DERIVER_DAILY_TOKEN_BUDGET", "5")
+    monkeypatch.setenv("SENTICA_GATEWAY_DERIVER_DAILY_TOKEN_BUDGET", "20")
     await _call("deriver.representation", "representation")
     with pytest.raises(GatewayBudgetExceeded):
         await _call("deriver.representation", "representation")
@@ -915,7 +919,7 @@ async def test_unavailable_statuses_and_a_charge_failure_keep_the_completion(
     async def _charge_down(*_args: object, **_kwargs: object) -> None:
         raise GatewayUnavailable("budget store down")
 
-    monkeypatch.setattr("src.sentica.gateway._charge", _charge_down)
+    monkeypatch.setattr("src.sentica.gateway._settle", _charge_down)
     response = await honcho_llm_call(
         model_config=settings.SUMMARY.MODEL_CONFIG,
         prompt="hello",

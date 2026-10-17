@@ -57,16 +57,28 @@ def _eval(store: dict[str, str], lock: threading.Lock, args: list[str]) -> bytes
             spent = int(store.get(keys[1], "0"))
             total_limit = int(argv[0])
             purpose_limit = int(argv[1])
-            if total_limit >= 0 and total >= total_limit:
+            hold = int(argv[2])
+            if total_limit >= 0 and total + hold > total_limit:
                 return b":0\r\n"
-            if purpose_limit >= 0 and spent >= purpose_limit:
+            if purpose_limit >= 0 and spent + hold > purpose_limit:
                 return b":0\r\n"
+            if hold > 0:
+                store[keys[0]] = str(total + hold)
+                store[keys[1]] = str(spent + hold)
             return b":1\r\n"
-        if "sentica-budget-charge" in script:
-            tokens = int(argv[0])
-            store[keys[0]] = str(int(store.get(keys[0], "0")) + tokens)
-            store[keys[1]] = str(int(store.get(keys[1], "0")) + tokens)
-            return _bulk(store[keys[0]])
+        if "sentica-budget-settle" in script:
+            actual = int(argv[0])
+            hold = int(argv[1])
+            delta = actual - hold
+            total = int(store.get(keys[0], "0")) + delta
+            spent = int(store.get(keys[1], "0")) + delta
+            if total < 0:
+                total = 0
+            if spent < 0:
+                spent = 0
+            store[keys[0]] = str(total)
+            store[keys[1]] = str(spent)
+            return _bulk(str(total))
     return b"-ERR unknown script\r\n"
 
 

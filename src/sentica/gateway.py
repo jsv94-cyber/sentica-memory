@@ -62,31 +62,56 @@ _SYNTHESIS = (
 )
 _BUDGET_TTL_SECONDS = 172800
 _async_pool: tuple[str, Any] | None = None
-# One script reads both counters. -1 means that limit is unset.
+# One script holds the estimate on both counters. -1 means that limit is unset.
+# A hold that would pass the limit is refused, so in-flight calls cannot
+# each observe the same spent total.
 _RESERVE_SCRIPT = """
 -- sentica-budget-reserve
 local total = tonumber(redis.call('GET', KEYS[1]) or '0')
 local spent = tonumber(redis.call('GET', KEYS[2]) or '0')
 local total_limit = tonumber(ARGV[1])
 local purpose_limit = tonumber(ARGV[2])
-if total_limit >= 0 and total >= total_limit then
+local hold = tonumber(ARGV[3])
+local ttl = tonumber(ARGV[4])
+if total_limit >= 0 and total + hold > total_limit then
   return 0
 end
-if purpose_limit >= 0 and spent >= purpose_limit then
+if purpose_limit >= 0 and spent + hold > purpose_limit then
   return 0
+end
+if hold > 0 then
+  redis.call('INCRBY', KEYS[1], hold)
+  redis.call('EXPIRE', KEYS[1], ttl)
+  redis.call('INCRBY', KEYS[2], hold)
+  redis.call('EXPIRE', KEYS[2], ttl)
 end
 return 1
 """
-# One script increments both counters and sets their TTL.
-_CHARGE_SCRIPT = """
--- sentica-budget-charge
-local tokens = tonumber(ARGV[1])
-local ttl = tonumber(ARGV[2])
-redis.call('INCRBY', KEYS[1], tokens)
+# One script replaces a hold with the actual token count. A negative delta
+# releases the unused part of the hold. Counters are clamped at zero so a
+# release cannot make the next check fail open.
+_SETTLE_SCRIPT = """
+-- sentica-budget-settle
+local actual = tonumber(ARGV[1])
+local hold = tonumber(ARGV[2])
+local ttl = tonumber(ARGV[3])
+local delta = actual - hold
+if delta ~= 0 then
+  redis.call('INCRBY', KEYS[1], delta)
+  redis.call('INCRBY', KEYS[2], delta)
+end
 redis.call('EXPIRE', KEYS[1], ttl)
-redis.call('INCRBY', KEYS[2], tokens)
 redis.call('EXPIRE', KEYS[2], ttl)
-return redis.call('GET', KEYS[1])
+local total = tonumber(redis.call('GET', KEYS[1]) or '0')
+local spent = tonumber(redis.call('GET', KEYS[2]) or '0')
+if total < 0 then
+  redis.call('SET', KEYS[1], '0')
+  total = 0
+end
+if spent < 0 then
+  redis.call('SET', KEYS[2], '0')
+end
+return total
 """
 _ON_VALUES = frozenset({"1", "true", "yes", "on"})
 _OFF_VALUES = frozenset({"0", "false", "no", "off"})
@@ -275,10 +300,13 @@ def _limit_arg(limit: int | None) -> str:
     return str(limit)
 
 
-async def _reserve(tenant: str, purpose: str) -> None:
+async def _reserve(tenant: str, purpose: str, hold: int) -> int:
+    """Hold ``hold`` tokens. Returns the hold applied, or 0 when no budget is set."""
     total_limit, purpose_limit = _budgets(purpose)
     if total_limit is None and purpose_limit is None:
-        return
+        return 0
+    if hold < 1:
+        hold = 1
     client = _async_client()
     if client is None:
         raise GatewayUnavailable(
@@ -292,6 +320,8 @@ async def _reserve(tenant: str, purpose: str) -> None:
             _purpose_key(tenant, purpose),
             _limit_arg(total_limit),
             _limit_arg(purpose_limit),
+            str(hold),
+            str(_BUDGET_TTL_SECONDS),
         )
     except GatewayBudgetExceeded:
         raise
@@ -301,11 +331,13 @@ async def _reserve(tenant: str, purpose: str) -> None:
         ) from exc
     if int(allowed) == 0:
         raise GatewayBudgetExceeded("token budget exhausted")
+    return hold
 
 
-async def _charge(tenant: str, purpose: str, tokens: int) -> None:
-    if tokens < 1:
-        tokens = 1
+async def _settle(tenant: str, purpose: str, actual: int, hold: int) -> None:
+    """Replace ``hold`` with ``actual`` on both counters."""
+    if actual < 0:
+        actual = 0
     total_limit, purpose_limit = _budgets(purpose)
     client = _async_client()
     if client is None:
@@ -316,11 +348,12 @@ async def _charge(tenant: str, purpose: str, tokens: int) -> None:
         return
     try:
         await client.eval(
-            _CHARGE_SCRIPT,
+            _SETTLE_SCRIPT,
             2,
             _total_key(tenant),
             _purpose_key(tenant, purpose),
-            str(tokens),
+            str(actual),
+            str(hold),
             str(_BUDGET_TTL_SECONDS),
         )
     except Exception as exc:
@@ -329,6 +362,22 @@ async def _charge(tenant: str, purpose: str, tokens: int) -> None:
                 "Refusing to call: the gateway budget store is unavailable"
             ) from exc
         logger.warning("gateway budget store did not record tokens")
+
+
+async def _charge(tenant: str, purpose: str, tokens: int) -> None:
+    if tokens < 1:
+        tokens = 1
+    await _settle(tenant, purpose, tokens, 0)
+
+
+async def _release_hold(tenant: str, purpose: str, hold: int) -> None:
+    """Give back a hold. A store error leaves the hold in place."""
+    if hold < 1:
+        return
+    try:
+        await _settle(tenant, purpose, 0, hold)
+    except GatewayUnavailable:
+        logger.warning("gateway hold was not released")
 
 
 def _enabled_flag(name: str) -> str:
@@ -665,6 +714,22 @@ def _usage_pair(
     return estimate, 0, False
 
 
+def _chat_hold(messages: list[dict[str, Any]], max_tokens: int, model: str) -> int:
+    """Upper bound for one chat call: prompt tokens plus the completion cap."""
+    from src.sentica.tokenizer import count_gateway_tokens
+
+    texts: list[str] = []
+    for message in messages:
+        value = message.get("content")
+        if isinstance(value, str) and value:
+            texts.append(value)
+    prompt = count_gateway_tokens(texts, model)
+    hold = prompt + max(max_tokens, 0)
+    if hold < 1:
+        return 1
+    return hold
+
+
 def _request_body(
     *,
     model: str,
@@ -911,10 +976,10 @@ def _interpret(
     return parsed
 
 
-async def _charge_paid(tenant: str, purpose: str, tokens: int) -> None:
+async def _settle_paid(tenant: str, purpose: str, actual: int, hold: int) -> None:
     """Record a completed call. A store failure does not discard the completion."""
     try:
-        await _charge(tenant, purpose, tokens)
+        await _settle(tenant, purpose, actual, hold)
     except GatewayUnavailable:
         logger.warning("gateway charge failed after a paid call")
 
@@ -944,8 +1009,8 @@ async def _chat(
     float,
 ]:
     tenant = _tenant()
-    await _reserve(tenant, purpose)
     base, model = _route(purpose)
+    applied = await _reserve(tenant, purpose, _chat_hold(messages, max_tokens, model))
     request_id = _request_id(telemetry)
     body = _request_body(
         model=model,
@@ -957,48 +1022,53 @@ async def _chat(
         json_mode=json_mode,
     )
     started = time.perf_counter()
-    payload, attempt = await _post(
-        base + "/chat/completions",
-        body,
-        _headers(
-            tenant=tenant,
-            workspace=workspace,
-            purpose=purpose,
-            request_id=request_id,
-            stream=mark_stream,
-        ),
-        timeout=_timeout_seconds(purpose),
-        telemetry=telemetry,
-        model=model,
-        max_tokens=max_tokens,
-        has_tools=bool(tools),
-        round_index=round_index,
-    )
-    _choice_row, message, finish = _choice(payload)
-    del _choice_row
-    content = _text(message)
-    prompt_tokens, completion_tokens, present = _usage_pair(
-        payload, messages, content, model
-    )
-    billed = (
-        prompt_tokens + completion_tokens
-        if present
-        else max(prompt_tokens + completion_tokens, 1)
-    )
-    await _charge_paid(tenant, purpose, billed)
-    calls = _tool_calls(message)
-    duration_ms = (time.perf_counter() - started) * 1000
-    return (
-        message,
-        finish,
-        calls,
-        content,
-        prompt_tokens,
-        completion_tokens,
-        model,
-        attempt,
-        duration_ms,
-    )
+    try:
+        payload, attempt = await _post(
+            base + "/chat/completions",
+            body,
+            _headers(
+                tenant=tenant,
+                workspace=workspace,
+                purpose=purpose,
+                request_id=request_id,
+                stream=mark_stream,
+            ),
+            timeout=_timeout_seconds(purpose),
+            telemetry=telemetry,
+            model=model,
+            max_tokens=max_tokens,
+            has_tools=bool(tools),
+            round_index=round_index,
+        )
+        _choice_row, message, finish = _choice(payload)
+        del _choice_row
+        content = _text(message)
+        prompt_tokens, completion_tokens, present = _usage_pair(
+            payload, messages, content, model
+        )
+        billed = (
+            prompt_tokens + completion_tokens
+            if present
+            else max(prompt_tokens + completion_tokens, 1)
+        )
+        await _settle_paid(tenant, purpose, billed, applied)
+        applied = 0
+        calls = _tool_calls(message)
+        duration_ms = (time.perf_counter() - started) * 1000
+        return (
+            message,
+            finish,
+            calls,
+            content,
+            prompt_tokens,
+            completion_tokens,
+            model,
+            attempt,
+            duration_ms,
+        )
+    finally:
+        if applied:
+            await _release_hold(tenant, purpose, applied)
 
 
 def _append_tools(
@@ -1374,39 +1444,47 @@ async def embed_texts(
     purpose = "embed"
     tenant = _tenant()
     workspace = _workspace(None)
-    await _reserve(tenant, purpose)
     base, model = _route(purpose)
+    from src.sentica.tokenizer import count_gateway_tokens
+
+    prompt_hold = count_gateway_tokens(texts, model)
+    applied = await _reserve(tenant, purpose, max(prompt_hold, 1))
     messages = [{"role": "user", "content": "\n".join(texts)}]
     from src.config import settings
 
     embed_body: dict[str, Any] = {"model": model, "input": texts}
     if settings.EMBEDDING.resolve_send_dimensions():
         embed_body["dimensions"] = settings.EMBEDDING.VECTOR_DIMENSIONS
-    payload, _attempt = await _post(
-        base + "/embeddings",
-        embed_body,
-        _headers(
-            tenant=tenant,
-            workspace=workspace,
-            purpose=purpose,
-            request_id=generate_nanoid(),
-            embed_operation=operation,
-        ),
-        timeout=_timeout_seconds(purpose),
-        telemetry=None,
-        model=model,
-        max_tokens=0,
-        has_tools=False,
-    )
-    prompt_tokens, completion_tokens, present = _usage_pair(
-        payload, messages, "", model
-    )
-    billed = (
-        prompt_tokens + completion_tokens
-        if present
-        else max(prompt_tokens + completion_tokens, 1)
-    )
-    await _charge_paid(tenant, purpose, billed)
+    try:
+        payload, _attempt = await _post(
+            base + "/embeddings",
+            embed_body,
+            _headers(
+                tenant=tenant,
+                workspace=workspace,
+                purpose=purpose,
+                request_id=generate_nanoid(),
+                embed_operation=operation,
+            ),
+            timeout=_timeout_seconds(purpose),
+            telemetry=None,
+            model=model,
+            max_tokens=0,
+            has_tools=False,
+        )
+        prompt_tokens, completion_tokens, present = _usage_pair(
+            payload, messages, "", model
+        )
+        billed = (
+            prompt_tokens + completion_tokens
+            if present
+            else max(prompt_tokens + completion_tokens, 1)
+        )
+        await _settle_paid(tenant, purpose, billed, applied)
+        applied = 0
+    finally:
+        if applied:
+            await _release_hold(tenant, purpose, applied)
     rows = payload.get("data")
     if not isinstance(rows, list):
         raise ValidationException("Refusing to call: the gateway returned no vectors")

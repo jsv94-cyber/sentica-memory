@@ -53,6 +53,7 @@ async def test_budget_reserve_and_charge_are_one_script(
         _async_client,  # pyright: ignore[reportPrivateUsage]
         _charge,  # pyright: ignore[reportPrivateUsage]
         _reserve,  # pyright: ignore[reportPrivateUsage]
+        _total_key,  # pyright: ignore[reportPrivateUsage]
         reset_token_counters,
     )
     from tests.sentica.resp_redis import RespRedis  # noqa: I001
@@ -62,10 +63,58 @@ async def test_budget_reserve_and_charge_are_one_script(
         monkeypatch.setenv("SENTICA_GATEWAY_REDIS_URL", redis.url)
         monkeypatch.setenv("SENTICA_GATEWAY_DAILY_TOKEN_BUDGET", "10")
         reset_token_counters()
-        await _reserve("tenant-a", "deriver")
+        await _reserve("tenant-a", "deriver", 6)
+        assert redis.store[_total_key("tenant-a")] == "6"
         await _charge("tenant-a", "deriver", 4)
+        assert redis.store[_total_key("tenant-a")] == "10"
         assert redis.commands.count("EVAL") >= 2
         assert "INCRBY" not in redis.commands
         assert _async_client() is _async_client()
     finally:
         redis.close()
+
+
+async def test_concurrent_holds_stay_inside_a_100_token_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ten in-flight holds of 40 cannot spend a 100-token budget past 80."""
+    import asyncio
+
+    import redis.asyncio as aioredis
+
+    from src.exceptions import GatewayBudgetExceeded
+    from src.sentica.gateway import (
+        _reserve,  # pyright: ignore[reportPrivateUsage]
+        _settle,  # pyright: ignore[reportPrivateUsage]
+        _total_key,  # pyright: ignore[reportPrivateUsage]
+        reset_token_counters,
+    )
+
+    url = "redis://127.0.0.1:6379/15"
+    client = aioredis.Redis.from_url(url, decode_responses=True, protocol=2)
+    tenant = "budget-hold"
+    try:
+        await client.ping()
+        await client.flushdb()
+        monkeypatch.setenv("SENTICA_GATEWAY_REDIS_URL", url)
+        monkeypatch.setenv("SENTICA_GATEWAY_DAILY_TOKEN_BUDGET", "100")
+        reset_token_counters()
+
+        async def _one() -> int:
+            try:
+                applied = await _reserve(tenant, "deriver", 40)
+            except GatewayBudgetExceeded:
+                return 0
+            await _settle(tenant, "deriver", 40, applied)
+            return applied
+
+        admitted = await asyncio.gather(*(_one() for _ in range(10)))
+        spent = sum(admitted)
+        stored = int(await client.get(_total_key(tenant)) or "0")
+        assert spent <= 100
+        assert stored <= 100
+        assert spent == 80
+        assert stored == 80
+    finally:
+        await client.aclose()
+        reset_token_counters()
