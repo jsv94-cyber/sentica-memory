@@ -2029,3 +2029,8 @@ def test_publishers_are_single_port_and_non_root(stack: Path) -> None:
         assert host.get("ReadonlyRootfs") is True
         bindings = cast(dict[str, object], host.get("PortBindings") or {})
         assert len(bindings) == 1, service
+        for targets in bindings.values():
+            assert isinstance(targets, list), service
+            for binding in targets:
+                host_ip = cast(dict[str, object], binding).get("HostIp")
+                assert host_ip == "127.0.0.1", service
