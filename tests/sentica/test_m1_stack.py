@@ -1915,14 +1915,20 @@ def test_api_and_deriver_cannot_reach_the_internet(stack: Path) -> None:
 
 
 def test_root_filesystem_is_read_only(stack: Path) -> None:
+    """The app user cannot create a file under /app on a read-only root."""
     del stack
-    script = "open('/probe-write', 'w').write('x')\n"
+    script = "open('/app/probe-write', 'w').write('x')\n"
     for service in ("api-a", "api-b", "deriver-a", "deriver-b"):
+        inspected = _run(["docker", "inspect", _service_id(service)], check=True)
+        payload = cast(list[dict[str, Any]], json.loads(inspected.stdout))
+        host = cast(dict[str, Any], payload[0]["HostConfig"])
+        assert host.get("ReadonlyRootfs") is True, service
         result = _compose(
             ["exec", "-T", service, "python", "-c", script],
             check=False,
         )
         assert result.returncode != 0, service
+        assert "Read-only file system" in result.stderr, service + result.stderr
 
 
 def test_redis_runs_as_a_non_root_user(stack: Path) -> None:
