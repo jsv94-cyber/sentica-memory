@@ -141,7 +141,7 @@ def test_deploy_flags_and_internal_networks() -> None:
         assert "server_tls_sslmode = verify-full" in ini
         assert "server_tls_ca_file = /certs/ca.crt" in ini
     redis_entry = _text("docker/sentica/redis-entry.sh")
-    assert "su redis" in redis_entry
+    assert "setpriv --reuid=redis" in redis_entry
     assert "chmod 644 /secret/password" in redis_entry
     dockerfile = _text("Dockerfile")
     assert "USER ${SENTICA_UID}:${SENTICA_GID}" in dockerfile

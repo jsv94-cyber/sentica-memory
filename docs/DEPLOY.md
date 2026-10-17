@@ -173,7 +173,8 @@ structural.
   `generativelanguage.googleapis.com`) and the rest of the public internet.
 
 Redis runs as the `redis` user. The entry script starts as root only long
-enough to create the password file, then `su redis` replaces it.
+enough to create the password file, then `setpriv` execs `redis-server` so
+pid 1 is that user.
 
 ## Metrics
 
