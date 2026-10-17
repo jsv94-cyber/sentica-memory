@@ -128,10 +128,6 @@ async def test_concurrent_holds_stay_inside_a_100_token_budget(
 ) -> None:
     """Ten in-flight holds of 40 cannot spend a 100-token budget past 80."""
     import asyncio
-    from collections.abc import Callable
-    from typing import Any, cast
-
-    import redis.asyncio as aioredis
 
     from src.exceptions import GatewayBudgetExceeded
     from src.sentica.gateway import (
@@ -140,15 +136,12 @@ async def test_concurrent_holds_stay_inside_a_100_token_budget(
         _total_key,  # pyright: ignore[reportPrivateUsage]
         reset_token_counters,
     )
+    from tests.sentica.resp_redis import RespRedis  # noqa: I001
 
-    url = "redis://127.0.0.1:6379/15"
-    connect = cast(Callable[..., Any], aioredis.Redis.from_url)
-    client = connect(url, decode_responses=True, protocol=2)
+    redis = RespRedis()
     tenant = "budget-hold"
     try:
-        await client.ping()
-        await client.flushdb()
-        monkeypatch.setenv("SENTICA_GATEWAY_REDIS_URL", url)
+        monkeypatch.setenv("SENTICA_GATEWAY_REDIS_URL", redis.url)
         monkeypatch.setenv("SENTICA_GATEWAY_DAILY_TOKEN_BUDGET", "100")
         reset_token_counters()
 
@@ -162,14 +155,15 @@ async def test_concurrent_holds_stay_inside_a_100_token_budget(
 
         admitted = await asyncio.gather(*(_one() for _ in range(10)))
         spent = sum(admitted)
-        stored = int(await client.get(_total_key(tenant)) or "0")
+        with redis.lock:
+            stored = int(redis.store.get(_total_key(tenant), "0"))
         assert spent <= 100
         assert stored <= 100
         assert spent == 80
         assert stored == 80
     finally:
-        await client.aclose()
         reset_token_counters()
+        redis.close()
 
 
 def test_chat_hold_counts_tool_schemas_and_list_content() -> None:
