@@ -738,15 +738,40 @@ def _usage_pair(
     return estimate, 0, False
 
 
-def _chat_hold(messages: list[dict[str, Any]], max_tokens: int, model: str) -> int:
-    """Upper bound for one chat call: prompt tokens plus the completion cap."""
+def _strings(value: object) -> list[str]:
+    """Every string nested in a message part or a tool schema."""
+    if isinstance(value, str):
+        return [value] if value else []
+    if isinstance(value, dict):
+        found: list[str] = []
+        for item in value.values():
+            found.extend(_strings(item))
+        return found
+    if isinstance(value, list):
+        found = []
+        for item in value:
+            found.extend(_strings(item))
+        return found
+    return []
+
+
+def _chat_hold(
+    messages: list[dict[str, Any]],
+    max_tokens: int,
+    model: str,
+    tools: list[dict[str, Any]] | None = None,
+) -> int:
+    """Upper bound for one chat call: prompt tokens plus the completion cap.
+
+    The prompt count includes string content, text inside list content, and
+    the tool schemas sent with the call.
+    """
     from src.sentica.tokenizer import count_gateway_tokens
 
     texts: list[str] = []
     for message in messages:
-        value = message.get("content")
-        if isinstance(value, str) and value:
-            texts.append(value)
+        texts.extend(_strings(message.get("content")))
+    texts.extend(_strings(tools))
     prompt = count_gateway_tokens(texts, model)
     hold = prompt + max(max_tokens, 0)
     if hold < 1:
@@ -1034,7 +1059,9 @@ async def _chat(
 ]:
     tenant = _tenant()
     base, model = _route(purpose)
-    applied = await _reserve(tenant, purpose, _chat_hold(messages, max_tokens, model))
+    applied = await _reserve(
+        tenant, purpose, _chat_hold(messages, max_tokens, model, tools)
+    )
     request_id = _request_id(telemetry)
     body = _request_body(
         model=model,

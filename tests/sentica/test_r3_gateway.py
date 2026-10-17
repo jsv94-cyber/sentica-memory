@@ -170,3 +170,70 @@ async def test_concurrent_holds_stay_inside_a_100_token_budget(
     finally:
         await client.aclose()
         reset_token_counters()
+
+
+def test_chat_hold_counts_tool_schemas_and_list_content() -> None:
+    """A hold covers multipart text and the tool schemas sent with the call."""
+    from src.sentica.gateway import _chat_hold  # pyright: ignore[reportPrivateUsage]
+    from src.sentica.tokenizer import count_gateway_tokens
+
+    model = "gpt-4o-mini"
+    prose = "the customer prefers the window seat on every flight"
+    description = "Look up a stored conclusion about the caller"
+    messages = [{"role": "user", "content": [{"type": "text", "text": prose}]}]
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "search_memory",
+                "description": description,
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+    hold = _chat_hold(messages, 8, model, tools)
+    pieces = count_gateway_tokens([prose, description, "search_memory"], model)
+    assert hold >= pieces + 8
+    plain = _chat_hold([{"role": "user", "content": prose}], 8, model, None)
+    assert plain >= count_gateway_tokens([prose], model) + 8
+
+
+async def test_a_failed_chat_releases_its_hold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transport failure returns the reserved tokens to the budget."""
+    from src.exceptions import GatewayUnavailable
+    from src.sentica.gateway import (
+        _chat,  # pyright: ignore[reportPrivateUsage]
+        _total_key,  # pyright: ignore[reportPrivateUsage]
+        reset_token_counters,
+    )
+    from tests.sentica.resp_redis import RespRedis  # noqa: I001
+
+    redis = RespRedis()
+    try:
+        monkeypatch.setenv("SENTICA_GATEWAY_REDIS_URL", redis.url)
+        monkeypatch.setenv("SENTICA_GATEWAY_DAILY_TOKEN_BUDGET", "1000")
+        monkeypatch.setenv("SENTICA_GATEWAY_BASE_URL", "http://127.0.0.1:9/v1")
+        monkeypatch.setenv("SENTICA_GATEWAY_DERIVER_MODEL", "gpt-4o-mini")
+        monkeypatch.setenv("SENTICA_TENANT_ID", "tenant-a")
+        monkeypatch.setenv("SENTICA_GATEWAY_RETRY_ATTEMPTS", "1")
+        monkeypatch.setenv("SENTICA_GATEWAY_TIMEOUT_SECONDS", "0.2")
+        reset_token_counters()
+        with pytest.raises(GatewayUnavailable):
+            await _chat(
+                purpose="deriver",
+                workspace="left",
+                messages=[{"role": "user", "content": "hello"}],
+                max_tokens=16,
+                tools=None,
+                tool_choice=None,
+                response_model=None,
+                json_mode=False,
+                telemetry=None,
+                mark_stream=False,
+            )
+        assert redis.store.get(_total_key("tenant-a"), "0") == "0"
+    finally:
+        reset_token_counters()
+        redis.close()
