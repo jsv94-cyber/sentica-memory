@@ -31,8 +31,8 @@ CURRENT_PREDICATE = (
 )
 # relaxed_order fills the page. strict_order can abandon the index.
 _ITERATIVE_SCAN = "relaxed_order"
-_MAX_SCAN_TUPLES = "100000"
-_EF_SEARCH = "200"
+_MAX_SCAN_TUPLES = "20000"
+_EF_SEARCH = "40"
 _HNSW_SCAN_SQL = text(
     "SELECT set_config('hnsw.iterative_scan', :scan, true), "
     + "set_config('hnsw.max_scan_tuples', :tuples, true), "
@@ -219,6 +219,42 @@ async def _exact_page(
     return rows
 
 
+async def _index_missed_rows(
+    db: AsyncSession,
+    stmt: Select[tuple[models.Document]],
+    seen: int,
+) -> bool:
+    """True when a sequential probe can see a row the index page left out.
+
+    An empty stale page is honest when no stale row exists. The probe reads
+    identifiers only, so that case does not rank every embedding.
+    """
+    indexscan = _setting(
+        await db.scalar(text("SELECT current_setting('enable_indexscan')")),
+        "on",
+    )
+    bitmap = _setting(
+        await db.scalar(text("SELECT current_setting('enable_bitmapscan')")),
+        "on",
+    )
+    await db.execute(_EXACT_SCAN_SQL)
+    probe = (
+        stmt.order_by(None)
+        .limit(None)
+        .with_only_columns(models.Document.id, maintain_column_froms=True)
+        .offset(seen)
+        .limit(1)
+    )
+    try:
+        found = await db.scalar(probe)
+    except Exception:
+        with contextlib.suppress(Exception):
+            await _index_mode(db, indexscan, bitmap)
+        raise
+    await _index_mode(db, indexscan, bitmap)
+    return found is not None
+
+
 async def _page(
     db: AsyncSession,
     stmt: Select[tuple[models.Document]],
@@ -227,6 +263,8 @@ async def _page(
     wanted = max(limit, 1) * CANDIDATE_FACTOR
     indexed = list((await db.execute(stmt)).scalars().all())
     if len(indexed) >= wanted:
+        return indexed
+    if not await _index_missed_rows(db, stmt, len(indexed)):
         return indexed
     exact = await _exact_page(db, stmt)
     if len(exact) > len(indexed):
