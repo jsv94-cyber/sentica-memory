@@ -132,7 +132,20 @@ def test_deploy_flags_and_internal_networks() -> None:
     assert compose.count("8000=") == 2
     assert compose.count("6432=") == 2
     assert "publish.py" in compose
-    assert "runtime: runsc" in _text("docker-compose.gvisor.yml")
+    gvisor = _text("docker-compose.gvisor.yml")
+    assert "runtime: runsc" in gvisor
+    assert "extra_hosts:" in gvisor
+    for host_line in (
+        "pgbouncer-a:172.28.10.13",
+        "pgbouncer-b:172.28.11.13",
+        "redis-a:172.28.10.12",
+        "redis-b:172.28.11.12",
+        "embeddings:172.28.10.20",
+        "embeddings:172.28.11.20",
+        "ipv4_address: 172.28.10.20",
+        "ipv4_address: 172.28.11.20",
+    ):
+        assert host_line in gvisor
     for relative in (
         "docker/sentica/pgbouncer-a.ini",
         "docker/sentica/pgbouncer-b.ini",
@@ -151,6 +164,8 @@ def test_deploy_flags_and_internal_networks() -> None:
     assert 'grep -R -F -q "northline violetkey"' in dockerfile
     assert "--entrypoint /app/docker/migrate-entrypoint.sh" in deploy
     assert "10.8.0.4:8000:8000" in deploy
+    assert "extra_hosts" in deploy
+    assert "127.0.0.11" in deploy
     assert "SENTICA_DB_PROXY_HOST" in deploy
     assert "api.openai.com" in deploy
     assert "proof-only" in deploy

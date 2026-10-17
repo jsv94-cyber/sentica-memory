@@ -111,12 +111,17 @@ and migrate containers. gVisor is the extra file `docker-compose.gvisor.yml`:
 docker compose -f docker-compose.sentica.yml -f docker-compose.gvisor.yml up -d --build
 ```
 
-That override requires the `runsc` runtime on the Docker daemon. CI job
-`test-gvisor-smoke` downloads `gvisor.tar.bz2` for the runner architecture,
-checks `gvisor.tar.bz2.sha512`, installs `runsc` with its sidecar binaries,
-and runs the smoke subset with `SENTICA_GVISOR=1`: egress denied, read-only
-root, non-root Redis, and no `NET_ADMIN`. The full two-instance proof stays
-on the default runtime in `test-m1-stack`. `publish-a-api`, `publish-a-proxy`,
+That override requires the `runsc` runtime on the Docker daemon. runsc
+keeps its own network stack and cannot use Docker's embedded DNS at
+127.0.0.11, so the file pins `embeddings` at `172.28.10.20` and
+`172.28.11.20` and writes `extra_hosts` for the proxy, Redis, and gateway
+names. Those names stay: the proxy certificate is issued for `pgbouncer-a`
+and `pgbouncer-b`. CI job `test-gvisor-smoke` downloads `gvisor.tar.bz2`
+for the runner architecture, checks `gvisor.tar.bz2.sha512`, installs
+`runsc` with its sidecar binaries, and runs the smoke subset with
+`SENTICA_GVISOR=1`: egress denied, read-only root, non-root Redis, and no
+`NET_ADMIN`. The full two-instance proof stays on the default runtime in
+`test-m1-stack`. `publish-a-api`, `publish-a-proxy`,
 `publish-b-api`, and `publish-b-proxy` are proof-only. Each runs as uid
 65534, read-only, and forwards exactly one port. They are not part of the
 instance.
