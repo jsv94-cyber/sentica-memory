@@ -8,6 +8,8 @@ docs/**
 supabase/**
 LICENSE
 __pycache__
+**/__pycache__
+**/*.pyc
 src/sentica/eval_harness.py
 docker-compose.yml.example
 .github/**

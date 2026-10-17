@@ -179,6 +179,13 @@ def test_deploy_flags_and_internal_networks() -> None:
     assert "-j DROP" in deploy
 
 
+def test_dockerignore_excludes_bytecode() -> None:
+    """A bare ``__pycache__`` name does not exclude nested bytecode."""
+    text = _text(".dockerignore")
+    assert "**/__pycache__" in text
+    assert "**/*.pyc" in text
+
+
 def test_fork_changes_lists_the_r3_files() -> None:
     text = _text("FORK_CHANGES.md")
     for path in (
