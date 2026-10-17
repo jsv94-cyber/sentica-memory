@@ -6,7 +6,7 @@ import ast
 from pathlib import Path
 
 from sqlalchemy import func, select, text
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from sqlalchemy.sql import Select
 
 from src import models
@@ -394,5 +394,93 @@ async def test_filtered_hnsw_returns_a_full_page_at_10k_rows(
     assert "index scan" in folded or "bitmap index scan" in folded
     assert "hnsw" in folded
     assert "seq scan" not in folded
+    rows = await execute_neighbors(db_session, scoped, embedding, limit)
+    assert len(rows) == page
+
+
+async def test_neighbor_scan_after_a_large_delete_returns_a_full_page(
+    db_session: AsyncSession,
+    db_engine: AsyncEngine,
+) -> None:
+    """Live rows stay visible after a large delete reclaims the HNSW graph.
+
+    A delete leaves dead index entries. The next scan misses rows that were
+    inserted afterwards until those entries are vacuumed.
+    """
+    from tests.conftest import _clear_all_tables  # pyright: ignore[reportPrivateUsage]
+
+    dimensions = settings.EMBEDDING.VECTOR_DIMENSIONS
+    assert dimensions >= 16
+    workspace = models.Workspace(name="hnswdead000000000000")
+    db_session.add(workspace)
+    await db_session.commit()
+    db_session.add(models.Peer(name="p0", workspace_name=workspace.name))
+    await db_session.commit()
+    db_session.add(
+        models.Collection(
+            workspace_name=workspace.name,
+            observer="p0",
+            observed="p0",
+        )
+    )
+    await db_session.commit()
+    close = "[" + ",".join(["0.9"] + ["0"] * (dimensions - 1)) + "]"
+    await db_session.execute(
+        text(
+            "INSERT INTO documents (id, content, observer, observed, "
+            "workspace_name, embedding, stale, level, internal_metadata) "
+            "SELECT substr(md5('dead' || g::text), 1, 21), 'dead ' || g, "
+            ":observer, :observed, :workspace, CAST(:vector AS vector), "
+            "false, 'explicit', '{}'::jsonb FROM generate_series(1, 1500) AS g"
+        ),
+        {
+            "observer": "p0",
+            "observed": "p0",
+            "workspace": workspace.name,
+            "vector": close,
+        },
+    )
+    await db_session.commit()
+    await db_session.rollback()
+    await _clear_all_tables(db_engine)
+
+    target = models.Workspace(name="hnswlive000000000000")
+    db_session.add(target)
+    await db_session.commit()
+    db_session.add(models.Peer(name="p0", workspace_name=target.name))
+    await db_session.commit()
+    db_session.add(
+        models.Collection(
+            workspace_name=target.name,
+            observer="p0",
+            observed="p0",
+        )
+    )
+    await db_session.commit()
+    far = "[" + ",".join(["0.05"] + ["0.2"] * (dimensions - 1)) + "]"
+    await db_session.execute(
+        text(
+            "INSERT INTO documents (id, content, observer, observed, "
+            "workspace_name, embedding, stale, level, internal_metadata) "
+            "SELECT substr(md5('live' || g::text), 1, 21), 'live ' || g, "
+            ":observer, :observed, :workspace, CAST(:vector AS vector), "
+            "false, 'explicit', '{}'::jsonb FROM generate_series(1, 40) AS g"
+        ),
+        {
+            "observer": "p0",
+            "observed": "p0",
+            "workspace": target.name,
+            "vector": far,
+        },
+    )
+    await db_session.commit()
+    page = 40
+    limit = page // CANDIDATE_FACTOR
+    embedding = [1.0] + [0.0] * (dimensions - 1)
+    scoped = select(models.Document).where(
+        models.Document.workspace_name == target.name,
+        models.Document.observer == "p0",
+        models.Document.observed == "p0",
+    )
     rows = await execute_neighbors(db_session, scoped, embedding, limit)
     assert len(rows) == page
