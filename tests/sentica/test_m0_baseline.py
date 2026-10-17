@@ -103,6 +103,7 @@ def test_new_docs_have_no_em_dash() -> None:
         "docs/UPSTREAM_SYNC.md",
         "docs/RELEASES.md",
         ".review/M2-summary.md",
+        ".review/R3-summary.md",
         "docker-compose.yml",
         "docker-compose.sentica.yml",
         ".review/M1-summary.md",
