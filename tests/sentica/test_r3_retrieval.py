@@ -5,7 +5,7 @@ from __future__ import annotations
 import ast
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from sqlalchemy import func, select, text
@@ -241,8 +241,11 @@ async def _plans_during(
     original = db_session.execute
 
     async def _watching(statement: Any, *args: Any, **kwargs: Any) -> Any:
-        if isinstance(statement, Select) and not plans:
-            plans.append(await _plan(db_session, statement))
+        query = statement
+        if isinstance(query, Select) and not plans:
+            plans.append(
+                await _plan(db_session, cast(Select[tuple[models.Document]], query))
+            )
         return await original(statement, *args, **kwargs)
 
     db_session.execute = _watching  # type: ignore[method-assign]

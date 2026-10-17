@@ -229,9 +229,12 @@ def _drop_sources(command: str) -> list[ipaddress.IPv4Network]:
         return []
     source = tokens[tokens.index("-s") + 1]
     try:
-        return [ipaddress.ip_network(source, strict=False)]
+        network = ipaddress.ip_network(source, strict=False)
     except ValueError:
         return []
+    if not isinstance(network, ipaddress.IPv4Network):
+        return []
+    return [network]
 
 
 def firewall_gaps(deploy: str) -> list[str]:
@@ -250,6 +253,9 @@ def firewall_gaps(deploy: str) -> list[str]:
             subnet = ipaddress.ip_network(raw, strict=False)
         except ValueError:
             gaps.append("docker network create subnet is not an address")
+            continue
+        if not isinstance(subnet, ipaddress.IPv4Network):
+            gaps.append("docker network create subnet is not IPv4")
             continue
         subnets.append(subnet)
         if _BROKER in subnet:

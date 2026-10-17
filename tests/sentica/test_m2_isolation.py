@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import re
 import uuid
+from typing import LiteralString, cast
 
 import pytest
 from sqlalchemy.dialects import postgresql
@@ -372,6 +373,11 @@ def _quote_ident(name: str) -> str:
     return '"' + name + '"'
 
 
+def _query(statement: str) -> LiteralString:
+    """Dynamic SQL whose identifiers were checked by ``_quote_ident``."""
+    return cast(LiteralString, statement)
+
+
 def test_unset_workspace_sees_zero_rows() -> None:
     """A connection that never sets sentica.workspace cannot read an RLS table."""
     import psycopg
@@ -514,28 +520,32 @@ def test_unset_workspace_sees_zero_rows() -> None:
     )
     with psycopg.connect(admin_dsn) as admin:
         for statement, params in inserts:
-            admin.execute(statement, params)
+            admin.execute(_query(statement), params)
         admin.commit()
         try:
             discovered = [
                 str(row[0])
                 for row in admin.execute(
-                    "SELECT c.relname FROM pg_policy AS p "
-                    + "JOIN pg_class AS c ON c.oid = p.polrelid "
-                    + "JOIN pg_namespace AS n ON n.oid = c.relnamespace "
-                    + "WHERE p.polname = 'sentica_workspace' AND n.nspname = %s "
-                    + "ORDER BY c.relname",
+                    _query(
+                        "SELECT c.relname FROM pg_policy AS p "
+                        + "JOIN pg_class AS c ON c.oid = p.polrelid "
+                        + "JOIN pg_namespace AS n ON n.oid = c.relnamespace "
+                        + "WHERE p.polname = 'sentica_workspace' AND n.nspname = %s "
+                        + "ORDER BY c.relname"
+                    ),
                     (schema,),
                 ).fetchall()
             ]
             assert tuple(discovered) == seeded
             for table in discovered:
                 present = admin.execute(
-                    "SELECT count(*) FROM "
-                    + quoted_schema
-                    + "."
-                    + _quote_ident(table)
-                    + " WHERE workspace_name = %s",
+                    _query(
+                        "SELECT count(*) FROM "
+                        + quoted_schema
+                        + "."
+                        + _quote_ident(table)
+                        + " WHERE workspace_name = %s"
+                    ),
                     (workspace,),
                 ).fetchone()
                 assert present is not None and int(present[0]) >= 1, table
@@ -544,10 +554,12 @@ def test_unset_workspace_sees_zero_rows() -> None:
                 assert cur.fetchone() == (None,)
                 for table in discovered:
                     cur.execute(
-                        "SELECT count(*) FROM "
-                        + quoted_schema
-                        + "."
-                        + _quote_ident(table)
+                        _query(
+                            "SELECT count(*) FROM "
+                            + quoted_schema
+                            + "."
+                            + _quote_ident(table)
+                        )
                     )
                     seen = cur.fetchone()
                     assert seen == (0,), table
@@ -555,13 +567,15 @@ def test_unset_workspace_sees_zero_rows() -> None:
             for table in deletes:
                 column = "name" if table == "workspaces" else "workspace_name"
                 admin.execute(
-                    "DELETE FROM "
-                    + quoted_schema
-                    + "."
-                    + _quote_ident(table)
-                    + " WHERE "
-                    + _quote_ident(column)
-                    + " = %s",
+                    _query(
+                        "DELETE FROM "
+                        + quoted_schema
+                        + "."
+                        + _quote_ident(table)
+                        + " WHERE "
+                        + _quote_ident(column)
+                        + " = %s"
+                    ),
                     (workspace,),
                 )
             admin.commit()

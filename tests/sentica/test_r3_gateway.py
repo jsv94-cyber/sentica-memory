@@ -168,14 +168,18 @@ async def test_concurrent_holds_stay_inside_a_100_token_budget(
 
 def test_chat_hold_counts_tool_schemas_and_list_content() -> None:
     """A hold covers multipart text and the tool schemas sent with the call."""
+    from typing import Any
+
     from src.sentica.gateway import _chat_hold  # pyright: ignore[reportPrivateUsage]
     from src.sentica.tokenizer import count_gateway_tokens
 
     model = "gpt-4o-mini"
     prose = "the customer prefers the window seat on every flight"
     description = "Look up a stored conclusion about the caller"
-    messages = [{"role": "user", "content": [{"type": "text", "text": prose}]}]
-    tools = [
+    messages: list[dict[str, Any]] = [
+        {"role": "user", "content": [{"type": "text", "text": prose}]}
+    ]
+    tools: list[dict[str, Any]] = [
         {
             "type": "function",
             "function": {

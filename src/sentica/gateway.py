@@ -744,12 +744,12 @@ def _strings(value: object) -> list[str]:
         return [value] if value else []
     if isinstance(value, dict):
         found: list[str] = []
-        for item in value.values():
+        for item in cast(dict[object, object], value).values():
             found.extend(_strings(item))
         return found
     if isinstance(value, list):
         found = []
-        for item in value:
+        for item in cast(list[object], value):
             found.extend(_strings(item))
         return found
     return []
