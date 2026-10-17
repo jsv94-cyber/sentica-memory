@@ -109,6 +109,8 @@ def test_workflow_job_builds_schema_as_the_ddl_role() -> None:
     assert "tests/sentica/test_m2_" in text_value
     assert "build-default-image" in text_value
     assert "test-gvisor-smoke" in text_value
+    assert "gvisor.tar.bz2" in text_value
+    assert "sha512sum -c gvisor.tar.bz2.sha512" in text_value
     assert "needs.build-default-image.result" in text_value
     assert "needs.test-gvisor-smoke.result" in text_value
 

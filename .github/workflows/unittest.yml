@@ -331,12 +331,14 @@ jobs:
           arch=$(uname -m)
           tmp=$(mktemp -d)
           url="https://storage.googleapis.com/gvisor/releases/release/latest/${arch}"
-          curl -fsSL -o "$tmp/runsc" "$url/runsc"
-          curl -fsSL -o "$tmp/runsc.sha512" "$url/runsc.sha512"
-          (cd "$tmp" && sha512sum -c runsc.sha512)
-          sudo install -m 0755 "$tmp/runsc" /usr/local/bin/runsc
-          sudo runsc install
-          sudo systemctl restart docker
+          # The standalone runsc object 404s. The release tarball carries runsc
+          # and the gvisor-bin sidecars, which have to stay next to it.
+          curl -fsSL -o "$tmp/gvisor.tar.bz2" "$url/gvisor.tar.bz2"
+          curl -fsSL -o "$tmp/gvisor.tar.bz2.sha512" "$url/gvisor.tar.bz2.sha512"
+          (cd "$tmp" && sha512sum -c gvisor.tar.bz2.sha512)
+          sudo tar -xjf "$tmp/gvisor.tar.bz2" -C /usr/local/bin
+          sudo /usr/local/bin/runsc install
+          sudo systemctl reload docker
           docker info | grep -i runsc
 
       - name: Run the gVisor smoke subset

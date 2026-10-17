@@ -112,10 +112,11 @@ docker compose -f docker-compose.sentica.yml -f docker-compose.gvisor.yml up -d 
 ```
 
 That override requires the `runsc` runtime on the Docker daemon. CI job
-`test-gvisor-smoke` installs `runsc` on the runner and runs the smoke
-subset with `SENTICA_GVISOR=1`: egress denied, read-only root, non-root
-Redis, and no `NET_ADMIN`. The full two-instance proof stays on the default
-runtime in `test-m1-stack`. `publish-a-api`, `publish-a-proxy`,
+`test-gvisor-smoke` downloads `gvisor.tar.bz2` for the runner architecture,
+checks `gvisor.tar.bz2.sha512`, installs `runsc` with its sidecar binaries,
+and runs the smoke subset with `SENTICA_GVISOR=1`: egress denied, read-only
+root, non-root Redis, and no `NET_ADMIN`. The full two-instance proof stays
+on the default runtime in `test-m1-stack`. `publish-a-api`, `publish-a-proxy`,
 `publish-b-api`, and `publish-b-proxy` are proof-only. Each runs as uid
 65534, read-only, and forwards exactly one port. They are not part of the
 instance.
