@@ -10,14 +10,17 @@ seccomp profile stays on. Do not disable seccomp.
 
 ## API
 
-Create the instance network once. The API, deriver, and migrate containers
-join it. `10.8.0.4` below is the host address the broker uses, not a
-container address on this network.
+Create the instance network once. The API, deriver, migrate, certificate
+proxy, and model gateway containers join it. `10.8.0.4` is the host
+address the broker uses. It is not an address on this bridge. The subnet
+is `10.8.0.8/29` (`10.8.0.8` through `10.8.0.15`). The bridge gateway is
+`10.8.0.9`. Each container below has a fixed `--ip` in that range.
 
 ```bash
 docker network create \
   --driver bridge \
-  --subnet 10.8.0.0/24 \
+  --subnet 10.8.0.8/29 \
+  --gateway 10.8.0.9 \
   sentica-instance
 ```
 
@@ -31,6 +34,7 @@ docker run --rm \
   --security-opt no-new-privileges:true \
   --runtime runsc \
   --network sentica-instance \
+  --ip 10.8.0.10 \
   -p 10.8.0.4:8000:8000 \
   -v /run/sentica/certs/client.crt:/certs/client.crt:ro \
   -v /run/sentica/certs/client.key:/certs/client.key:ro \
@@ -64,6 +68,7 @@ docker run --rm \
   --security-opt no-new-privileges:true \
   --runtime runsc \
   --network sentica-instance \
+  --ip 10.8.0.11 \
   -v /run/sentica/certs/client.crt:/certs/client.crt:ro \
   -v /run/sentica/certs/client.key:/certs/client.key:ro \
   -v /run/sentica/certs/ca.crt:/certs/ca.crt:ro \
@@ -89,6 +94,7 @@ docker run --rm \
   --security-opt no-new-privileges:true \
   --runtime runsc \
   --network sentica-instance \
+  --ip 10.8.0.12 \
   -v /run/sentica/certs/client.crt:/certs/client.crt:ro \
   -v /run/sentica/certs/client.key:/certs/client.key:ro \
   -v /run/sentica/certs/ca.crt:/certs/ca.crt:ro \
@@ -96,6 +102,49 @@ docker run --rm \
   --env-file /run/sentica/migrate.env \
   --entrypoint /app/docker/migrate-entrypoint.sh \
   sentica-memory:0.1.0
+```
+
+## Certificate proxy
+
+The proxy listens on `10.8.0.13:6432` for the API, the deriver, and
+migrate. It is not published on the host. Postgres is on the internal
+`db` network, not on `10.8.0.4` and not on this bridge. A `RETURN` for
+that Postgres address has to be inserted before the proxy `DROP` below.
+Do not return the public internet.
+
+```bash
+docker run --rm \
+  --name sentica-memory-proxy \
+  --read-only \
+  --cap-drop ALL \
+  --security-opt no-new-privileges:true \
+  --runtime runsc \
+  --network sentica-instance \
+  --ip 10.8.0.13 \
+  -v /run/sentica/certs/proxy.crt:/certs/proxy.crt:ro \
+  -v /run/sentica/certs/proxy.key:/certs/proxy.key:ro \
+  -v /run/sentica/certs/ca.crt:/certs/ca.crt:ro \
+  --env-file /run/sentica/proxy.env \
+  edoburu/pgbouncer:v1.24.1-p1
+```
+
+## Model gateway
+
+The gateway listens on `10.8.0.14:443` for the API and the deriver. It is
+the only container that may open a new connection to a provider host, and
+only on port 443. Those hosts stay denied for every other container.
+
+```bash
+docker run --rm \
+  --name sentica-memory-gateway \
+  --read-only \
+  --cap-drop ALL \
+  --security-opt no-new-privileges:true \
+  --runtime runsc \
+  --network sentica-instance \
+  --ip 10.8.0.14 \
+  --env-file /run/sentica/gateway.env \
+  sentica-gateway:0.1.0
 ```
 
 ## Key files
@@ -209,21 +258,31 @@ structural.
   (`api.openai.com`, `api.anthropic.com`,
   `generativelanguage.googleapis.com`) and the rest of the public internet.
 
-  On the `10.8.0.0/24` instance network the API container is `10.8.0.10`,
-  the deriver is `10.8.0.11`, the certificate proxy is `10.8.0.5:6432`,
-  and the model gateway is `10.8.0.6:443`. `DOCKER-USER` is the host
-  firewall for traffic that leaves those containers. Established replies
-  return. New connections are allowed only to the proxy and the gateway.
-  Everything else, including the provider hosts above, is dropped:
+  On the `10.8.0.8/29` instance network the API container is `10.8.0.10`,
+  the deriver is `10.8.0.11`, migrate is `10.8.0.12`, the certificate
+  proxy is `10.8.0.13:6432`, and the model gateway is `10.8.0.14:443`.
+  Those are the `--ip` values on the run commands above. `DOCKER-USER` is
+  the host firewall for traffic that leaves those containers. Established
+  replies return. The API, the deriver, and migrate may open the proxy.
+  The API and the deriver may open the gateway. The gateway may open the
+  provider hosts on port 443. Every container address is then dropped, so
+  an address Docker would otherwise assign cannot leave the host.
 
 ```bash
 iptables -A DOCKER-USER -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
-iptables -A DOCKER-USER -s 10.8.0.10/32 -d 10.8.0.5/32 -p tcp --dport 6432 -j RETURN
-iptables -A DOCKER-USER -s 10.8.0.11/32 -d 10.8.0.5/32 -p tcp --dport 6432 -j RETURN
-iptables -A DOCKER-USER -s 10.8.0.10/32 -d 10.8.0.6/32 -p tcp --dport 443 -j RETURN
-iptables -A DOCKER-USER -s 10.8.0.11/32 -d 10.8.0.6/32 -p tcp --dport 443 -j RETURN
+iptables -A DOCKER-USER -s 10.8.0.10/32 -d 10.8.0.13/32 -p tcp --dport 6432 -j RETURN
+iptables -A DOCKER-USER -s 10.8.0.11/32 -d 10.8.0.13/32 -p tcp --dport 6432 -j RETURN
+iptables -A DOCKER-USER -s 10.8.0.12/32 -d 10.8.0.13/32 -p tcp --dport 6432 -j RETURN
+iptables -A DOCKER-USER -s 10.8.0.10/32 -d 10.8.0.14/32 -p tcp --dport 443 -j RETURN
+iptables -A DOCKER-USER -s 10.8.0.11/32 -d 10.8.0.14/32 -p tcp --dport 443 -j RETURN
+iptables -A DOCKER-USER -s 10.8.0.14/32 -p tcp -d api.openai.com --dport 443 -j RETURN
+iptables -A DOCKER-USER -s 10.8.0.14/32 -p tcp -d api.anthropic.com --dport 443 -j RETURN
+iptables -A DOCKER-USER -s 10.8.0.14/32 -p tcp -d generativelanguage.googleapis.com --dport 443 -j RETURN
 iptables -A DOCKER-USER -s 10.8.0.10/32 -j DROP
 iptables -A DOCKER-USER -s 10.8.0.11/32 -j DROP
+iptables -A DOCKER-USER -s 10.8.0.12/32 -j DROP
+iptables -A DOCKER-USER -s 10.8.0.13/32 -j DROP
+iptables -A DOCKER-USER -s 10.8.0.14/32 -j DROP
 ```
 
 Redis runs as the `redis` user. The entry script starts as root only long

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import importlib.util
+import ipaddress
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, cast
@@ -173,10 +175,165 @@ def test_deploy_flags_and_internal_networks() -> None:
     assert "docker network create" in deploy
     assert deploy.count("/run/sentica/certs/client.crt:/certs/client.crt:ro") == 3
     assert deploy.count("/run/sentica/certs/client.key:/certs/client.key:ro") == 3
-    assert deploy.count("/run/sentica/certs/ca.crt:/certs/ca.crt:ro") == 3
+    assert deploy.count("/run/sentica/certs/ca.crt:/certs/ca.crt:ro") == 4
     assert deploy.count("/run/sentica/certs/token.pub:/certs/token.pub:ro") == 3
-    assert "iptables -A DOCKER-USER" in deploy
-    assert "-j DROP" in deploy
+
+
+_BROKER = ipaddress.ip_address("10.8.0.4")
+_REQUIRED_CONTAINERS = (
+    "sentica-memory-api",
+    "sentica-memory-deriver",
+    "sentica-memory-migrate",
+    "sentica-memory-proxy",
+    "sentica-memory-gateway",
+)
+
+
+def _bash_commands(deploy: str) -> list[str]:
+    """Return each continued command inside a bash fence."""
+    commands: list[str] = []
+    for block in re.findall(r"```bash\n(.*?)```", deploy, re.DOTALL):
+        pending: list[str] = []
+        for line in block.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if stripped.endswith("\\"):
+                pending.append(stripped[:-1].strip())
+                continue
+            pending.append(stripped)
+            command = " ".join(part for part in pending if part)
+            pending = []
+            if command:
+                commands.append(command)
+        if pending:
+            command = " ".join(part for part in pending if part)
+            if command:
+                commands.append(command)
+    return commands
+
+
+def _flag(command: str, name: str) -> str | None:
+    matched = re.search(rf"(?:^|\s){re.escape(name)}(?:=|\s+)(\S+)", command)
+    if matched is None:
+        return None
+    return matched.group(1)
+
+
+def _drop_sources(command: str) -> list[ipaddress.IPv4Network]:
+    """Source networks of a DROP that is not limited to one destination."""
+    if not command.startswith("iptables "):
+        return []
+    tokens = command.split()
+    if "DROP" not in tokens or "-s" not in tokens or "-d" in tokens:
+        return []
+    source = tokens[tokens.index("-s") + 1]
+    try:
+        return [ipaddress.ip_network(source, strict=False)]
+    except ValueError:
+        return []
+
+
+def firewall_gaps(deploy: str) -> list[str]:
+    """Container addresses the DROP rules miss, and a subnet on the broker."""
+    gaps: list[str] = []
+    commands = _bash_commands(deploy)
+    subnets: list[ipaddress.IPv4Network] = []
+    for command in commands:
+        if not command.startswith("docker network create"):
+            continue
+        raw = _flag(command, "--subnet")
+        if raw is None:
+            gaps.append("docker network create has no --subnet")
+            continue
+        try:
+            subnet = ipaddress.ip_network(raw, strict=False)
+        except ValueError:
+            gaps.append("docker network create subnet is not an address")
+            continue
+        subnets.append(subnet)
+        if _BROKER in subnet:
+            gaps.append("subnet " + raw + " overlaps the broker 10.8.0.4")
+    drops: list[ipaddress.IPv4Network] = []
+    for command in commands:
+        drops.extend(_drop_sources(command))
+    names: set[str] = set()
+    for command in commands:
+        if not command.startswith("docker run "):
+            continue
+        name = _flag(command, "--name")
+        if name is not None:
+            names.add(name)
+        raw_ip = _flag(command, "--ip")
+        if raw_ip is None:
+            gaps.append((name or "docker run") + " has no --ip")
+            continue
+        try:
+            address = ipaddress.ip_address(raw_ip)
+        except ValueError:
+            gaps.append(raw_ip + " is not an address")
+            continue
+        if not isinstance(address, ipaddress.IPv4Address):
+            gaps.append(raw_ip + " is not an IPv4 address")
+            continue
+        if subnets and not any(address in subnet for subnet in subnets):
+            gaps.append(raw_ip + " is outside the bridge subnet")
+        if not any(address in network for network in drops):
+            gaps.append(raw_ip + " is not covered by a DROP rule")
+    for name in _REQUIRED_CONTAINERS:
+        if name not in names:
+            gaps.append(name + " has no run command")
+    return gaps
+
+
+def test_deploy_firewall_covers_every_container_ip() -> None:
+    """Every run-command address is dropped, and the bridge excludes the broker.
+
+    A substring check for ``-j DROP`` still passed when Docker assigned an
+    address the rules do not name, and when the bridge included ``10.8.0.4``.
+    """
+    assert firewall_gaps(_text("docs/DEPLOY.md")) == []
+    open_egress = """```bash
+docker network create --driver bridge --subnet 10.8.0.0/24 sentica-instance
+```
+```bash
+docker run --name sentica-memory-api --ip 10.8.0.10 --network sentica-instance img
+docker run --name sentica-memory-deriver --ip 10.8.0.11 img
+docker run --name sentica-memory-migrate --network sentica-instance img
+docker run --name sentica-memory-proxy --ip 10.8.0.13 img
+docker run --name sentica-memory-gateway --ip 10.8.0.14 img
+```
+```bash
+iptables -A DOCKER-USER -s 10.8.0.10/32 -j DROP
+iptables -A DOCKER-USER -s 10.8.0.11/32 -d 10.8.0.13/32 -j DROP
+```
+"""
+    gaps = firewall_gaps(open_egress)
+    assert any("overlaps the broker" in item for item in gaps)
+    assert any("10.8.0.13" in item for item in gaps)
+    assert any("10.8.0.14" in item for item in gaps)
+    assert any("sentica-memory-migrate has no --ip" in item for item in gaps)
+    limited = firewall_gaps(
+        """```bash
+docker network create --subnet 10.8.0.8/29 sentica-instance
+```
+```bash
+docker run --name sentica-memory-api --ip 10.8.0.10 img
+docker run --name sentica-memory-deriver --ip 10.8.0.11 img
+docker run --name sentica-memory-migrate --ip 10.8.0.12 img
+docker run --name sentica-memory-proxy --ip 10.8.0.13 img
+docker run --name sentica-memory-gateway --ip 10.8.0.14 img
+```
+```bash
+iptables -A DOCKER-USER -s 10.8.0.10/32 -d 10.8.0.13/32 -j DROP
+iptables -A DOCKER-USER -s 10.8.0.11/32 -j DROP
+iptables -A DOCKER-USER -s 10.8.0.12/32 -j DROP
+iptables -A DOCKER-USER -s 10.8.0.13/32 -j DROP
+iptables -A DOCKER-USER -s 10.8.0.14/32 -j DROP
+```
+"""
+    )
+    assert any("10.8.0.10" in item and "DROP" in item for item in limited)
 
 
 def test_dockerignore_excludes_bytecode() -> None:
