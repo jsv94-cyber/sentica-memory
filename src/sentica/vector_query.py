@@ -1,8 +1,9 @@
-"""HNSW neighbor order: distance first, then a Python distance cutoff.
+"""HNSW neighbor order: fresh distance first, then stale distance.
 
 Ordering by a boolean before the distance stops Postgres from using the HNSW
-index. Stale and deleted rows stay out of the partial index predicate, and
-the distance cutoff is applied after a bounded candidate set.
+index, so fresh and stale rows are two scans. The fresh scan matches the
+partial index. The stale scan uses the full HNSW index and is appended after
+the fresh rows. Superseded and deleted rows stay out of both.
 
 A filtered HNSW scan stops after ``hnsw.ef_search`` candidates. Iterative
 scan keeps walking the graph until the limit is filled. Sequential scan and
@@ -53,15 +54,43 @@ def current_row_filters() -> tuple[ColumnElement[bool], ...]:
     )
 
 
+def stale_row_filters() -> tuple[ColumnElement[bool], ...]:
+    """Stale rows that are still live. The full HNSW index covers these."""
+    return (
+        models.Document.stale.is_(True),
+        models.Document.deleted_at.is_(None),
+        models.Document.superseded_by.is_(None),
+        models.Document.embedding.isnot(None),
+    )
+
+
+def _distance_page(
+    stmt: Select[tuple[models.Document]],
+    embedding: list[float],
+    limit: int,
+    filters: tuple[ColumnElement[bool], ...],
+) -> Select[tuple[models.Document]]:
+    distance = models.Document.embedding.cosine_distance(embedding)
+    bounded = max(limit, 1) * CANDIDATE_FACTOR
+    return stmt.where(*filters).order_by(distance).limit(bounded)
+
+
 def neighbor_statement(
     stmt: Select[tuple[models.Document]],
     embedding: list[float],
     limit: int,
 ) -> Select[tuple[models.Document]]:
     """Order current rows by cosine distance and keep a bounded candidate set."""
-    distance = models.Document.embedding.cosine_distance(embedding)
-    bounded = max(limit, 1) * CANDIDATE_FACTOR
-    return stmt.where(*current_row_filters()).order_by(distance).limit(bounded)
+    return _distance_page(stmt, embedding, limit, current_row_filters())
+
+
+def stale_neighbor_statement(
+    stmt: Select[tuple[models.Document]],
+    embedding: list[float],
+    limit: int,
+) -> Select[tuple[models.Document]]:
+    """Order stale live rows by cosine distance, after the fresh page."""
+    return _distance_page(stmt, embedding, limit, stale_row_filters())
 
 
 async def apply_hnsw_scan(db: AsyncSession) -> tuple[str, str]:
@@ -96,11 +125,12 @@ async def execute_neighbors(
     embedding: list[float],
     limit: int,
 ) -> list[models.Document]:
-    """Return up to ``limit * CANDIDATE_FACTOR`` neighbors from the HNSW index."""
+    """Return fresh neighbors, then stale ones, from the HNSW indexes."""
     seqscan, sort = await apply_hnsw_scan(db)
     try:
-        result = await db.execute(neighbor_statement(stmt, embedding, limit))
-        return list(result.scalars().all())
+        fresh = await db.execute(neighbor_statement(stmt, embedding, limit))
+        stale = await db.execute(stale_neighbor_statement(stmt, embedding, limit))
+        return list(fresh.scalars().all()) + list(stale.scalars().all())
     finally:
         await _restore_scan(db, seqscan, sort)
 

@@ -62,6 +62,7 @@ release v3.3.0 (`608aec8a928da13c540262ed980c569448fb53ab`).
 | `src/deriver/prompts.py`, `src/utils/summarizer.py`, `src/dreamer/specialists.py` | Tell the model not to infer the banned categories. | M4 |
 | `tests/sentica/test_m4_safety.py` | Category fixtures, provenance, the external card rule, and the optional model check. | M4 |
 | `src/sentica/freshness.py` | Stale flags, superseding, decay, purge, and hard deletion with counts only. | M5 |
+| `src/sentica/vector_query.py` | HNSW neighbor reads. Stale conclusions come back after fresh ones; superseded and deleted rows stay out. | M5 |
 | `migrations/versions/a7d4e2c91b08_conclusion_freshness.py` | Subject, stale, superseded, and weight columns on conclusions. | M5 |
 | `src/routers/subjects.py` | `POST /subjects/{ref}/changed` and `POST /deletions`. | M5 |
 | `tests/sentica/test_m5_freshness.py` | Changed subjects, supersede, decay, purge, and deletion. | M5 |
