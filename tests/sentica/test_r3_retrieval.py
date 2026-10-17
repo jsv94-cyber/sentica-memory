@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 
 from sqlalchemy import func, select, text
@@ -57,8 +58,124 @@ _FROZEN_MIGRATIONS = {
 }
 
 
+def _call_name(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    return None
+
+
+def _owns_transaction(test: ast.AST) -> bool:
+    return (
+        isinstance(test, ast.Call)
+        and _call_name(test.func) == "_caller_owns_transaction"
+    )
+
+
+def _constant_text(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return None
+
+
+def _every_call_passes_true(tree: ast.AST, func_name: str, param: str) -> bool:
+    """True when each call of ``func_name`` passes ``param=True``."""
+    seen = False
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or _call_name(node.func) != func_name:
+            continue
+        seen = True
+        passed = False
+        for keyword in node.keywords:
+            if keyword.arg != param:
+                continue
+            if isinstance(keyword.value, ast.Constant) and keyword.value.value is True:
+                passed = True
+        if not passed:
+            return False
+    return seen
+
+
+def _index_call_is_concurrent(
+    node: ast.Call,
+    funcs: list[ast.FunctionDef | ast.AsyncFunctionDef],
+    tree: ast.AST,
+) -> bool:
+    for keyword in node.keywords:
+        if keyword.arg != "postgresql_concurrently":
+            continue
+        value = keyword.value
+        if isinstance(value, ast.Constant) and value.value is True:
+            return True
+        name = _call_name(value)
+        if name is None or not funcs:
+            return False
+        params = [arg.arg for arg in (*funcs[-1].args.args, *funcs[-1].args.kwonlyargs)]
+        if name not in params:
+            return False
+        return _every_call_passes_true(tree, funcs[-1].name, name)
+    return False
+
+
+def _nonconcurrent_indexes(source: str) -> list[str]:
+    """Index builds outside the caller-transaction fallback that are not concurrent.
+
+    A plain ``op.create_index`` inside ``if _caller_owns_transaction()`` is
+    the autocommit fallback and is allowed. Every other ``op.create_index``
+    must pass ``postgresql_concurrently=True``, or a parameter that every
+    call site sets to True. A SQL string that starts a ``CREATE INDEX`` must
+    include ``CONCURRENTLY``. Docstrings that only mention the words are left
+    alone because they do not start with the statement.
+    """
+    tree = ast.parse(source)
+    problems: list[str] = []
+
+    class _Checker(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.funcs: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            self.funcs.append(node)
+            self.generic_visit(node)
+            self.funcs.pop()
+
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+            self.visit_FunctionDef(node)
+
+        def visit_If(self, node: ast.If) -> None:
+            if _owns_transaction(node.test):
+                for stmt in node.orelse:
+                    self.visit(stmt)
+                return
+            self.generic_visit(node)
+
+        def visit_Call(self, node: ast.Call) -> None:
+            func = node.func
+            if (
+                isinstance(func, ast.Attribute)
+                and func.attr == "create_index"
+                and _call_name(func.value) == "op"
+                and not _index_call_is_concurrent(node, self.funcs, tree)
+            ):
+                label = _constant_text(node.args[0]) if node.args else None
+                problems.append(label or "op.create_index line " + str(node.lineno))
+            self.generic_visit(node)
+
+        def visit_Constant(self, node: ast.Constant) -> None:
+            if isinstance(node.value, str):
+                stripped = " ".join(node.value.split()).upper()
+                starts_index = stripped.startswith(
+                    ("CREATE INDEX", "CREATE UNIQUE INDEX")
+                )
+                if starts_index and "CONCURRENTLY" not in stripped:
+                    problems.append(stripped.split(" ON ", 1)[0])
+            self.generic_visit(node)
+
+    _Checker().visit(tree)
+    return problems
+
+
 def test_new_index_migrations_use_create_index_concurrently() -> None:
-    """Applied migrations stay frozen. A later index build is concurrent."""
+    """Applied migrations stay frozen. Each later index build is concurrent."""
     root = Path("migrations/versions")
     seen_new = False
     for path in sorted(root.glob("*.py")):
@@ -66,14 +183,48 @@ def test_new_index_migrations_use_create_index_concurrently() -> None:
             continue
         seen_new = True
         source = path.read_text(encoding="utf-8")
-        creates = "op.create_index" in source or "CREATE INDEX" in source
-        if not creates:
-            continue
-        assert (
-            "postgresql_concurrently=True" in source
-            or "CREATE INDEX CONCURRENTLY" in source
-        ), path.name
+        found = _nonconcurrent_indexes(source)
+        assert not found, path.name + ": " + ", ".join(found)
     assert seen_new
+
+
+def test_index_guard_rejects_a_plain_index_beside_a_concurrent_one() -> None:
+    """One concurrent build must not hide a second plain build."""
+    source = (
+        "def upgrade():\n"
+        "    op.create_index(\n"
+        "        'ix_ok', 'documents', ['embedding'],\n"
+        "        postgresql_concurrently=True,\n"
+        "    )\n"
+        "    op.create_index('ix_plain', 'documents', ['embedding'])\n"
+        "    statement = 'CREATE INDEX ix_sql ON documents (embedding)'\n"
+    )
+    found = _nonconcurrent_indexes(source)
+    assert "ix_plain" in found
+    assert "CREATE INDEX IX_SQL" in found
+    assert "ix_ok" not in found
+
+
+def test_index_guard_allows_the_caller_transaction_fallback() -> None:
+    """The plain build inside the owned-transaction branch stays allowed."""
+    source = (
+        "def _caller_owns_transaction():\n"
+        "    return True\n"
+        "\n"
+        "def _create_index(*, concurrently):\n"
+        "    op.create_index(\n"
+        "        'ix_current', 'documents', ['embedding'],\n"
+        "        postgresql_concurrently=concurrently,\n"
+        "    )\n"
+        "\n"
+        "def upgrade():\n"
+        '    """A plain CREATE INDEX is the fallback."""\n'
+        "    if _caller_owns_transaction():\n"
+        "        op.create_index('ix_current', 'documents', ['embedding'])\n"
+        "        return\n"
+        "    _create_index(concurrently=True)\n"
+    )
+    assert _nonconcurrent_indexes(source) == []
 
 
 async def _plan(db_session: AsyncSession, stmt: Select[tuple[models.Document]]) -> str:
