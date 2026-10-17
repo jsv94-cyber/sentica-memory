@@ -79,9 +79,47 @@ async def test_budget_reserve_and_charge_are_one_script(
         assert redis.store[_total_key("tenant-a")] == "10"
         assert redis.commands.count("EVAL") >= 2
         assert "INCRBY" not in redis.commands
-        assert _async_client() is _async_client()
+        assert await _async_client() is await _async_client()
     finally:
         redis.close()
+
+
+async def test_a_new_redis_url_closes_the_old_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The client for the previous URL cannot open another connection."""
+    from redis.exceptions import MaxConnectionsError
+
+    from src.sentica.gateway import (
+        _async_client,  # pyright: ignore[reportPrivateUsage]
+        _drop_async_pool,  # pyright: ignore[reportPrivateUsage]
+        reset_token_counters,
+    )
+    from tests.sentica.resp_redis import RespRedis  # noqa: I001
+
+    first = RespRedis()
+    second = RespRedis()
+    try:
+        monkeypatch.setenv("SENTICA_GATEWAY_REDIS_URL", first.url)
+        reset_token_counters()
+        old = await _async_client()
+        assert old is not None
+        assert await old.ping() is True
+        monkeypatch.setenv("SENTICA_GATEWAY_REDIS_URL", second.url)
+        new = await _async_client()
+        assert new is not old
+        with pytest.raises(MaxConnectionsError):
+            await old.ping()
+        assert await new.ping() is True
+    finally:
+        try:
+            current = await _async_client()
+            if current is not None:
+                await current.aclose(close_connection_pool=True)
+        finally:
+            _drop_async_pool()
+            first.close()
+            second.close()
 
 
 async def test_concurrent_holds_stay_inside_a_100_token_budget(

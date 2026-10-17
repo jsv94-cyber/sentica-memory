@@ -208,18 +208,42 @@ def _sync_client() -> Any | None:
     return connect(url, decode_responses=True, protocol=2, socket_timeout=2.0)
 
 
-def _async_client() -> Any | None:
+async def _close_async_client(client: Any) -> None:
+    """Close a Redis client so a later command cannot open a new connection.
+
+    ``aclose`` drops the sockets the pool already holds. This redis client
+    then builds a fresh socket on the next command, which would keep talking
+    to the URL that was just replaced. Emptying the pool and setting its
+    connection cap to zero makes that command fail.
+    """
+    try:
+        await client.aclose(close_connection_pool=True)
+    finally:
+        pool = getattr(client, "connection_pool", None)
+        if pool is not None:
+            reset = getattr(pool, "reset", None)
+            if reset is not None:
+                reset()
+            if hasattr(pool, "max_connections"):
+                pool.max_connections = 0
+
+
+async def _async_client() -> Any | None:
     """Return the pooled async client for the current Redis URL.
 
-    A new URL replaces the pool. The client is not closed here: closing it
-    closes the pool.
+    A different URL closes the previous client before the pool is replaced.
     """
     global _async_pool
     url = _redis_url()
+    previous = _async_pool
+    if previous is not None and (url is None or previous[0] != url):
+        _async_pool = None
+        await _close_async_client(previous[1])
+        previous = None
     if url is None:
         return None
-    if _async_pool is not None and _async_pool[0] == url:
-        return _async_pool[1]
+    if previous is not None:
+        return previous[1]
     import redis.asyncio as aioredis
 
     connect = cast(Callable[..., Any], aioredis.Redis.from_url)
@@ -307,7 +331,7 @@ async def _reserve(tenant: str, purpose: str, hold: int) -> int:
         return 0
     if hold < 1:
         hold = 1
-    client = _async_client()
+    client = await _async_client()
     if client is None:
         raise GatewayUnavailable(
             "Refusing to call: a gateway budget is set and Redis is not configured"
@@ -339,7 +363,7 @@ async def _settle(tenant: str, purpose: str, actual: int, hold: int) -> None:
     if actual < 0:
         actual = 0
     total_limit, purpose_limit = _budgets(purpose)
-    client = _async_client()
+    client = await _async_client()
     if client is None:
         if total_limit is not None or purpose_limit is not None:
             raise GatewayUnavailable(

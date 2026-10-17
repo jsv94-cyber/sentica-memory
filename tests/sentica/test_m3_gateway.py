@@ -911,7 +911,11 @@ async def test_unavailable_statuses_and_a_charge_failure_keep_the_completion(
             await _call("summary.short", "summary")
     gateway.status = 200
     monkeypatch.setenv("SENTICA_GATEWAY_DAILY_TOKEN_BUDGET", "10")
-    monkeypatch.setattr("src.sentica.gateway._async_client", lambda: None)
+
+    async def _no_redis() -> None:
+        return None
+
+    monkeypatch.setattr("src.sentica.gateway._async_client", _no_redis)
     with pytest.raises(GatewayUnavailable):
         await _call("summary.short", "summary")
     monkeypatch.delenv("SENTICA_GATEWAY_DAILY_TOKEN_BUDGET")
