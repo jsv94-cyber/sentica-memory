@@ -90,6 +90,13 @@ def test_pin_is_recorded() -> None:
     assert "docker-compose.yml" in _text("FORK_CHANGES.md")
 
 
+def test_progress_records_the_local_hindsight_branch() -> None:
+    progress = _text("PROGRESS.md")
+    assert "No `spike-hindsight` branch was created." not in progress
+    assert "A local-only `spike-hindsight` branch exists." in progress
+    assert "The bake-off was cancelled 2026-10-17." in progress
+
+
 def test_new_docs_have_no_em_dash() -> None:
     for relative in (
         "docs/MAP.md",

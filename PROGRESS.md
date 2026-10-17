@@ -441,7 +441,7 @@ gVisor result, measured on Actions (this host has no Docker daemon):
 
 Decisions:
 
-- The Hindsight spike stays cancelled. No `spike-hindsight` branch was created.
+- A local-only `spike-hindsight` branch exists. The bake-off was cancelled 2026-10-17.
 - The runtime-role pin is 94 collected node ids in `tests/sentica/rls_job.py`. Four isolation node ids were added. Existing ids stayed.
 - `.review/M2-summary.md` deferral note stays where it is.
 
