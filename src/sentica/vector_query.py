@@ -33,14 +33,14 @@ _MAX_SCAN_TUPLES = "20000"
 _EF_SEARCH = "40"
 _HNSW_SCAN_SQL = text(
     "SELECT set_config('hnsw.iterative_scan', :scan, true), "
-    "set_config('hnsw.max_scan_tuples', :tuples, true), "
-    "set_config('hnsw.ef_search', :ef, true), "
-    "set_config('enable_seqscan', 'off', true), "
-    "set_config('enable_sort', 'off', true)"
+    + "set_config('hnsw.max_scan_tuples', :tuples, true), "
+    + "set_config('hnsw.ef_search', :ef, true), "
+    + "set_config('enable_seqscan', 'off', true), "
+    + "set_config('enable_sort', 'off', true)"
 )
 _RESTORE_SCAN_SQL = text(
     "SELECT set_config('enable_seqscan', :seqscan, true), "
-    "set_config('enable_sort', :sort, true)"
+    + "set_config('enable_sort', :sort, true)"
 )
 
 

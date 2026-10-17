@@ -107,6 +107,7 @@ async def test_a_new_redis_url_closes_the_old_pool(
         assert await old.ping() is True
         monkeypatch.setenv("SENTICA_GATEWAY_REDIS_URL", second.url)
         new = await _async_client()
+        assert new is not None
         assert new is not old
         with pytest.raises(MaxConnectionsError):
             await old.ping()
@@ -127,6 +128,8 @@ async def test_concurrent_holds_stay_inside_a_100_token_budget(
 ) -> None:
     """Ten in-flight holds of 40 cannot spend a 100-token budget past 80."""
     import asyncio
+    from collections.abc import Callable
+    from typing import Any, cast
 
     import redis.asyncio as aioredis
 
@@ -139,7 +142,8 @@ async def test_concurrent_holds_stay_inside_a_100_token_budget(
     )
 
     url = "redis://127.0.0.1:6379/15"
-    client = aioredis.Redis.from_url(url, decode_responses=True, protocol=2)
+    connect = cast(Callable[..., Any], aioredis.Redis.from_url)
+    client = connect(url, decode_responses=True, protocol=2)
     tenant = "budget-hold"
     try:
         await client.ping()

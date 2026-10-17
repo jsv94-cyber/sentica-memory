@@ -134,12 +134,15 @@ def _nonconcurrent_indexes(source: str) -> list[str]:
             self.funcs: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
 
         def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            self._push(node)
+
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+            self._push(node)
+
+        def _push(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
             self.funcs.append(node)
             self.generic_visit(node)
             self.funcs.pop()
-
-        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-            self.visit_FunctionDef(node)
 
         def visit_If(self, node: ast.If) -> None:
             if _owns_transaction(node.test):
@@ -259,12 +262,14 @@ def _biased_embedding_sql(dimensions: int) -> str:
     zeros = ",".join(["0"] * (dimensions - 16))
     return (
         "'[' || (SELECT string_agg("
-        "CASE WHEN i = 1 AND g % 12 <> 0 THEN "
-        "(get_byte(decode(md5(g::text || ':' || i::text), 'hex'), 0)::float8 "
-        "/ 255.0) * 0.2 + 0.8 ELSE "
-        "(get_byte(decode(md5(g::text || ':' || i::text), 'hex'), 0)::float8 "
-        "/ 255.0) * 0.2 END::text, ',' ORDER BY i) "
-        "FROM generate_series(1, 16) AS i) || '," + zeros + "]'"
+        + "CASE WHEN i = 1 AND g % 12 <> 0 THEN "
+        + "(get_byte(decode(md5(g::text || ':' || i::text), 'hex'), 0)::float8 "
+        + "/ 255.0) * 0.2 + 0.8 ELSE "
+        + "(get_byte(decode(md5(g::text || ':' || i::text), 'hex'), 0)::float8 "
+        + "/ 255.0) * 0.2 END::text, ',' ORDER BY i) "
+        + "FROM generate_series(1, 16) AS i) || ',"
+        + zeros
+        + "]'"
     )
 
 
@@ -348,16 +353,16 @@ async def test_filtered_hnsw_returns_a_full_page_at_10k_rows(
     await db_session.execute(
         text(
             "INSERT INTO documents (id, content, observer, observed, "
-            "workspace_name, embedding, stale, level, internal_metadata) "
-            "SELECT substr(md5(g::text || :salt), 1, 21), 'row ' || g, "
-            "CASE WHEN g % 2 = 0 THEN :p0 ELSE :p1 END, "
-            "CASE WHEN g % 2 = 0 THEN :p0 ELSE :p1 END, "
-            "CASE WHEN g % 12 = 0 THEN :w0 WHEN g % 3 = 0 THEN :w1 "
-            "WHEN g % 3 = 1 THEN :w2 ELSE :w3 END, "
+            + "workspace_name, embedding, stale, level, internal_metadata) "
+            + "SELECT substr(md5(g::text || :salt), 1, 21), 'row ' || g, "
+            + "CASE WHEN g % 2 = 0 THEN :p0 ELSE :p1 END, "
+            + "CASE WHEN g % 2 = 0 THEN :p0 ELSE :p1 END, "
+            + "CASE WHEN g % 12 = 0 THEN :w0 WHEN g % 3 = 0 THEN :w1 "
+            + "WHEN g % 3 = 1 THEN :w2 ELSE :w3 END, "
             + "CAST("
             + _biased_embedding_sql(dimensions)
             + " AS vector), false, 'explicit', '{}'::jsonb "
-            "FROM generate_series(1, 10000) AS g"
+            + "FROM generate_series(1, 10000) AS g"
         ),
         {
             "salt": target.name,
@@ -428,10 +433,10 @@ async def test_neighbor_scan_after_a_large_delete_returns_a_full_page(
     await db_session.execute(
         text(
             "INSERT INTO documents (id, content, observer, observed, "
-            "workspace_name, embedding, stale, level, internal_metadata) "
-            "SELECT substr(md5('dead' || g::text), 1, 21), 'dead ' || g, "
-            ":observer, :observed, :workspace, CAST(:vector AS vector), "
-            "false, 'explicit', '{}'::jsonb FROM generate_series(1, 1500) AS g"
+            + "workspace_name, embedding, stale, level, internal_metadata) "
+            + "SELECT substr(md5('dead' || g::text), 1, 21), 'dead ' || g, "
+            + ":observer, :observed, :workspace, CAST(:vector AS vector), "
+            + "false, 'explicit', '{}'::jsonb FROM generate_series(1, 1500) AS g"
         ),
         {
             "observer": "p0",
@@ -461,10 +466,10 @@ async def test_neighbor_scan_after_a_large_delete_returns_a_full_page(
     await db_session.execute(
         text(
             "INSERT INTO documents (id, content, observer, observed, "
-            "workspace_name, embedding, stale, level, internal_metadata) "
-            "SELECT substr(md5('live' || g::text), 1, 21), 'live ' || g, "
-            ":observer, :observed, :workspace, CAST(:vector AS vector), "
-            "false, 'explicit', '{}'::jsonb FROM generate_series(1, 40) AS g"
+            + "workspace_name, embedding, stale, level, internal_metadata) "
+            + "SELECT substr(md5('live' || g::text), 1, 21), 'live ' || g, "
+            + ":observer, :observed, :workspace, CAST(:vector AS vector), "
+            + "false, 'explicit', '{}'::jsonb FROM generate_series(1, 40) AS g"
         ),
         {
             "observer": "p0",
