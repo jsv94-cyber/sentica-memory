@@ -357,11 +357,14 @@ jobs:
           set -eu
           arch=$(uname -m)
           tmp=$(mktemp -d)
-          url="https://storage.googleapis.com/gvisor/releases/release/latest/${arch}"
+          release=20261012
+          url="https://storage.googleapis.com/gvisor/releases/release/${release}/${arch}"
           # The standalone runsc object 404s. The release tarball carries runsc
           # and the gvisor-bin sidecars, which have to stay next to it.
           curl -fsSL -o "$tmp/gvisor.tar.bz2" "$url/gvisor.tar.bz2"
-          curl -fsSL -o "$tmp/gvisor.tar.bz2.sha512" "$url/gvisor.tar.bz2.sha512"
+          hash=$(awk -v arch="$arch" '$2 == arch {print $1}' docker/sentica/runsc-20261012.sha512)
+          test -n "$hash"
+          printf '%s  gvisor.tar.bz2\n' "$hash" > "$tmp/gvisor.tar.bz2.sha512"
           (cd "$tmp" && sha512sum -c gvisor.tar.bz2.sha512)
           sudo tar -xjf "$tmp/gvisor.tar.bz2" -C /usr/local/bin
           sudo /usr/local/bin/runsc install
@@ -373,7 +376,7 @@ jobs:
           SENTICA_GVISOR: "1"
         run: |
           uv run pytest tests/sentica/test_m1_stack.py -n0 --tb=short -k \
-            "test_api_and_deriver_cannot_reach_the_internet or test_root_filesystem_is_read_only or test_redis_runs_as_a_non_root_user or test_no_container_has_net_admin"
+            "test_api_and_deriver_cannot_reach_the_internet or test_root_filesystem_is_read_only or test_redis_runs_as_a_non_root_user or test_no_container_has_net_admin or test_gvisor_services_use_runsc"
 
   # Status check for branch protection rules
   # This job always runs and reports success only if all required jobs pass

@@ -1965,6 +1965,52 @@ def test_no_container_has_net_admin(stack: Path) -> None:
             assert "ALL" in dropped, service
 
 
+def _runsc_service_names(overlay: str) -> list[str]:
+    """Service names in the gVisor overlay whose runtime is runsc."""
+    current = ""
+    found: list[str] = []
+    for line in overlay.splitlines():
+        if line.startswith("  ") and not line.startswith("   ") and line.endswith(":"):
+            current = line.strip()[:-1]
+        if line.strip() == "runtime: runsc" and current:
+            found.append(current)
+    return found
+
+
+def test_gvisor_services_use_runsc(stack: Path) -> None:
+    """Every service the overlay assigns to runsc is on that runtime.
+
+    The default stack job does not install runsc. It still checks the overlay
+    and the pinned checksum. The gVisor job sets SENTICA_GVISOR and reads
+    HostConfig.Runtime.
+    """
+    del stack
+    overlay = Path("docker-compose.gvisor.yml").read_text(encoding="utf-8")
+    services = _runsc_service_names(overlay)
+    required = {"migrate-a", "migrate-b", "api-a", "api-b", "deriver-a", "deriver-b"}
+    assert required.issubset(services)
+    assert "embeddings" not in services
+    pin = Path("docker/sentica/runsc-20261012.sha512").read_text(encoding="utf-8")
+    assert (
+        "9606445eed5aedfcf05310e7ccef61d994089914c6622fc82624c24d2b18db1b"
+        "2210f40e40a7be27b8b7772859de7d95c501b4eba66423053c960bf671377c5e" in pin
+    )
+    assert (
+        "2fe7425abd16ad6ca649ab9bc3d7e8e76756834d86ffcc08dbe97c82c3b7262a"
+        "7d6401f23632f2b296649cc1408b560416b2ab65a4043aa123fc7b90f3a1b2e2" in pin
+    )
+    workflow = Path(".github/workflows/unittest.yml").read_text(encoding="utf-8")
+    assert "release/latest" not in workflow
+    assert "release/20261012/" in workflow
+    if os.environ.get("SENTICA_GVISOR") != "1":
+        return
+    for service in services:
+        inspected = _run(["docker", "inspect", _service_id(service)], check=True)
+        payload = cast(list[dict[str, Any]], json.loads(inspected.stdout))
+        host = cast(dict[str, Any], payload[0]["HostConfig"])
+        assert host.get("Runtime") == "runsc", service
+
+
 def test_publishers_are_single_port_and_non_root(stack: Path) -> None:
     del stack
     expected = {
