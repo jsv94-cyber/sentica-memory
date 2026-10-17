@@ -523,3 +523,66 @@ async def test_neighbor_scan_after_a_large_delete_returns_a_full_page(
     )
     rows = await execute_neighbors(db_session, scoped, embedding, limit)
     assert len(rows) == page
+
+
+async def test_top_k_keeps_the_closer_stale_row(db_session: AsyncSession) -> None:
+    """The closest row wins top_k even when the scan lists it after fresh rows.
+
+    Fresh neighbors are concatenated ahead of stale ones. Cutting that list
+    at top_k returns a far fresh row and drops the closer stale row.
+    """
+    from src.crud.document import query_documents
+
+    dimensions = settings.EMBEDDING.VECTOR_DIMENSIONS
+    assert dimensions >= 2
+    workspace = models.Workspace(name="hnswrank000000000000")
+    db_session.add(workspace)
+    await db_session.commit()
+    db_session.add(models.Peer(name="p0", workspace_name=workspace.name))
+    await db_session.commit()
+    db_session.add(
+        models.Collection(
+            workspace_name=workspace.name,
+            observer="p0",
+            observed="p0",
+        )
+    )
+    await db_session.commit()
+    query = [1.0] + [0.0] * (dimensions - 1)
+    close = [0.9] + [0.0] * (dimensions - 1)
+    far = [0.0, 1.0] + [0.0] * (dimensions - 2)
+    db_session.add_all(
+        [
+            models.Document(
+                content="far fresh",
+                observer="p0",
+                observed="p0",
+                workspace_name=workspace.name,
+                embedding=far,
+                stale=False,
+                level="explicit",
+                internal_metadata={},
+            ),
+            models.Document(
+                content="close stale",
+                observer="p0",
+                observed="p0",
+                workspace_name=workspace.name,
+                embedding=close,
+                stale=True,
+                level="explicit",
+                internal_metadata={},
+            ),
+        ]
+    )
+    await db_session.commit()
+    found = await query_documents(
+        db_session,
+        workspace.name,
+        "rank",
+        observer="p0",
+        observed="p0",
+        embedding=query,
+        top_k=1,
+    )
+    assert [doc.content for doc in found] == ["close stale"]

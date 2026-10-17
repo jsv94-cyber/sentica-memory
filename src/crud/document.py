@@ -348,6 +348,16 @@ async def fetch_documents_by_ids(
     return [documents[doc_id] for doc_id in document_ids if doc_id in documents]
 
 
+def _cosine_rank(row: models.Document, embedding: list[float]) -> float:
+    """Cosine distance of one stored vector. Missing vectors sort last."""
+    from src.sentica.vector_query import cosine_distance
+
+    vector = row.embedding
+    if vector is None:
+        return float("inf")
+    return cosine_distance([float(item) for item in vector], embedding)
+
+
 async def _query_documents_pgvector(
     db: AsyncSession,
     workspace_name: str,
@@ -373,6 +383,9 @@ async def _query_documents_pgvector(
     from src.sentica.vector_query import execute_neighbors, within_distance
 
     rows = await execute_neighbors(db, stmt, embedding, top_k)
+    # Fresh rows are concatenated ahead of stale ones. Rank by distance
+    # before the cut so a closer stale row is not dropped.
+    rows.sort(key=lambda row: _cosine_rank(row, embedding))
     if max_distance is None:
         return rows[:top_k]
     return within_distance(rows, embedding, max_distance, top_k)
