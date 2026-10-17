@@ -14,6 +14,7 @@ index instead of filtering with a btree and sorting.
 from __future__ import annotations
 
 import math
+from typing import NamedTuple
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -39,9 +40,29 @@ _HNSW_SCAN_SQL = text(
     + "set_config('enable_sort', 'off', true)"
 )
 _RESTORE_SCAN_SQL = text(
-    "SELECT set_config('enable_seqscan', :seqscan, true), "
+    "SELECT set_config('hnsw.iterative_scan', :scan, true), "
+    + "set_config('hnsw.max_scan_tuples', :tuples, true), "
+    + "set_config('hnsw.ef_search', :ef, true), "
+    + "set_config('enable_seqscan', :seqscan, true), "
     + "set_config('enable_sort', :sort, true)"
 )
+
+
+class _ScanState(NamedTuple):
+    """Values to put back after one neighbor scan."""
+
+    iterative: str
+    tuples: str
+    ef: str
+    seqscan: str
+    sort: str
+
+
+def _setting(value: object, default: str) -> str:
+    if value is None:
+        return default
+    text_value = str(value).strip()
+    return text_value or default
 
 
 def current_row_filters() -> tuple[ColumnElement[bool], ...]:
@@ -93,30 +114,49 @@ def stale_neighbor_statement(
     return _distance_page(stmt, embedding, limit, stale_row_filters())
 
 
-async def apply_hnsw_scan(db: AsyncSession) -> tuple[str, str]:
+async def apply_hnsw_scan(db: AsyncSession) -> _ScanState:
     """Make a filtered HNSW scan fill its limit.
 
-    Returns the previous ``enable_seqscan`` and ``enable_sort`` values.
-    ``SET LOCAL`` lasts for the transaction, so callers restore both after the
-    neighbor statement. Turning sort off keeps a btree-plus-sort plan from
-    beating the HNSW index on a selective workspace filter.
+    Returns every setting ``_HNSW_SCAN_SQL`` changes. ``SET LOCAL`` lasts for
+    the transaction, so callers restore all of them after the neighbor
+    statement. Turning sort off keeps a btree-plus-sort plan from beating the
+    HNSW index on a selective workspace filter.
     """
     # Loading the vector type defines the hnsw.* custom variables.
     await db.execute(text("SELECT CAST('[0]' AS vector)"))
+    iterative = await db.scalar(
+        text("SELECT current_setting('hnsw.iterative_scan', true)")
+    )
+    tuples = await db.scalar(
+        text("SELECT current_setting('hnsw.max_scan_tuples', true)")
+    )
+    ef = await db.scalar(text("SELECT current_setting('hnsw.ef_search', true)"))
     seqscan = await db.scalar(text("SELECT current_setting('enable_seqscan')"))
     sort = await db.scalar(text("SELECT current_setting('enable_sort')"))
     await db.execute(
         _HNSW_SCAN_SQL,
         {"scan": _ITERATIVE_SCAN, "tuples": _MAX_SCAN_TUPLES, "ef": _EF_SEARCH},
     )
-    return (
-        "on" if seqscan is None else str(seqscan),
-        "on" if sort is None else str(sort),
+    return _ScanState(
+        iterative=_setting(iterative, "off"),
+        tuples=_setting(tuples, "20000"),
+        ef=_setting(ef, "40"),
+        seqscan=_setting(seqscan, "on"),
+        sort=_setting(sort, "on"),
     )
 
 
-async def _restore_scan(db: AsyncSession, seqscan: str, sort: str) -> None:
-    await db.execute(_RESTORE_SCAN_SQL, {"seqscan": seqscan, "sort": sort})
+async def _restore_scan(db: AsyncSession, state: _ScanState) -> None:
+    await db.execute(
+        _RESTORE_SCAN_SQL,
+        {
+            "scan": state.iterative,
+            "tuples": state.tuples,
+            "ef": state.ef,
+            "seqscan": state.seqscan,
+            "sort": state.sort,
+        },
+    )
 
 
 async def execute_neighbors(
@@ -126,13 +166,13 @@ async def execute_neighbors(
     limit: int,
 ) -> list[models.Document]:
     """Return fresh neighbors, then stale ones, from the HNSW indexes."""
-    seqscan, sort = await apply_hnsw_scan(db)
+    state = await apply_hnsw_scan(db)
     try:
         fresh = await db.execute(neighbor_statement(stmt, embedding, limit))
         stale = await db.execute(stale_neighbor_statement(stmt, embedding, limit))
         return list(fresh.scalars().all()) + list(stale.scalars().all())
     finally:
-        await _restore_scan(db, seqscan, sort)
+        await _restore_scan(db, state)
 
 
 def cosine_distance(left: list[float], right: list[float]) -> float:

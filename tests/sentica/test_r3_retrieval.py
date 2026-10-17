@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import ast
+from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
@@ -13,7 +15,6 @@ from src import models
 from src.config import settings
 from src.sentica.vector_query import (
     CANDIDATE_FACTOR,
-    apply_hnsw_scan,
     execute_neighbors,
     neighbor_statement,
 )
@@ -230,6 +231,28 @@ def test_index_guard_allows_the_caller_transaction_fallback() -> None:
     assert _nonconcurrent_indexes(source) == []
 
 
+async def _plans_during(
+    db_session: AsyncSession,
+    call: Callable[[], Awaitable[list[models.Document]]],
+) -> tuple[list[models.Document], str]:
+    """Explain the neighbor query while ``execute_neighbors`` holds its settings."""
+    plans: list[str] = []
+    original = db_session.execute
+
+    async def _watching(statement: Any, *args: Any, **kwargs: Any) -> Any:
+        if isinstance(statement, Select) and not plans:
+            plans.append(await _plan(db_session, statement))
+        return await original(statement, *args, **kwargs)
+
+    db_session.execute = _watching  # type: ignore[method-assign]
+    try:
+        rows = await call()
+    finally:
+        db_session.execute = original  # type: ignore[method-assign]
+    assert plans, "the neighbor query did not run"
+    return rows, plans[0]
+
+
 async def _plan(db_session: AsyncSession, stmt: Select[tuple[models.Document]]) -> str:
     """EXPLAIN a neighbor statement, casting the distance bind to vector."""
     connection = await db_session.connection()
@@ -393,14 +416,25 @@ async def test_filtered_hnsw_returns_a_full_page_at_10k_rows(
         models.Document.observer == "p0",
         models.Document.observed == "p0",
     )
-    await apply_hnsw_scan(db_session)
-    plan = await _plan(db_session, neighbor_statement(scoped, embedding, limit))
+    await db_session.rollback()
+    plans = await _plans_during(
+        db_session,
+        lambda: execute_neighbors(db_session, scoped, embedding, limit),
+    )
+    rows, plan = plans
     folded = plan.lower()
     assert "index scan" in folded or "bitmap index scan" in folded
     assert "hnsw" in folded
     assert "seq scan" not in folded
-    rows = await execute_neighbors(db_session, scoped, embedding, limit)
     assert len(rows) == page
+    iterative = await db_session.scalar(
+        text("SELECT current_setting('hnsw.iterative_scan')")
+    )
+    seqscan = await db_session.scalar(text("SELECT current_setting('enable_seqscan')"))
+    sort = await db_session.scalar(text("SELECT current_setting('enable_sort')"))
+    assert iterative == "off"
+    assert seqscan == "on"
+    assert sort == "on"
 
 
 async def test_neighbor_scan_after_a_large_delete_returns_a_full_page(
