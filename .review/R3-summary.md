@@ -25,6 +25,7 @@ Each row is one commit. The test fails if that commit is reverted.
 | Budget check did not hold tokens for an in-flight call | `160e387b` | `test_concurrent_holds_stay_inside_a_100_token_budget` |
 | NET_ADMIN check did not require an unprivileged container | `48417d9e` | `test_no_container_has_net_admin` |
 | gVisor install followed `release/latest` | `a1f84b68`, `9b0c89e2` | `test_gvisor_services_use_runsc` |
+| gVisor runtime check missed exited migrate containers | `1e31cc1d`, `e5ef7dae` | `test_gvisor_runtime_lookup_includes_exited_containers` |
 | Search red-team and RLS policy check were too weak | `b19094db` | `test_http_red_team_hides_the_other_workspace`, `test_workspace_filter_and_rls_policy_are_present` |
 | Deploy commands omitted the network, cert mounts, and egress rules | `d4ea63d8` | `test_deploy_flags_and_internal_networks` |
 | Fork changelog omitted four R3 files | `5d67d186` | `test_fork_changes_lists_the_r3_files` |
@@ -40,7 +41,7 @@ Each row is one commit. The test fails if that commit is reverted.
 
 Local Python suite, ignoring `tests/sentica/test_m1_stack.py`: 3440 passed, 53 skipped, 2 failed, 259.95s. Both failures are `tests/sdk_typescript/test_sdk.py` because `bun` is not installed on this machine.
 
-Local stack suite: `test_stopped_stack_leaves_no_memory_on_disk` runs `sudo grep` over `/var/lib/docker/containers`, and sudo waited for a password, so that test was not finished. The other 30 tests were run with that one deselected: 29 passed, then `test_gvisor_services_use_runsc` failed until the download URL contained `release/20261012/`. After `9b0c89e2` that test passed (1 passed, 30 deselected, 60.27s). `runsc` is not installed here, so `HostConfig.Runtime` was not read. The static overlay, checksum, and URL checks did run.
+Local stack suite: `test_stopped_stack_leaves_no_memory_on_disk` runs `sudo grep` over `/var/lib/docker/containers`, and sudo waited for a password, so that test was not finished. The other 30 tests were run with that one deselected: 29 passed, then `test_gvisor_services_use_runsc` failed until the download URL contained `release/20261012/`. After `9b0c89e2` that test passed (1 passed, 30 deselected, 60.27s). `runsc` is not installed here, so `HostConfig.Runtime` was not read. The static overlay, checksum, and URL checks did run. Actions on `892ae389` failed `test-gvisor-smoke` because `docker compose ps` hides migrate after it exits. `1e31cc1d` passes `-a` on every service lookup. `test_gvisor_runtime_lookup_includes_exited_containers` fails when that flag is removed (confirmed locally) and passes with it (1 passed, 1.10s) without starting the stack.
 
 ## Packaging
 
@@ -61,16 +62,21 @@ Local stack suite: `test_stopped_stack_leaves_no_memory_on_disk` runs `sudo grep
    reach Docker DNS at 127.0.0.11. Result recorded in `PROGRESS.md`. Tests:
    `test_workflow_job_builds_schema_as_the_ddl_role` and
    `test_deploy_flags_and_internal_networks`.
-3. Stack proofs. `tests/sentica/test_m1_stack.py:1896`
+3. Stack proofs. `tests/sentica/test_m1_stack.py:1924`
    `test_api_and_deriver_cannot_reach_the_internet` (egress denied).
-   `tests/sentica/test_m1_stack.py:1917`
+   `tests/sentica/test_m1_stack.py:1945`
    `test_root_filesystem_is_read_only`.
-   `tests/sentica/test_m1_stack.py:1928`
+   `tests/sentica/test_m1_stack.py:1962`
    `test_redis_runs_as_a_non_root_user` (`docker/sentica/redis-entry.sh:18`
    `setpriv --reuid=redis` so pid 1 is the redis user).
-   `tests/sentica/test_m1_stack.py:1942`
-   `test_no_container_has_net_admin`. The same four tests passed under
-   `runsc` in `test-gvisor-smoke`.
+   `tests/sentica/test_m1_stack.py:1976`
+   `test_no_container_has_net_admin`.
+   `tests/sentica/test_m1_stack.py:1901`
+   `test_gvisor_runtime_lookup_includes_exited_containers` requires `ps -a`.
+   `tests/sentica/test_m1_stack.py:2008` `test_gvisor_services_use_runsc`
+   reads `HostConfig.Runtime` when `SENTICA_GVISOR=1`. The four runtime
+   proofs passed under `runsc` in `test-gvisor-smoke` before the exited
+   migrate lookup was fixed.
 4. Deploy notes. `docs/DEPLOY.md:23` publishes the API on `10.8.0.4:8000`
    for the broker. `docs/DEPLOY.md:64` is the one-shot migrate command,
    including `--entrypoint /app/docker/migrate-entrypoint.sh`.
