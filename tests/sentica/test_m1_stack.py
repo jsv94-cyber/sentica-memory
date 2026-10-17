@@ -1898,6 +1898,29 @@ def _service_id(service: str) -> str:
     return ids[0]
 
 
+def test_gvisor_runtime_lookup_includes_exited_containers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The runsc check must see migrate containers after they exit."""
+    captured: list[list[str]] = []
+
+    def fake_compose(
+        args: list[str],
+        *,
+        check: bool = True,
+        stdin: str | None = None,
+        timeout: float | None = None,
+        extra_files: list[str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del check, stdin, timeout, extra_files
+        captured.append(list(args))
+        return subprocess.CompletedProcess(args, 0, stdout="abc123\n", stderr="")
+
+    monkeypatch.setattr(f"{__name__}._compose", fake_compose)
+    assert _service_id("migrate-a") == "abc123"
+    assert captured == [["ps", "-a", "-q", "migrate-a"]]
+
+
 def test_api_and_deriver_cannot_reach_the_internet(stack: Path) -> None:
     """Internal networks have no route to the public internet."""
     del stack
