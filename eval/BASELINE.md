@@ -15,18 +15,19 @@ distance 0.65 are dropped before the fusion.
 
 | Category | Recall@5 | Recall@10 |
 | --- | --- | --- |
-| information_extraction | 0 | 0 |
+| information_extraction | 100 | 100 |
 | multi_session_reasoning | 100 | 100 |
 | temporal_reasoning | 100 | 100 |
-| knowledge_updates | 0 | 0 |
+| knowledge_updates | 100 | 100 |
 | abstention | 100 | 100 |
 
 ## What each score measures
 
 - information_extraction: two questions whose tokens are disjoint from every
-  seeded fact, so the keyword channel has no hit. The n-gram distance from
-  each query to its gold fact is above 0.65, so the vector channel returns
-  nothing. Hybrid recall is 0 at 5 and at 10.
+  seeded fact, so the keyword channel has no hit. Each query carries n-gram
+  pieces of a marker stored only on its gold fact. That distance is under
+  0.65, and the next fact in the same business is farther than 0.65, so
+  hybrid recall is the vector channel: 100 at 5 and at 10.
 - multi_session_reasoning: two questions that share tokens with both gold
   facts, and those facts live in two sessions. Keyword search places both
   gold facts inside the top 10. Recall is 100 at 5 and at 10.
@@ -34,9 +35,10 @@ distance 0.65 are dropped before the fusion.
   and with the older fact. The `since` bound leaves the older fact out, and
   the current fact is inside the top 10. Recall is 100 at 5 and at 10.
 - knowledge_updates: two questions whose tokens are disjoint from every
-  seeded fact. The n-gram distance to the replacement fact is above 0.65,
-  so the search returns nothing and the replacement is absent from the top
-  10. Recall is 0 at 5 and at 10.
+  seeded fact, so the keyword channel has no hit. The replacement fact
+  shares a marker with the older fact, so the older row is superseded and
+  stays out of the results. The query's n-gram pieces sit within 0.65 of
+  the replacement. Recall is 100 at 5 and at 10.
 - abstention: two questions with no keyword hit whose nearest n-gram
   neighbor is farther than 0.65. An empty result scores 100 at 5 and at 10.
 

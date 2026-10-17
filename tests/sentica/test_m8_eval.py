@@ -410,6 +410,49 @@ async def test_retrieval_eval_matches_baseline(db_session: AsyncSession) -> None
     assert "PENDING" not in text
 
 
+async def test_blank_vector_channel_misses_the_baseline(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A vector stub that returns nothing drops a category under the gate.
+
+    Information extraction and knowledge updates share no tokens with the
+    seeded facts. With the vector channel removed, those scores fall from
+    100 to 0, which is more than DROP_POINTS under the baseline. A category
+    recorded at 0 could not trip that rule.
+    """
+    from src.sentica import retrieval
+
+    baseline = parse_baseline(_BASELINE.read_text(encoding="utf-8"))
+    for name, scores in baseline.items():
+        assert min(scores) > 2, name
+
+    async def _no_rows(*_args: object, **_kwargs: object) -> list[models.Document]:
+        return []
+
+    monkeypatch.setattr(retrieval, "_vector", _no_rows)
+    businesses, ids = await _seed(db_session)
+    rows: list[tuple[str, float, float]] = []
+    for question in QUESTIONS:
+        found = await _search(
+            db_session,
+            businesses[question.business].name,
+            question.query,
+            question.slot,
+            since=question.since,
+        )
+        retrieved = [item.id for item in found]
+        gold = {ids[key] for key in question.gold}
+        forbidden = {ids[key] for key in question.forbidden}
+        recall5, recall10 = question_scores(
+            retrieved, gold, forbidden, abstain=question.abstain
+        )
+        rows.append((question.category, recall5, recall10))
+    failed = regressions(category_means(rows), parse_baseline(_BASELINE.read_text()))
+    assert failed
+    assert any(item.startswith("information_extraction") for item in failed)
+    assert any(item.startswith("knowledge_updates") for item in failed)
+
+
 @final
 class _Tenant:
     def __init__(self, tenant_id: str) -> None:

@@ -424,7 +424,7 @@ Built:
 - A plain `docker build .` reuses gid 100 when the base image already has the `users` group. CI job `build-default-image` runs that build with no build args.
 - CI job `test-gvisor-smoke` installs `runsc` from `gvisor.tar.bz2` after checking `gvisor.tar.bz2.sha512`, then runs the two-instance smoke subset with `runtime: runsc`. runsc cannot use Docker's embedded DNS at 127.0.0.11, so `docker-compose.gvisor.yml` pins `embeddings` and writes `extra_hosts` for the proxy, Redis, and gateway names.
 - `/ready` caches a successful database check for 5 seconds. The body stays `{"status":"ok"}` or `{"status":"unavailable"}`.
-- Eval embeddings are hashed character n-grams. `eval/BASELINE.md` states what each score measures. `live-eval.yml` is `workflow_dispatch` only.
+- Eval embeddings are hashed character n-grams. Information extraction and knowledge updates score 100 only through the vector channel. `eval/BASELINE.md` states what each score measures. `live-eval.yml` is `workflow_dispatch` only.
 - The isolation red-team runs in `test-m2-rls` over HTTP with signed broker tokens. The collected pin is 94 node ids.
 - Vector search orders fresh rows by cosine distance on the partial HNSW index `ix_documents_embedding_hnsw_current`, then appends stale rows from `ix_documents_embedding_hnsw`. Superseded and deleted rows stay out. A filtered scan sets `hnsw.iterative_scan` to `relaxed_order` so the page fills.
 - Gateway budget reserve and charge are Redis Lua scripts on a pooled client. Invalid gateway environment values refuse startup.

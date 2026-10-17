@@ -87,6 +87,22 @@ def text_embedding(text: str, dimensions: int) -> list[float]:
     return [value / norm for value in buckets]
 
 
+def _shared_marker(seed: str) -> str:
+    """One token that a fact and its vector-only query can share as n-grams."""
+    return seed * 8
+
+
+def _vector_only_query(text: str, seed: str) -> str:
+    """Keep the English question, and add n-gram pieces that are not that token.
+
+    The pieces overlap the fact's marker, so cosine distance falls under the
+    retrieval cutoff. They are not a token of the fact, so keyword search misses.
+    """
+    marker = _shared_marker(seed)
+    parts = [marker[index : index + 6] for index in (0, 6, 12, 18)]
+    return text + " " + " ".join(parts + parts)
+
+
 def _noise() -> tuple[Fact, ...]:
     rows: list[Fact] = []
     for index in range(12):
@@ -106,14 +122,15 @@ def _facts() -> tuple[Fact, ...]:
     return _noise() + (
         Fact(
             "ie-invoice",
-            "harbor glass bills net thirty from the invoice date",
+            "harbor glass bills net thirty from the invoice date "
+            + _shared_marker("bqjwm"),
             0,
             "s-main",
             "harbor",
         ),
         Fact(
             "ie-filters",
-            "fuel strainers sit in cabinet nine",
+            "fuel strainers sit in cabinet nine " + _shared_marker("fkpld"),
             2,
             "s-main",
             "northline",
@@ -180,7 +197,7 @@ def _facts() -> tuple[Fact, ...]:
         ),
         Fact(
             "owner-old",
-            "the owner prefers email for scheduling",
+            "the owner prefers email for scheduling " + _shared_marker("cnhtr"),
             11,
             "s-main",
             "harbor",
@@ -188,7 +205,8 @@ def _facts() -> tuple[Fact, ...]:
         ),
         Fact(
             "owner-new",
-            "the owner does not prefer email and instead wants text messages",
+            "the owner does not prefer email and instead wants text messages "
+            + _shared_marker("cnhtr"),
             11,
             "s-main",
             "harbor",
@@ -197,7 +215,7 @@ def _facts() -> tuple[Fact, ...]:
         ),
         Fact(
             "hours-old",
-            "weekday opening time is seven",
+            "weekday opening time is seven " + _shared_marker("gmwsv"),
             13,
             "s-main",
             "harbor",
@@ -205,7 +223,8 @@ def _facts() -> tuple[Fact, ...]:
         ),
         Fact(
             "hours-new",
-            "weekday opening time is not seven and instead is eight",
+            "weekday opening time is not seven and instead is eight "
+            + _shared_marker("gmwsv"),
             13,
             "s-main",
             "harbor",
@@ -228,7 +247,7 @@ QUESTIONS: tuple[Question, ...] = (
     Question(
         "information_extraction",
         "invoice-terms",
-        "when is payment due for the glazing account",
+        _vector_only_query("when is payment due for the glazing account", "bqjwm"),
         0,
         "harbor",
         gold=("ie-invoice",),
@@ -236,7 +255,7 @@ QUESTIONS: tuple[Question, ...] = (
     Question(
         "information_extraction",
         "filter-cabinet",
-        "which cupboard holds the replacement cartridges",
+        _vector_only_query("which cupboard holds the replacement cartridges", "fkpld"),
         2,
         "northline",
         gold=("ie-filters",),
@@ -280,7 +299,7 @@ QUESTIONS: tuple[Question, ...] = (
     Question(
         "knowledge_updates",
         "owner-contact",
-        "how should staff reach ada",
+        _vector_only_query("how should staff reach ada", "cnhtr"),
         11,
         "harbor",
         gold=("owner-new",),
@@ -289,7 +308,7 @@ QUESTIONS: tuple[Question, ...] = (
     Question(
         "knowledge_updates",
         "opening-time",
-        "start of the business day",
+        _vector_only_query("start of the business day", "gmwsv"),
         13,
         "harbor",
         gold=("hours-new",),
