@@ -42,8 +42,10 @@ the groups at the end of this file. A name not listed here is not read.
 | `SENTICA_GATEWAY_DREAM_MODEL` | Required dream model when gateway mode is on. |
 | `SENTICA_GATEWAY_EMBED_MODEL` | Required embedding model when gateway mode is on. |
 | `SENTICA_GATEWAY_DAILY_TOKEN_BUDGET` | Optional daily token cap. Unset means unlimited. `0` is exhausted. |
-| `SENTICA_GATEWAY_RETRY_ATTEMPTS` | Gateway retries. Default 3. |
-| `SENTICA_GATEWAY_RETRY_WAIT_SECONDS` | Wait between gateway retries. Default 0.05. |
+| `SENTICA_GATEWAY_RETRY_ATTEMPTS` | Gateway retries. Default 3. An invalid value refuses startup. |
+| `SENTICA_GATEWAY_RETRY_WAIT_SECONDS` | Wait between gateway retries. Default 0.05. An invalid value refuses startup. |
+| `SENTICA_GATEWAY_TOKENIZER` | Tiktoken encoding for unknown gateway model names. Default `cl100k_base`. |
+| `SENTICA_GATEWAY_TOKENIZER_ALIASES` | Comma-separated `alias=encoding` pairs, for example `sentica-embed=cl100k_base`. |
 | `SENTICA_API_PORT` | Host port for the local API. Default 8000. |
 | `SENTICA_POSTGRES_PORT` | Host port for the local database. Default 5432. |
 | `SENTICA_REDIS_PORT` | Host port for the local Redis. Default 6379. |
@@ -130,7 +132,12 @@ An optional per-purpose limit is
 `SENTICA_GATEWAY_DREAM_DAILY_TOKEN_BUDGET`, or
 `SENTICA_GATEWAY_EMBED_DAILY_TOKEN_BUDGET`. A purpose limit blocks only that
 purpose. A response that omits usage is charged an estimate, never zero.
-The backstop reserves and then charges, so it can slightly overshoot.
+Reserve reads both counters in one Redis script. Charge increments both
+counters in one Redis script, on a pooled connection. Two reserves can both
+pass before either charge lands, so the backstop can still slightly overshoot.
+An invalid gateway environment value, including
+`SENTICA_GATEWAY_RETRY_ATTEMPTS` and every other `SENTICA_GATEWAY_*` value
+listed above, refuses startup. A blank optional value keeps its default.
 
 When `SENTICA_GATEWAY_TIMEOUT_SECONDS` is unset, each purpose has its own
 default: deriver 120 seconds, dream 180 seconds, dialectic 60 seconds,
@@ -146,6 +153,20 @@ not a positive number is refused.
 `SENTICA_GATEWAY_RETRY_ATTEMPTS` defaults to 3.
 `SENTICA_GATEWAY_RETRY_WAIT_SECONDS` defaults to 0.05. A failed attempt
 retries the same URL and model. It does not fall back to another provider.
+
+Gateway model names such as `sentica-embed` are not tiktoken model names.
+`SENTICA_GATEWAY_TOKENIZER` is the encoding used for those names. The
+default is `cl100k_base`. `SENTICA_GATEWAY_TOKENIZER_ALIASES` maps one
+alias to one encoding (`sentica-embed=cl100k_base`). A known tiktoken model
+still uses `encoding_for_model`. An unknown encoding refuses startup.
+
+Streaming to the gateway is simulated in v1: full completion, then chunked.
+The call waits for the full completion, then chunks that text. The request
+body does not set `stream: true`.
+
+A token may list more than one workspace. It can create resources only in
+its primary workspace (`w`): a workspace, a peer, a session, or a webhook.
+Creating one of those in another workspace named on the token is refused.
 
 ## Message source trust
 

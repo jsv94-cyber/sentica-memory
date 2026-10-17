@@ -1971,6 +1971,35 @@ class TestPollingJitter:
         # A shutdown already signalled must short-circuit the (long) jitter sleep.
         await asyncio.wait_for(qm._sleep_startup_jitter(), timeout=1.0)  # pyright: ignore[reportPrivateUsage]
 
+    @pytest.mark.asyncio
+    async def test_gateway_outage_jitter_is_applied_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The outage sleep uses the already-jittered interval once."""
+        monkeypatch.setattr(settings.DERIVER, "POLLING_JITTER_RATIO", 0.5)
+        monkeypatch.setattr(settings.DERIVER, "POLLING_BACKOFF_ENABLED", False)
+        monkeypatch.setattr(settings.DERIVER, "POLLING_SLEEP_INTERVAL_SECONDS", 4.0)
+        calls = {"n": 0}
+
+        def _uniform(_low: float, high: float) -> float:
+            calls["n"] += 1
+            return high
+
+        monkeypatch.setattr("src.deriver.queue_manager.random.uniform", _uniform)
+        qm = QueueManager()
+        qm._current_poll_interval = 4.0  # pyright: ignore[reportPrivateUsage]
+        qm._gateway_outage_pending = True  # pyright: ignore[reportPrivateUsage]
+        slept: dict[str, float] = {}
+
+        async def _sleep(delay: float) -> None:
+            slept["delay"] = delay
+            qm.shutdown_event.set()
+
+        monkeypatch.setattr("src.deriver.queue_manager.asyncio.sleep", _sleep)
+        await qm.polling_loop()
+        assert slept["delay"] == 6.0
+        assert calls["n"] == 1
+
 
 @pytest.mark.asyncio
 class TestQueueRetry:

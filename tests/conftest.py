@@ -132,6 +132,10 @@ _RLS_JOB_ONLY = frozenset(
     {
         "test_runtime_role_lockdown",
         "test_app_engine_is_the_runtime_role",
+        "test_http_red_team_hides_the_other_workspace",
+        "test_workspace_filter_and_rls_policy_are_present",
+        "test_removed_filter_and_disabled_rls_shows_the_canary",
+        "test_multi_workspace_token_creates_only_in_the_primary",
     }
 )
 
@@ -397,6 +401,10 @@ async def _clear_all_tables(engine: AsyncEngine) -> None:
     the same (near-empty) tables, batched into one round trip, is ~3ms. Tables go
     in reverse dependency order so foreign keys are satisfied without CASCADE.
 
+    DELETE leaves dead entries in an HNSW graph, and the next index scan can
+    miss every live row. ``documents`` and ``message_embeddings`` are vacuumed
+    after the delete so the graphs only contain live rows.
+
     This does not reset identity sequences, so tests must not assert on absolute
     generated id values -- compare against the ids the test itself created.
     """
@@ -412,6 +420,12 @@ async def _clear_all_tables(engine: AsyncEngine) -> None:
         return
 
     statement = "; ".join(f"DELETE FROM {name}" for name in table_names)
+    hnsw_tables = [
+        name
+        for name in table_names
+        if name.rstrip('"').rsplit('"', 1)[-1] in {"documents", "message_embeddings"}
+    ]
+    vacuum = "VACUUM ANALYZE " + ", ".join(hnsw_tables)
     admin = os.environ.get("SENTICA_RLS_ADMIN_DSN", "")
     if admin and os.environ.get("SENTICA_RLS_JOB") == "1":
         # The runtime role cannot see another workspace's rows. Cleanup uses
@@ -421,11 +435,20 @@ async def _clear_all_tables(engine: AsyncEngine) -> None:
         try:
             with sync.begin() as conn:
                 conn.exec_driver_sql(statement)
+            if hnsw_tables:
+                with sync.connect() as conn:
+                    conn = conn.execution_options(isolation_level="AUTOCOMMIT")
+                    conn.exec_driver_sql(vacuum)
         finally:
             sync.dispose()
         return
     async with engine.begin() as conn:
         await conn.exec_driver_sql(statement)
+    if not hnsw_tables:
+        return
+    async with engine.connect() as conn:
+        autocommit = await conn.execution_options(isolation_level="AUTOCOMMIT")
+        await autocommit.exec_driver_sql(vacuum)
 
 
 @pytest_asyncio.fixture(scope="session", autouse=True)

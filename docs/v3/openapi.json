@@ -4967,7 +4967,7 @@
     "/ready": {
       "get": {
         "summary": "Ready Check",
-        "description": "Readiness. The process can serve traffic only when the database answers.",
+        "description": "Readiness. Tokenless, and the body is only the status.\n\nA successful database check is cached for a few seconds.",
         "operationId": "ready_check_ready_get",
         "responses": {
           "200": {

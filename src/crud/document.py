@@ -369,19 +369,13 @@ async def _query_documents_pgvector(
         .where(models.Document.superseded_by.is_(None))
     )
 
-    if max_distance is not None:
-        stmt = stmt.where(
-            models.Document.embedding.cosine_distance(embedding) <= max_distance
-        )
-
     stmt = apply_filter(stmt, models.Document, filters)
-    stmt = stmt.order_by(
-        models.Document.stale.asc(),
-        models.Document.embedding.cosine_distance(embedding),
-    ).limit(top_k)
+    from src.sentica.vector_query import execute_neighbors, within_distance
 
-    result = await db.execute(stmt)
-    return list(result.scalars().all())
+    rows = await execute_neighbors(db, stmt, embedding, top_k)
+    if max_distance is None:
+        return rows[:top_k]
+    return within_distance(rows, embedding, max_distance, top_k)
 
 
 async def query_documents(

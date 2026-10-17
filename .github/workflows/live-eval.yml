@@ -1,0 +1,33 @@
+name: Live eval
+
+# Manual only. Pull requests and pushes do not run this job.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  live-eval:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.3.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: "Set up Python"
+        uses: actions/setup-python@v7
+        with:
+          python-version-file: ".python-version"
+
+      - name: Install the project
+        run: uv sync --all-extras --dev
+
+      - name: Run the live eval against the gateway secret
+        env:
+          SENTICA_LIVE_EVAL_GATEWAY_URL: ${{ secrets.SENTICA_LIVE_EVAL_GATEWAY_URL }}
+        run: uv run pytest tests/sentica/live_eval_gateway.py -n0 --tb=short

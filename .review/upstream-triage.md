@@ -127,3 +127,127 @@ The MCP server forwards `X-Honcho-Plugin` and the docs name the client. Files ar
 Touches a path we use: no. Sentica calls the HTTP API, not the MCP server. Conflicts: no.
 
 Recommendation: skip.
+
+## Appendix, 2026-10-17
+
+Compared `upstream/main` at `ed9fe6c122446a30a74bbba1364003349bf0acb5` with the previous triage tip `2bdd4587921dc0cbfabfe84692be02a29f3e0179`. There is still no release tag after v3.3.0. Twelve commits. R3 takes one security adaptation and leaves the rest.
+
+### `edfc6ba` fix(mcp): return 404 for expired or unknown session IDs (#1375)
+
+An unknown or expired MCP session id now returns 404 instead of being treated as a new session.
+
+Files: `mcp/src/http.ts`, `mcp/src/http.test.ts`.
+
+Touches a path we use: no. Conflicts: no.
+
+Recommendation: skip. Sentica does not serve the MCP transport.
+
+### `5df80a0` fix(dialectic): keep oversized tool output from overflowing the prompt (#1390)
+
+Three changes. Message search no longer binds every session name as a parameter once a peer is in more than 65,535 sessions; it uses a correlated EXISTS. Unexpected tool failures no longer return the full exception text to the model, because SQLAlchemy errors embed the statement and its parameters. `truncate_messages_to_fit` now caps a tool result that is larger than the remaining budget instead of dropping the user query and sending the oversized result.
+
+Files: `src/crud/message.py`, `src/llm/conversation.py`, `src/utils/agent_tools.py`, `tests/crud/test_session_scope_clauses.py`.
+
+Touches a path we use: yes (`src/crud/message.py`, `src/utils/agent_tools.py`). Conflicts: yes, both of those. This fork's tool loop also returns unexpected tool exceptions to the model from `src/llm/tool_loop.py`, which the upstream commit does not edit.
+
+Recommendation: adapt the tool-error cap only, in its own commit. Exception text handed back to the model is capped at `LLM.MAX_TOOL_OUTPUT_CHARS` in `src/utils/agent_tools.py` and on the tool-loop path in `src/llm/tool_loop.py`. The session-name rewrite and the truncation rewrite stay upstream. They are availability fixes, and the session-name rewrite conflicts with `src/crud/message.py`.
+
+### `e7953b2` fix(hermes-plugin): wait for recall on the first turn of a resumed process (#1342)
+
+A Hermes process that resumes a session past turn 1 now waits for context and dialectic before the first turn.
+
+Files: under `hermes-plugin-honcho/`.
+
+Touches a path we use: no. Conflicts: no.
+
+Recommendation: skip. Sentica does not run the Hermes plugin.
+
+### `35a0e79` docs(config): note that Langfuse requires TELEMETRY_ENABLED (#1388)
+
+Documents that Langfuse keys alone produce no traces.
+
+Files: `docs/v3/contributing/configuration.mdx`.
+
+Touches a path we use: no. Conflicts: no.
+
+Recommendation: skip.
+
+### `9579ca2` fix(cli): emit nested SDK models as JSON objects, not repr strings (#1324)
+
+`honcho session` JSON output printed pydantic models with `default=str`, so summaries and messages came out as Python reprs.
+
+Files: `honcho-cli/`.
+
+Touches a path we use: no. The memory service does not run the CLI. Conflicts: no.
+
+Recommendation: take later, and only if the CLI is shipped.
+
+### `4fc0490` fix(dialectic): return 422 when a chat answer fails its response_format (#1379)
+
+A final dialectic answer that fails the client's `response_format` raised `ValidationError`, which the global handler turned into a 500. The SDKs retry 500s. Upstream maps that failure to 422.
+
+Files: `src/dialectic/core.py`, `src/exceptions.py`, `src/llm/backends/openai.py`, `docs/v3/contributing/troubleshooting.mdx`, and the structured-output tests.
+
+Touches a path we use: yes (`src/dialectic/core.py`, `src/exceptions.py`). Conflicts: yes, those two.
+
+Recommendation: take later. It is an error-mapping fix for model output, and it conflicts with the dialectic core. It is not an isolation or credential fix.
+
+### `154b6b8` fix(llm): retry tool-loop answers that miss their response_model (#1393)
+
+Builds on `4fc0490`. A backend that returns a plain string instead of raising was treated as a successful tool-loop answer, so the 422 fired before the configured retries and the fallback model. The tool loop now checks a no-tool answer against `response_model` inside the retried call.
+
+Files include `src/llm/tool_loop.py` and `src/dialectic/core.py`.
+
+Touches a path we use: yes. Conflicts: yes. R3 edits `src/llm/tool_loop.py` for the tool-error cap.
+
+Recommendation: take later, after the R3 tool-loop change is on main. Do not take it in this release.
+
+### `9d69692` docs: add a real non-Docker install path and fix stale LLM key defaults (#1392)
+
+Rewrites the README install section around native Postgres and one LLM key.
+
+Files: `README.md`, `docs/v3/contributing/self-hosting.mdx`, `docs/v3/contributing/troubleshooting.mdx`.
+
+Touches a path we use: no. Conflicts: no.
+
+Recommendation: skip. Sentica's install path is `docs/DEPLOY.md`.
+
+### `08dce3d` feat(release): send a migration manifest with each release (#1395)
+
+The release workflows post a migration manifest computed by `scripts/release_manifest.py`.
+
+Files: `.github/workflows/push-gcp-registry-prod.yml`, `.github/workflows/push-gcp-registry-staging.yml`, `CONTRIBUTING.md`, `migrations/compat.toml`, `scripts/release_manifest.py`, `tests/scripts/test_release_manifest.py`.
+
+Touches a path we use: the two publish workflows exist here and are `if: false`. Conflicts: yes, those workflows.
+
+Recommendation: skip. This fork does not publish release images from those workflows.
+
+### `df1f508` ci: run the previous release and the candidate on the candidate's schema (#1397)
+
+A compatibility-matrix workflow boots the previous release image and the candidate against one database.
+
+Files: `.github/workflows/compat-matrix.yml` and the workflow's scripts and fixtures.
+
+Touches a path we use: no. Conflicts: no.
+
+Recommendation: skip. It assumes upstream image tags and a shared-tenant lineage this fork does not publish.
+
+### `0f4dc36` feat(api): expose a stable uid on workspaces, peers and sessions (#1394)
+
+Workspace, peer, and session responses gain `uid`, the server primary key, beside the client-chosen `id`. The Python and TypeScript SDKs surface it.
+
+Files include `src/schemas/api.py`, `docs/v3/openapi.json`, and both SDKs.
+
+Touches a path we use: yes (`src/schemas/api.py`, `docs/v3/openapi.json`). Conflicts: yes, both.
+
+Recommendation: take later. It is additive API surface, not a security fix, and the schema files conflict.
+
+### `ed9fe6c` docs(scopes): drop internal service name from the managed-key note (#1396)
+
+Removes an internal service name from the scopes doc.
+
+Files: `docs/v3/documentation/features/advanced/scopes.mdx`.
+
+Touches a path we use: no. Conflicts: no.
+
+Recommendation: skip. Sentica does not use named-scope API keys.

@@ -554,7 +554,7 @@ class QueueManager:
                 if self._gateway_outage_pending:
                     self._gateway_outage_pending = False
                     self._suppress_poll_reset = True
-                    await asyncio.sleep(self._jitter(self._advance_poll_interval()))
+                    await asyncio.sleep(self._advance_poll_interval())
                     continue
 
                 if self.queue_empty_flag.is_set():

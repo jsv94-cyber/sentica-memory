@@ -208,6 +208,8 @@ async def honcho_llm_call(
             tool_choice=tool_choice,
             tool_executor=tool_executor,
             max_tool_iterations=max_tool_iterations,
+            force_tools_until=force_tools_until,
+            max_forced_iterations=max_forced_iterations,
             messages=messages,
             telemetry=telemetry,
             json_mode=json_mode,

@@ -59,6 +59,8 @@ def _accept(listen: socket.socket, host: str, port: int) -> None:
 
 
 def main(argv: list[str]) -> None:
+    if len(argv) != 1:
+        raise SystemExit("publish.py forwards exactly one listen=host:port")
     threads: list[threading.Thread] = []
     for spec in argv:
         listen_text, target = spec.split("=", 1)

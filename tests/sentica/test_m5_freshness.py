@@ -206,9 +206,12 @@ async def test_stale_ranks_after_a_fresh_conclusion(
         observer=peer.name,
         observed=peer.name,
         embedding=_vector(0),
-        top_k=1,
+        top_k=2,
     )
-    assert [doc.content for doc in found] == ["fresh fact"]
+    contents = [doc.content for doc in found]
+    assert len(contents) > 1
+    assert "old fact" in contents
+    assert contents[-1] == "old fact"
 
 
 async def test_decay_and_purge_follow_the_schedule(

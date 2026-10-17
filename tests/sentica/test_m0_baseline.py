@@ -25,7 +25,7 @@ REQUIRED_CITATIONS: tuple[tuple[str, int, str], ...] = (
     ("src/models.py", 214, "class Message"),
     ("src/models.py", 358, "class Collection"),
     ("src/models.py", 406, "class Document"),
-    ("src/models.py", 643, "class QueueItem"),
+    ("src/models.py", 655, "class QueueItem"),
     ("src/utils/scopes.py", 33, "SCOPE_PEER_PREFIX"),
     ("src/routers/conclusions.py", 22, "APIRouter"),
     ("src/crud/representation.py", 84, "class RepresentationManager"),
@@ -90,6 +90,13 @@ def test_pin_is_recorded() -> None:
     assert "docker-compose.yml" in _text("FORK_CHANGES.md")
 
 
+def test_progress_records_the_local_hindsight_branch() -> None:
+    progress = _text("PROGRESS.md")
+    assert "No `spike-hindsight` branch was created." not in progress
+    assert "A local-only `spike-hindsight` branch exists." in progress
+    assert "The bake-off was cancelled 2026-10-17." in progress
+
+
 def test_new_docs_have_no_em_dash() -> None:
     for relative in (
         "docs/MAP.md",
@@ -103,6 +110,7 @@ def test_new_docs_have_no_em_dash() -> None:
         "docs/UPSTREAM_SYNC.md",
         "docs/RELEASES.md",
         ".review/M2-summary.md",
+        ".review/R3-summary.md",
         "docker-compose.yml",
         "docker-compose.sentica.yml",
         ".review/M1-summary.md",
