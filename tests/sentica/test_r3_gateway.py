@@ -35,6 +35,16 @@ def test_invalid_gateway_env_refuses_startup(
         load_instance()
 
 
+def test_unknown_tokenizer_names_the_rejected_encoding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SENTICA_MODE", "test")
+    assert load_instance() is None
+    monkeypatch.setenv("SENTICA_GATEWAY_TOKENIZER", "not-a-tokenizer")
+    with pytest.raises(SenticaStartupError, match="not-a-tokenizer"):
+        load_instance()
+
+
 def test_gateway_alias_uses_the_configured_encoding(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

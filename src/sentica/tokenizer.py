@@ -69,8 +69,9 @@ def validate_tokenizer_env() -> None:
         try:
             tiktoken.get_encoding(configured.strip())
         except (KeyError, ValueError) as exc:
+            rejected = configured.strip()
             raise ValueError(
-                "SENTICA_GATEWAY_TOKENIZER is not a tiktoken encoding"
+                "SENTICA_GATEWAY_TOKENIZER " + rejected + " is not a tiktoken encoding"
             ) from exc
     try:
         aliases = tokenizer_aliases()
