@@ -4,12 +4,18 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql import Select
 
 from src import models
 from src.config import settings
-from src.sentica.vector_query import neighbor_statement
+from src.sentica.vector_query import (
+    CANDIDATE_FACTOR,
+    apply_hnsw_scan,
+    execute_neighbors,
+    neighbor_statement,
+)
 
 # Migrations that were already applied. New files are the ones outside this set.
 _FROZEN_MIGRATIONS = {
@@ -70,6 +76,47 @@ def test_new_index_migrations_use_create_index_concurrently() -> None:
     assert seen_new
 
 
+async def _plan(db_session: AsyncSession, stmt: Select[tuple[models.Document]]) -> str:
+    """EXPLAIN a neighbor statement, casting the distance bind to vector."""
+    connection = await db_session.connection()
+    compiled = stmt.compile(dialect=connection.dialect)
+    # exec_driver_sql sends the embedding as float[]. pgvector only defines
+    # <=> for the vector type, so the distance bind has to be cast.
+    explained_sql = compiled.string.replace(
+        " <=> %(",
+        " <=> CAST(%(",
+        1,
+    ).replace(
+        ")s \n",
+        ")s AS vector)\n",
+        1,
+    )
+    explained = await connection.exec_driver_sql(
+        "EXPLAIN " + explained_sql,
+        compiled.params,
+    )
+    return "\n".join(str(row[0]) for row in explained.all())
+
+
+def _biased_embedding_sql(dimensions: int) -> str:
+    """Vector text for row ``g``.
+
+    Rows with ``g % 12 <> 0`` put about 0.8 on the first component, so they
+    sit next to the query ``[1, 0, ...]``. Target rows stay near the origin.
+    A post-filtered HNSW scan that stops at ``ef_search`` never reaches them.
+    """
+    zeros = ",".join(["0"] * (dimensions - 16))
+    return (
+        "'[' || (SELECT string_agg("
+        "CASE WHEN i = 1 AND g % 12 <> 0 THEN "
+        "(get_byte(decode(md5(g::text || ':' || i::text), 'hex'), 0)::float8 "
+        "/ 255.0) * 0.2 + 0.8 ELSE "
+        "(get_byte(decode(md5(g::text || ':' || i::text), 'hex'), 0)::float8 "
+        "/ 255.0) * 0.2 END::text, ',' ORDER BY i) "
+        "FROM generate_series(1, 16) AS i) || '," + zeros + "]'"
+    )
+
+
 async def test_vector_query_uses_hnsw_at_10k_rows(
     db_session: AsyncSession,
     sample_data: tuple[models.Workspace, models.Peer],
@@ -110,24 +157,91 @@ async def test_vector_query_uses_hnsw_at_10k_rows(
         embedding,
         10,
     )
-    connection = await db_session.connection()
-    compiled = stmt.compile(dialect=connection.dialect)
-    # exec_driver_sql sends the embedding as float[]. pgvector only defines
-    # <=> for the vector type, so the distance bind has to be cast.
-    explained_sql = compiled.string.replace(
-        " <=> %(",
-        " <=> CAST(%(",
-        1,
-    ).replace(
-        ")s \n",
-        ")s AS vector)\n",
-        1,
-    )
-    explained = await connection.exec_driver_sql(
-        "EXPLAIN " + explained_sql,
-        compiled.params,
-    )
-    plan = "\n".join(str(row[0]) for row in explained.all())
+    plan = await _plan(db_session, stmt)
     folded = plan.lower()
     assert "index scan" in folded or "bitmap index scan" in folded
     assert "hnsw" in folded
+
+
+async def test_filtered_hnsw_returns_a_full_page_at_10k_rows(
+    db_session: AsyncSession,
+) -> None:
+    """LIMIT 40 on a selective filter returns 40 and still uses HNSW.
+
+    Ten thousand rows span four workspaces and two peers. About 830 of them
+    match the queried workspace and peer, and those matches are farther from
+    the query than the other rows. Without iterative scan the index returns
+    a handful of candidates and the workspace filter throws them all away.
+    """
+    from nanoid import generate as generate_nanoid
+
+    dimensions = settings.EMBEDDING.VECTOR_DIMENSIONS
+    assert dimensions >= 16
+    workspaces = [models.Workspace(name=str(generate_nanoid())) for _ in range(4)]
+    db_session.add_all(workspaces)
+    for workspace in workspaces:
+        for peer_name in ("p0", "p1"):
+            db_session.add(models.Peer(name=peer_name, workspace_name=workspace.name))
+    await db_session.commit()
+    for workspace in workspaces:
+        for peer_name in ("p0", "p1"):
+            db_session.add(
+                models.Collection(
+                    workspace_name=workspace.name,
+                    observer=peer_name,
+                    observed=peer_name,
+                )
+            )
+    await db_session.commit()
+    target = workspaces[0]
+    await db_session.execute(
+        text(
+            "INSERT INTO documents (id, content, observer, observed, "
+            "workspace_name, embedding, stale, level, internal_metadata) "
+            "SELECT substr(md5(g::text || :salt), 1, 21), 'row ' || g, "
+            "CASE WHEN g % 2 = 0 THEN :p0 ELSE :p1 END, "
+            "CASE WHEN g % 2 = 0 THEN :p0 ELSE :p1 END, "
+            "CASE WHEN g % 12 = 0 THEN :w0 WHEN g % 3 = 0 THEN :w1 "
+            "WHEN g % 3 = 1 THEN :w2 ELSE :w3 END, "
+            + "CAST("
+            + _biased_embedding_sql(dimensions)
+            + " AS vector), false, 'explicit', '{}'::jsonb "
+            "FROM generate_series(1, 10000) AS g"
+        ),
+        {
+            "salt": target.name,
+            "p0": "p0",
+            "p1": "p1",
+            "w0": target.name,
+            "w1": workspaces[1].name,
+            "w2": workspaces[2].name,
+            "w3": workspaces[3].name,
+        },
+    )
+    await db_session.execute(text("ANALYZE documents"))
+    await db_session.commit()
+    matched = await db_session.scalar(
+        select(func.count())
+        .select_from(models.Document)
+        .where(models.Document.workspace_name == target.name)
+        .where(models.Document.observer == "p0")
+        .where(models.Document.observed == "p0")
+    )
+    assert matched is not None and matched >= 40
+    page = 40
+    assert page % CANDIDATE_FACTOR == 0
+    limit = page // CANDIDATE_FACTOR
+    embedding = [1.0] + [0.0] * (dimensions - 1)
+    scoped = select(models.Document).where(
+        models.Document.workspace_name == target.name,
+        models.Document.observer == "p0",
+        models.Document.observed == "p0",
+    )
+    await apply_hnsw_scan(db_session)
+    plan = await _plan(db_session, neighbor_statement(scoped, embedding, limit))
+    folded = plan.lower()
+    assert "index scan" in folded or "bitmap index scan" in folded
+    assert "hnsw" in folded
+    assert "seq scan" not in folded
+    rows = await execute_neighbors(db_session, scoped, embedding, limit)
+    assert len(rows) == page

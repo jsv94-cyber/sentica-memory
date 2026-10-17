@@ -17,7 +17,7 @@ from src.config import settings
 from src.crud.peer_card import get_peer_card
 from src.dependencies import tracked_db
 from src.sentica.freshness import note_retrieved, note_used
-from src.sentica.vector_query import neighbor_statement, within_distance
+from src.sentica.vector_query import execute_neighbors, within_distance
 from src.utils.formatting import ILIKE_ESCAPE_CHAR, escape_ilike_pattern
 from src.utils.search import reciprocal_rank_fusion
 from src.utils.tokens import estimate_tokens, tokenizer
@@ -85,14 +85,8 @@ async def _vector(
     embedding: list[float],
     limit: int,
 ) -> list[models.Document]:
-    ranked = neighbor_statement(stmt, embedding, limit)
-    result = await db.execute(ranked)
-    return within_distance(
-        list(result.scalars().all()),
-        embedding,
-        _MAX_DISTANCE,
-        limit,
-    )
+    rows = await execute_neighbors(db, stmt, embedding, limit)
+    return within_distance(rows, embedding, _MAX_DISTANCE, limit)
 
 
 def _merge(
