@@ -357,8 +357,7 @@ jobs:
           set -eu
           arch=$(uname -m)
           tmp=$(mktemp -d)
-          release=20261012
-          url="https://storage.googleapis.com/gvisor/releases/release/${release}/${arch}"
+          url="https://storage.googleapis.com/gvisor/releases/release/20261012/${arch}"
           # The standalone runsc object 404s. The release tarball carries runsc
           # and the gvisor-bin sidecars, which have to stay next to it.
           curl -fsSL -o "$tmp/gvisor.tar.bz2" "$url/gvisor.tar.bz2"
