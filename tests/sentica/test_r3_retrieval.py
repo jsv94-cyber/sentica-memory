@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
+import pytest
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from sqlalchemy.sql import Select
@@ -586,3 +587,20 @@ async def test_top_k_keeps_the_closer_stale_row(db_session: AsyncSession) -> Non
         top_k=1,
     )
     assert [doc.content for doc in found] == ["close stale"]
+
+
+async def test_aborted_neighbor_scan_keeps_its_original_error(
+    db_session: AsyncSession,
+) -> None:
+    """A failed scan reports that failure, not the restore that follows it.
+
+    A statement error aborts the transaction. Restoring HNSW settings in
+    ``finally`` then fails too, and that second error used to replace the
+    division-by-zero that aborted the scan.
+    """
+    dimensions = settings.EMBEDDING.VECTOR_DIMENSIONS
+    embedding = [1.0] + [0.0] * (dimensions - 1)
+    stmt = select(models.Document).where(text("1 = (SELECT 1/0)"))
+    with pytest.raises(Exception, match="division by zero") as caught:
+        await execute_neighbors(db_session, stmt, embedding, 1)
+    assert "current transaction is aborted" not in str(caught.value).lower()

@@ -245,9 +245,14 @@ async def execute_neighbors(
     try:
         fresh = await _page(db, neighbor_statement(stmt, embedding, limit), limit)
         stale = await _page(db, stale_neighbor_statement(stmt, embedding, limit), limit)
-        return fresh + stale
-    finally:
-        await _restore_scan(db, state)
+    except Exception:
+        # A failed statement aborts the transaction. Restoring settings then
+        # raises InFailedSqlTransaction and would hide the original error.
+        with contextlib.suppress(Exception):
+            await _restore_scan(db, state)
+        raise
+    await _restore_scan(db, state)
+    return fresh + stale
 
 
 def cosine_distance(left: list[float], right: list[float]) -> float:
