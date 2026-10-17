@@ -179,6 +179,18 @@ def test_deploy_flags_and_internal_networks() -> None:
     assert "-j DROP" in deploy
 
 
+def test_fork_changes_lists_the_r3_files() -> None:
+    text = _text("FORK_CHANGES.md")
+    for path in (
+        "src/llm/tool_loop.py",
+        "migrations/versions/d4a8c1e27b90_documents_hnsw_current.py",
+        "src/sentica/vector_query.py",
+        "src/sentica/ready.py",
+        "src/sentica/tokenizer.py",
+    ):
+        assert path in text, path
+
+
 def test_upstream_sync_and_vulnerability_report() -> None:
     sync = _text("docs/UPSTREAM_SYNC.md")
     assert "cherry-pick" in sync
