@@ -13,6 +13,7 @@ index instead of filtering with a btree and sorting.
 
 from __future__ import annotations
 
+import contextlib
 import math
 from typing import NamedTuple
 
@@ -30,8 +31,8 @@ CURRENT_PREDICATE = (
 )
 # relaxed_order fills the page. strict_order can abandon the index.
 _ITERATIVE_SCAN = "relaxed_order"
-_MAX_SCAN_TUPLES = "20000"
-_EF_SEARCH = "40"
+_MAX_SCAN_TUPLES = "100000"
+_EF_SEARCH = "200"
 _HNSW_SCAN_SQL = text(
     "SELECT set_config('hnsw.iterative_scan', :scan, true), "
     + "set_config('hnsw.max_scan_tuples', :tuples, true), "
@@ -159,6 +160,80 @@ async def _restore_scan(db: AsyncSession, state: _ScanState) -> None:
     )
 
 
+_EXACT_SCAN_SQL = text(
+    "SELECT set_config('enable_indexscan', 'off', true), "
+    + "set_config('enable_bitmapscan', 'off', true), "
+    + "set_config('enable_seqscan', 'on', true), "
+    + "set_config('enable_sort', 'on', true)"
+)
+_INDEX_MODE_SQL = text(
+    "SELECT set_config('enable_indexscan', :indexscan, true), "
+    + "set_config('enable_bitmapscan', :bitmap, true), "
+    + "set_config('enable_seqscan', 'off', true), "
+    + "set_config('enable_sort', 'off', true), "
+    + "set_config('hnsw.iterative_scan', :scan, true), "
+    + "set_config('hnsw.max_scan_tuples', :tuples, true), "
+    + "set_config('hnsw.ef_search', :ef, true)"
+)
+
+
+async def _index_mode(db: AsyncSession, indexscan: str, bitmap: str) -> None:
+    await db.execute(
+        _INDEX_MODE_SQL,
+        {
+            "indexscan": indexscan,
+            "bitmap": bitmap,
+            "scan": _ITERATIVE_SCAN,
+            "tuples": _MAX_SCAN_TUPLES,
+            "ef": _EF_SEARCH,
+        },
+    )
+
+
+async def _exact_page(
+    db: AsyncSession,
+    stmt: Select[tuple[models.Document]],
+) -> list[models.Document]:
+    """Order the same predicate without the HNSW index.
+
+    Dead index entries can make a filtered scan stop before the limit. The
+    exact scan is the page when it finds more rows than the index did.
+    """
+    indexscan = _setting(
+        await db.scalar(text("SELECT current_setting('enable_indexscan')")),
+        "on",
+    )
+    bitmap = _setting(
+        await db.scalar(text("SELECT current_setting('enable_bitmapscan')")),
+        "on",
+    )
+    await db.execute(_EXACT_SCAN_SQL)
+    try:
+        result = await db.execute(stmt)
+        rows = list(result.scalars().all())
+    except Exception:
+        with contextlib.suppress(Exception):
+            await _index_mode(db, indexscan, bitmap)
+        raise
+    await _index_mode(db, indexscan, bitmap)
+    return rows
+
+
+async def _page(
+    db: AsyncSession,
+    stmt: Select[tuple[models.Document]],
+    limit: int,
+) -> list[models.Document]:
+    wanted = max(limit, 1) * CANDIDATE_FACTOR
+    indexed = list((await db.execute(stmt)).scalars().all())
+    if len(indexed) >= wanted:
+        return indexed
+    exact = await _exact_page(db, stmt)
+    if len(exact) > len(indexed):
+        return exact
+    return indexed
+
+
 async def execute_neighbors(
     db: AsyncSession,
     stmt: Select[tuple[models.Document]],
@@ -168,9 +243,9 @@ async def execute_neighbors(
     """Return fresh neighbors, then stale ones, from the HNSW indexes."""
     state = await apply_hnsw_scan(db)
     try:
-        fresh = await db.execute(neighbor_statement(stmt, embedding, limit))
-        stale = await db.execute(stale_neighbor_statement(stmt, embedding, limit))
-        return list(fresh.scalars().all()) + list(stale.scalars().all())
+        fresh = await _page(db, neighbor_statement(stmt, embedding, limit), limit)
+        stale = await _page(db, stale_neighbor_statement(stmt, embedding, limit), limit)
+        return fresh + stale
     finally:
         await _restore_scan(db, state)
 

@@ -441,10 +441,10 @@ async def test_neighbor_scan_after_a_large_delete_returns_a_full_page(
     db_session: AsyncSession,
     db_engine: AsyncEngine,
 ) -> None:
-    """Live rows stay visible after a large delete reclaims the HNSW graph.
+    """Live rows stay visible after a large delete leaves dead HNSW entries.
 
-    A delete leaves dead index entries. The next scan misses rows that were
-    inserted afterwards until those entries are vacuumed.
+    The cleanup does not vacuum. A short index page has to fall back to an
+    exact scan, or the next insert is missing from the page.
     """
     from tests.conftest import _clear_all_tables  # pyright: ignore[reportPrivateUsage]
 
@@ -481,7 +481,7 @@ async def test_neighbor_scan_after_a_large_delete_returns_a_full_page(
     )
     await db_session.commit()
     await db_session.rollback()
-    await _clear_all_tables(db_engine)
+    await _clear_all_tables(db_engine, vacuum_hnsw=False)
 
     target = models.Workspace(name="hnswlive000000000000")
     db_session.add(target)

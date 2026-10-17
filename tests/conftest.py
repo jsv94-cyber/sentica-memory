@@ -393,7 +393,7 @@ async def setup_test_database(db_url: URL):
     return engine
 
 
-async def _clear_all_tables(engine: AsyncEngine) -> None:
+async def _clear_all_tables(engine: AsyncEngine, *, vacuum_hnsw: bool = True) -> None:
     """Remove all data from every mapped table between tests.
 
     Uses DELETE rather than TRUNCATE: TRUNCATE rewrites the relfilenode of every
@@ -436,7 +436,7 @@ async def _clear_all_tables(engine: AsyncEngine) -> None:
         try:
             with sync.begin() as conn:
                 conn.exec_driver_sql(statement)
-            if hnsw_tables:
+            if vacuum_hnsw and hnsw_tables:
                 with sync.connect() as conn:
                     conn = conn.execution_options(isolation_level="AUTOCOMMIT")
                     conn.exec_driver_sql(vacuum)
@@ -445,7 +445,7 @@ async def _clear_all_tables(engine: AsyncEngine) -> None:
         return
     async with engine.begin() as conn:
         await conn.exec_driver_sql(statement)
-    if not hnsw_tables:
+    if not vacuum_hnsw or not hnsw_tables:
         return
     async with engine.connect() as conn:
         autocommit = await conn.execution_options(isolation_level="AUTOCOMMIT")
