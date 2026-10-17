@@ -1,7 +1,7 @@
 # R3 review
 
 Each item has a test that fails if the behavior is removed. Isolation tests
-run in `test-m2-rls` as the runtime role. The collected pin is 94 node ids
+run in `test-m2-rls` as the runtime role. The collected pin is 96 node ids
 in `tests/sentica/rls_job.py:26`. Draft pull request 15 is not merged.
 
 The gVisor smoke and the default image build were verified on Actions at
@@ -40,6 +40,25 @@ Each row is one commit. The test fails if that commit is reverted.
 | Eval bytecode was copied into the image | `7496055c` | `test_dockerignore_excludes_bytecode` |
 
 Local Python suite, ignoring `tests/sentica/test_m1_stack.py`: 3440 passed, 53 skipped, 2 failed, 259.95s. Both failures are `tests/sdk_typescript/test_sdk.py` because `bun` is not installed on this machine.
+
+## Fix round 2
+
+Each row is one commit on `r3-release`. The test fails if that commit is reverted.
+
+| Finding | Commit | Test |
+| --- | --- | --- |
+| Deploy commands left container egress open | `cb542fed` | `test_deploy_firewall_covers_every_container_ip` |
+| The HNSW page test applied the scan settings itself | `118fa666` | `test_filtered_hnsw_returns_a_full_page_at_10k_rows` |
+| A workspace policy could be true when the setting was unset | `cddcb3f6` | `test_workspace_policy_rejects_an_or_and_a_null_filter`, `test_unset_workspace_sees_zero_rows` |
+| A large delete left the next HNSW page empty | `4d201e94`, `a3ca3ba3` | `test_neighbor_scan_after_a_large_delete_returns_a_full_page` |
+| `top_k` kept the first fresh rows instead of the closest | `8559f9c7` | `test_top_k_keeps_the_closer_stale_row` |
+| Restoring HNSW settings hid the error that aborted the scan | `41e4b95c` | `test_aborted_neighbor_scan_keeps_its_original_error` |
+| The chat hold ignored tool schemas and list content | `ac4f335b` | `test_chat_hold_counts_tool_schemas_and_list_content`, `test_a_failed_chat_releases_its_hold` |
+| The concurrent budget test flushed Redis on port 6379 | `0ac1b638` | `test_concurrent_holds_stay_inside_a_100_token_budget` |
+
+`docs/DEPLOY.md` pins the bridge to `10.8.0.8/29` and gives api, deriver, migrate, proxy, and gateway the addresses `10.8.0.10` through `10.8.0.14`. The firewall test parses those run commands and fails unless every container address is covered by a DROP rule and the subnet excludes the broker at `10.8.0.4`. The delete-page test no longer vacuums. A short index page is exact-scanned only when a sequential probe can see a row the index left out, so an honest empty stale page does not rank every embedding. The budget test uses the in-process Redis stand-in and does not call `flushdb`. `636ad94d` makes these tests pass the type checker.
+
+Round-2 local Python suite, ignoring `tests/sentica/test_m1_stack.py`, against the throwaway database on port 5436 and Redis on port 6381: 3447 passed, 53 skipped, 2 failed, 254.65s. Both failures are `tests/sdk_typescript/test_sdk.py` because `bun` is not installed on this machine. `test_unset_workspace_sees_zero_rows` is collected only when `SENTICA_RLS_JOB=1`, so it was not part of that suite. Round-2 local stack suite, with `test_stopped_stack_leaves_no_memory_on_disk` deselected because its `sudo grep` waits for a password: 31 passed, 1 deselected, 201.94s.
 
 Local stack suite: `test_stopped_stack_leaves_no_memory_on_disk` runs `sudo grep` over `/var/lib/docker/containers`, and sudo waited for a password, so that test was not finished. The other 30 tests were run with that one deselected: 29 passed, then `test_gvisor_services_use_runsc` failed until the download URL contained `release/20261012/`. After `9b0c89e2` that test passed (1 passed, 30 deselected, 60.27s). `runsc` is not installed here, so `HostConfig.Runtime` was not read. The static overlay, checksum, and URL checks did run. Actions on `892ae389` failed `test-gvisor-smoke` because `docker compose ps` hides migrate after it exits. `1e31cc1d` passes `-a` on every service lookup. `test_gvisor_runtime_lookup_includes_exited_containers` fails when that flag is removed (confirmed locally) and passes with it (1 passed, 1.10s) without starting the stack.
 
