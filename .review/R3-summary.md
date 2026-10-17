@@ -12,6 +12,36 @@ Static analysis run:
 https://github.com/jsv94-cyber/sentica-memory/actions/runs/39007240678
 11 checks, 0 failures. `test-gvisor-smoke` passed 4 tests (26 deselected).
 
+## Fix round 1
+
+Each row is one commit. The test fails if that commit is reverted.
+
+| Finding | Commit | Test |
+| --- | --- | --- |
+| Filtered HNSW returned a short page | `a2c12405` | `test_filtered_hnsw_returns_a_full_page_at_10k_rows` |
+| Stale conclusions were dropped instead of ranked last | `973a4866` | `test_stale_ranks_after_a_fresh_conclusion` |
+| Read-only root check wrote a path the app user cannot own | `ebc9bc3a` | `test_root_filesystem_is_read_only` |
+| Eval scores did not depend on vector search | `583922f6` | `test_blank_vector_channel_misses_the_baseline` |
+| Budget check did not hold tokens for an in-flight call | `160e387b` | `test_concurrent_holds_stay_inside_a_100_token_budget` |
+| NET_ADMIN check did not require an unprivileged container | `48417d9e` | `test_no_container_has_net_admin` |
+| gVisor install followed `release/latest` | `a1f84b68`, `9b0c89e2` | `test_gvisor_services_use_runsc` |
+| Search red-team and RLS policy check were too weak | `b19094db` | `test_http_red_team_hides_the_other_workspace`, `test_workspace_filter_and_rls_policy_are_present` |
+| Deploy commands omitted the network, cert mounts, and egress rules | `d4ea63d8` | `test_deploy_flags_and_internal_networks` |
+| Fork changelog omitted four R3 files | `5d67d186` | `test_fork_changes_lists_the_r3_files` |
+| Status check no longer listed every required job | `d2064607` | `test_workflow_job_builds_schema_as_the_ddl_role` |
+| Concurrent-index guard accepted one plain index beside a concurrent one | `5ed9c9e3` | `test_index_guard_rejects_a_plain_index_beside_a_concurrent_one` |
+| Publisher bind address was not checked | `9e6196e0` | `test_publishers_are_single_port_and_non_root` |
+| Unknown tokenizer startup error omitted the rejected name | `b7111428` | `test_unknown_tokenizer_names_the_rejected_encoding` |
+| Replacing the Redis URL left the old pool open | `febbf626` | `test_a_new_redis_url_closes_the_old_pool` |
+| Eval search helper took an unused slot | `8737d190` | `test_search_helper_takes_no_slot` |
+| Progress note said no Hindsight branch existed | `1775d146` | `test_progress_records_the_local_hindsight_branch` |
+| Deleted HNSW entries hid the next test's rows | `ff5fc489` | `test_neighbor_scan_after_a_large_delete_returns_a_full_page` |
+| Eval bytecode was copied into the image | `7496055c` | `test_dockerignore_excludes_bytecode` |
+
+Local Python suite, ignoring `tests/sentica/test_m1_stack.py`: 3440 passed, 53 skipped, 2 failed, 259.95s. Both failures are `tests/sdk_typescript/test_sdk.py` because `bun` is not installed on this machine.
+
+Local stack suite: `test_stopped_stack_leaves_no_memory_on_disk` runs `sudo grep` over `/var/lib/docker/containers`, and sudo waited for a password, so that test was not finished. The other 30 tests were run with that one deselected: 29 passed, then `test_gvisor_services_use_runsc` failed until the download URL contained `release/20261012/`. After `9b0c89e2` that test passed (1 passed, 30 deselected, 60.27s). `runsc` is not installed here, so `HostConfig.Runtime` was not read. The static overlay, checksum, and URL checks did run.
+
 ## Packaging
 
 1. Default image. `Dockerfile:52` reuses an existing group before
@@ -72,8 +102,8 @@ https://github.com/jsv94-cyber/sentica-memory/actions/runs/39007240678
 8. Embeddings. `src/sentica/eval_harness.py:63` `text_embedding` is hashed
    signed character n-grams (widths 3, 4, and 5), L2-normalized.
    `eval/BASELINE.md:24` states what each score measures. Measured recall
-   is 0 for information extraction and knowledge updates, and 100 for
-   multi-session reasoning, temporal reasoning, and abstention.
+   is 100 for every category. A vector stub that returns nothing drops
+   information extraction and knowledge updates to 0.
    `.github/workflows/live-eval.yml:5` is `workflow_dispatch` only and
    reads `SENTICA_LIVE_EVAL_GATEWAY_URL`. It has no `pull_request` trigger.
    Tests: `test_embeddings_are_not_one_hot_copies`,
@@ -114,12 +144,9 @@ https://github.com/jsv94-cyber/sentica-memory/actions/runs/39007240678
     `src/sentica/gateway.py:1321` relaxes `required` or `any` to `auto` once
     the gate is met or the forced-round cap is reached, matching the
     upstream tool loop. Test: `test_force_tools_until_relaxes_tool_choice`.
-13. Atomic budget. `src/sentica/gateway.py:66` and
-    `src/sentica/gateway.py:81` are the Lua scripts `sentica-budget-reserve`
-    and `sentica-budget-charge`. `src/sentica/gateway.py:278` `_reserve` and
-    `src/sentica/gateway.py:306` `_charge` run them with `EVAL` on the pooled
-    client from `src/sentica/gateway.py:186` `_async_client`. Test:
-    `test_budget_reserve_and_charge_are_one_script`.
+13. Atomic budget. Reserve holds the estimate while the call is in flight.
+    Settle replaces that hold with the actual usage, and a failed call
+    releases the hold. Test: `test_concurrent_holds_stay_inside_a_100_token_budget`.
 14. Jitter once. `src/deriver/queue_manager.py:538`
     `_advance_poll_interval` applies `_jitter` to the interval it returns.
     `src/deriver/queue_manager.py:557` sleeps that value once on a gateway
