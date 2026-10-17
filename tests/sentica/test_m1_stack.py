@@ -1955,7 +1955,14 @@ def test_no_container_has_net_admin(stack: Path) -> None:
         payload = cast(list[dict[str, Any]], json.loads(inspected.stdout))
         host = cast(dict[str, Any], payload[0]["HostConfig"])
         added = cast(list[object], host.get("CapAdd") or [])
+        dropped = [str(item) for item in cast(list[object], host.get("CapDrop") or [])]
         assert "NET_ADMIN" not in added, container_id
+        assert host.get("Privileged") is False, container_id
+        labels = cast(dict[str, object], payload[0]["Config"].get("Labels") or {})
+        service = str(labels.get("com.docker.compose.service", ""))
+        hardened = service.startswith(("api-", "deriver-", "migrate-", "publish-"))
+        if hardened:
+            assert "ALL" in dropped, service
 
 
 def test_publishers_are_single_port_and_non_root(stack: Path) -> None:
