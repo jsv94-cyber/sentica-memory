@@ -6,6 +6,7 @@ from eval/BASELINE.md, or when any workspace or tenant probe leaks.
 
 from __future__ import annotations
 
+import inspect
 import math
 import re
 import warnings
@@ -262,11 +263,14 @@ def _p95(samples: list[float]) -> float:
     return ordered[index]
 
 
+def test_search_helper_takes_no_slot() -> None:
+    assert "_slot" not in inspect.signature(_search).parameters
+
+
 async def _search(
     db: AsyncSession,
     workspace_name: str,
     query: str,
-    _slot: int,
     *,
     since: datetime | None = None,
 ) -> list[models.Document]:
@@ -314,7 +318,6 @@ async def _knowledge_update_details(
             db,
             businesses[question.business].name,
             question.query,
-            question.slot,
             since=question.since,
         )
         retrieved = {item.id for item in found}
@@ -352,7 +355,6 @@ async def test_retrieval_eval_matches_baseline(db_session: AsyncSession) -> None
             db_session,
             businesses[question.business].name,
             question.query,
-            question.slot,
             since=question.since,
         )
         retrieved = [item.id for item in found]
@@ -376,7 +378,6 @@ async def test_retrieval_eval_matches_baseline(db_session: AsyncSession) -> None
         db_session,
         businesses[sample.business].name,
         sample.query,
-        sample.slot,
         since=sample.since,
     )
     cold_ms = (perf_counter() - started) * 1000
@@ -387,7 +388,6 @@ async def test_retrieval_eval_matches_baseline(db_session: AsyncSession) -> None
             db_session,
             businesses[sample.business].name,
             sample.query,
-            sample.slot,
             since=sample.since,
         )
         warm.append((perf_counter() - started) * 1000)
@@ -437,7 +437,6 @@ async def test_blank_vector_channel_misses_the_baseline(
             db_session,
             businesses[question.business].name,
             question.query,
-            question.slot,
             since=question.since,
         )
         retrieved = [item.id for item in found]
@@ -483,12 +482,12 @@ async def test_isolation_red_team_reports_zero_leaks(
     invoice = _by_key()["ie-invoice"]
     leaks: list[str] = []
 
-    control = await _search(db_session, northline, secret.content, secret.slot)
+    control = await _search(db_session, northline, secret.content)
     assert any(row.content == secret.content for row in control)
 
-    harbor_secret = await _search(db_session, harbor, secret.content, secret.slot)
-    harbor_same_vector = await _search(db_session, harbor, secret.content, invoice.slot)
-    north_invoice = await _search(db_session, northline, invoice.content, invoice.slot)
+    harbor_secret = await _search(db_session, harbor, secret.content)
+    harbor_same_vector = await _search(db_session, harbor, secret.content)
+    north_invoice = await _search(db_session, northline, invoice.content)
     leaks.extend(_crossed(harbor_secret, harbor, harbor=harbor))
     leaks.extend(_crossed(harbor_same_vector, harbor, harbor=harbor))
     leaks.extend(_crossed(north_invoice, northline, harbor=harbor))
