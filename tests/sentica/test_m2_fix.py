@@ -113,6 +113,10 @@ def test_workflow_job_builds_schema_as_the_ddl_role() -> None:
     assert "sha512sum -c gvisor.tar.bz2.sha512" in text_value
     assert "needs.build-default-image.result" in text_value
     assert "needs.test-gvisor-smoke.result" in text_value
+    assert (
+        "needs: [test-python, test-m1-stack, test-m2-rls, "
+        "build-default-image, test-gvisor-smoke]"
+    ) in text_value
 
 
 def test_data_migration_updates_each_workspace(worker_id: str) -> None:

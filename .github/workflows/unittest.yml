@@ -382,14 +382,7 @@ jobs:
   # This job always runs and reports success only if all required jobs pass
   test-status:
     runs-on: ubuntu-24.04
-    needs:
-      [
-        test-python,
-        test-m1-stack,
-        test-m2-rls,
-        build-default-image,
-        test-gvisor-smoke,
-      ]
+    needs: [test-python, test-m1-stack, test-m2-rls, build-default-image, test-gvisor-smoke]
     if: always()
     steps:
       - name: Check test results
