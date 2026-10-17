@@ -10,6 +10,17 @@ seccomp profile stays on. Do not disable seccomp.
 
 ## API
 
+Create the instance network once. The API, deriver, and migrate containers
+join it. `10.8.0.4` below is the host address the broker uses, not a
+container address on this network.
+
+```bash
+docker network create \
+  --driver bridge \
+  --subnet 10.8.0.0/24 \
+  sentica-instance
+```
+
 ```bash
 docker run --rm \
   --name sentica-memory-api \
@@ -21,6 +32,10 @@ docker run --rm \
   --runtime runsc \
   --network sentica-instance \
   -p 10.8.0.4:8000:8000 \
+  -v /run/sentica/certs/client.crt:/certs/client.crt:ro \
+  -v /run/sentica/certs/client.key:/certs/client.key:ro \
+  -v /run/sentica/certs/ca.crt:/certs/ca.crt:ro \
+  -v /run/sentica/certs/token.pub:/certs/token.pub:ro \
   --env-file /run/sentica/api.env \
   sentica-memory:0.1.0
 ```
@@ -49,6 +64,10 @@ docker run --rm \
   --security-opt no-new-privileges:true \
   --runtime runsc \
   --network sentica-instance \
+  -v /run/sentica/certs/client.crt:/certs/client.crt:ro \
+  -v /run/sentica/certs/client.key:/certs/client.key:ro \
+  -v /run/sentica/certs/ca.crt:/certs/ca.crt:ro \
+  -v /run/sentica/certs/token.pub:/certs/token.pub:ro \
   --env-file /run/sentica/deriver.env \
   sentica-memory:0.1.0 \
   /app/.venv/bin/python -m src.deriver
@@ -70,6 +89,10 @@ docker run --rm \
   --security-opt no-new-privileges:true \
   --runtime runsc \
   --network sentica-instance \
+  -v /run/sentica/certs/client.crt:/certs/client.crt:ro \
+  -v /run/sentica/certs/client.key:/certs/client.key:ro \
+  -v /run/sentica/certs/ca.crt:/certs/ca.crt:ro \
+  -v /run/sentica/certs/token.pub:/certs/token.pub:ro \
   --env-file /run/sentica/migrate.env \
   --entrypoint /app/docker/migrate-entrypoint.sh \
   sentica-memory:0.1.0
@@ -88,6 +111,15 @@ chown "${SENTICA_UID:-100}:${SENTICA_GID:-100}" \
   /run/sentica/certs/ca.crt \
   /run/sentica/certs/token.pub
 chmod 600 /run/sentica/certs/client.key
+```
+
+The env files point the process at those mounts:
+
+```bash
+SENTICA_CLIENT_CERT_PATH=/certs/client.crt
+SENTICA_CLIENT_KEY_PATH=/certs/client.key
+SENTICA_PROXY_CA_PATH=/certs/ca.crt
+SENTICA_TOKEN_PUBLIC_KEY_PATH=/certs/token.pub
 ```
 
 Build the image with the same ids when they are not 100:
@@ -176,6 +208,23 @@ structural.
   or `SENTICA_GATEWAY_EMBED_BASE_URL`). Deny provider hosts
   (`api.openai.com`, `api.anthropic.com`,
   `generativelanguage.googleapis.com`) and the rest of the public internet.
+
+  On the `10.8.0.0/24` instance network the API container is `10.8.0.10`,
+  the deriver is `10.8.0.11`, the certificate proxy is `10.8.0.5:6432`,
+  and the model gateway is `10.8.0.6:443`. `DOCKER-USER` is the host
+  firewall for traffic that leaves those containers. Established replies
+  return. New connections are allowed only to the proxy and the gateway.
+  Everything else, including the provider hosts above, is dropped:
+
+```bash
+iptables -A DOCKER-USER -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+iptables -A DOCKER-USER -s 10.8.0.10/32 -d 10.8.0.5/32 -p tcp --dport 6432 -j RETURN
+iptables -A DOCKER-USER -s 10.8.0.11/32 -d 10.8.0.5/32 -p tcp --dport 6432 -j RETURN
+iptables -A DOCKER-USER -s 10.8.0.10/32 -d 10.8.0.6/32 -p tcp --dport 443 -j RETURN
+iptables -A DOCKER-USER -s 10.8.0.11/32 -d 10.8.0.6/32 -p tcp --dport 443 -j RETURN
+iptables -A DOCKER-USER -s 10.8.0.10/32 -j DROP
+iptables -A DOCKER-USER -s 10.8.0.11/32 -j DROP
+```
 
 Redis runs as the `redis` user. The entry script starts as root only long
 enough to create the password file, then `setpriv` execs `redis-server` so

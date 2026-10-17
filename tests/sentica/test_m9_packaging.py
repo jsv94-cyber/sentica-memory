@@ -170,6 +170,13 @@ def test_deploy_flags_and_internal_networks() -> None:
     assert "api.openai.com" in deploy
     assert "proof-only" in deploy
     assert "65534" in deploy
+    assert "docker network create" in deploy
+    assert deploy.count("/run/sentica/certs/client.crt:/certs/client.crt:ro") == 3
+    assert deploy.count("/run/sentica/certs/client.key:/certs/client.key:ro") == 3
+    assert deploy.count("/run/sentica/certs/ca.crt:/certs/ca.crt:ro") == 3
+    assert deploy.count("/run/sentica/certs/token.pub:/certs/token.pub:ro") == 3
+    assert "iptables -A DOCKER-USER" in deploy
+    assert "-j DROP" in deploy
 
 
 def test_upstream_sync_and_vulnerability_report() -> None:
