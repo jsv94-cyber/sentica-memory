@@ -240,6 +240,24 @@ class ObservationsCreatedResult:
     failed: list[ObservationFailure]
 
 
+def _describe_tool_error(error: Exception) -> str:
+    """Bounded description of ``error``, safe to hand back to the model.
+
+    Exception text is unbounded and not written for the model. SQLAlchemy
+    appends the full statement and its bound parameters. The description gets
+    the same budget as successful tool output.
+    """
+    message = str(error).strip()
+    max_chars = settings.LLM.MAX_TOOL_OUTPUT_CHARS
+    if len(message) > max_chars:
+        message = (
+            message[:max_chars] + f"… [truncated {len(message) - max_chars:,} chars]"
+        )
+    if message:
+        return f"{type(error).__name__}: {message}"
+    return type(error).__name__
+
+
 def _truncate_tool_output(
     output: str, max_chars: int | None = None
 ) -> tuple[str, int, bool]:
@@ -2313,12 +2331,19 @@ async def create_tool_executor(
             raise
         except ValueError as e:
             # Recoverable errors (bad input, validation failures) - return to LLM
-            result_str = f"Tool {tool_name} failed with invalid input: {e}"
+            result_str = (
+                f"Tool {tool_name} failed with invalid input: {_describe_tool_error(e)}"
+            )
             is_error = True
             logger.warning(result_str)
         except KeyError as e:
             # Missing required parameters - return to LLM
-            result_str = f"Tool {tool_name} missing required parameter: {e}"
+            result_str = (
+                "Tool "
+                + tool_name
+                + " missing required parameter: "
+                + _describe_tool_error(e)
+            )
             is_error = True
             logger.warning(result_str)
         except Exception as e:
@@ -2331,7 +2356,7 @@ async def create_tool_executor(
             # Unexpected errors - log with full traceback but still return to LLM
             # We don't re-raise because the LLM should be able to continue with other tools
             result_str = (
-                f"Tool {tool_name} failed unexpectedly: {type(e).__name__}: {e}"
+                f"Tool {tool_name} failed unexpectedly: {_describe_tool_error(e)}"
             )
             is_error = True
             logger.error(result_str, exc_info=True)
