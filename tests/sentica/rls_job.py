@@ -119,6 +119,8 @@ EXPECTED_M2_NODE_IDS: frozenset[str] = frozenset(
         "tests/sentica/test_m2_isolation.py::test_http_red_team_hides_the_other_workspace",
         "tests/sentica/test_m2_isolation.py::test_removed_filter_and_disabled_rls_shows_the_canary",
         "tests/sentica/test_m2_isolation.py::test_multi_workspace_token_creates_only_in_the_primary",
+        "tests/sentica/test_m2_isolation.py::test_unset_workspace_sees_zero_rows",
+        "tests/sentica/test_m2_isolation.py::test_workspace_policy_rejects_an_or_and_a_null_filter",
     }
 )
 

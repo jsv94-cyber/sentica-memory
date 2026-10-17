@@ -136,6 +136,7 @@ _RLS_JOB_ONLY = frozenset(
         "test_workspace_filter_and_rls_policy_are_present",
         "test_removed_filter_and_disabled_rls_shows_the_canary",
         "test_multi_workspace_token_creates_only_in_the_primary",
+        "test_unset_workspace_sees_zero_rows",
     }
 )
 
