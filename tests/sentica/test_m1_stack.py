@@ -1887,10 +1887,15 @@ def test_deriver_reaches_the_mock_gateway_with_the_four_headers(stack: Path) -> 
 
 
 def _service_id(service: str) -> str:
-    found = _compose(["ps", "-q", service], check=True)
-    container_id = found.stdout.strip()
-    assert container_id, service
-    return container_id
+    """Container id, including a one-shot service that has already exited.
+
+    ``compose ps`` hides exited containers. The migrate jobs exit 0, so a
+    runtime check has to ask for every status.
+    """
+    found = _compose(["ps", "-a", "-q", service], check=True)
+    ids = [line.strip() for line in found.stdout.splitlines() if line.strip()]
+    assert len(ids) == 1, (service, ids)
+    return ids[0]
 
 
 def test_api_and_deriver_cannot_reach_the_internet(stack: Path) -> None:
