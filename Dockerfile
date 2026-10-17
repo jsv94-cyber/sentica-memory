@@ -46,10 +46,18 @@ ENV SENTICA_MODE=production
 # without a root chown on the host. The published image keeps uid 100.
 ARG SENTICA_UID=100
 ARG SENTICA_GID=100
+# python:3.13-slim-bookworm already has the users group at gid 100.
+# Reuse that gid. A second group at the same gid fails the default build.
 RUN if [ "$SENTICA_UID" != "0" ]; then \
-        addgroup --gid "$SENTICA_GID" app \
-        && adduser --uid "$SENTICA_UID" --gid "$SENTICA_GID" \
-            --disabled-password --gecos "" --no-create-home app; \
+        if getent group "$SENTICA_GID" >/dev/null; then \
+            true; \
+        else \
+            addgroup --gid "$SENTICA_GID" app; \
+        fi; \
+        if ! getent passwd "$SENTICA_UID" >/dev/null; then \
+            adduser --uid "$SENTICA_UID" --gid "$SENTICA_GID" \
+                --disabled-password --gecos "" --no-create-home app; \
+        fi; \
     fi \
     && mkdir -p /app/lancedb_data \
     && chown "${SENTICA_UID}:${SENTICA_GID}" /app /app/lancedb_data
@@ -72,8 +80,14 @@ COPY --chown=${SENTICA_UID}:${SENTICA_GID} pyproject.toml /app/pyproject.toml
 COPY --chown=${SENTICA_UID}:${SENTICA_GID} config.toml* /app/
 
 # The default image is a production image. A test-stack build can opt out.
+# The eval harness and its seeded fixture text are not part of the image.
 ARG SENTICA_BAKE_PRODUCTION_MARKER=true
-RUN if [ "$SENTICA_BAKE_PRODUCTION_MARKER" = "true" ]; then \
+RUN rm -f /app/src/sentica/eval_harness.py \
+    && if grep -R -F -q "northline violetkey" /app/src; then \
+        echo "seeded fixture text is in the image" >&2; \
+        exit 1; \
+    fi \
+    && if [ "$SENTICA_BAKE_PRODUCTION_MARKER" = "true" ]; then \
         printf '%s\n' production > /app/.sentica-production-image; \
     fi \
     && chown "${SENTICA_UID}:${SENTICA_GID}" /app/.sentica-production-image 2>/dev/null || true \

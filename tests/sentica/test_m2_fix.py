@@ -107,7 +107,10 @@ def test_workflow_job_builds_schema_as_the_ddl_role() -> None:
         "DB_CONNECTION_URI:" not in text_value.split("Run the runtime-role proof", 1)[1]
     )
     assert "tests/sentica/test_m2_" in text_value
-    assert "needs: [test-python, test-m1-stack, test-m2-rls]" in text_value
+    assert "build-default-image" in text_value
+    assert "test-gvisor-smoke" in text_value
+    assert "needs.build-default-image.result" in text_value
+    assert "needs.test-gvisor-smoke.result" in text_value
 
 
 def test_data_migration_updates_each_workspace(worker_id: str) -> None:

@@ -14,11 +14,12 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import os
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Collection
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import Any, NoReturn, cast
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
@@ -60,6 +61,71 @@ _SYNTHESIS = (
     "Do not attempt to call any more tools."
 )
 _BUDGET_TTL_SECONDS = 172800
+_async_pool: tuple[str, Any] | None = None
+# One script reads both counters. -1 means that limit is unset.
+_RESERVE_SCRIPT = """
+-- sentica-budget-reserve
+local total = tonumber(redis.call('GET', KEYS[1]) or '0')
+local spent = tonumber(redis.call('GET', KEYS[2]) or '0')
+local total_limit = tonumber(ARGV[1])
+local purpose_limit = tonumber(ARGV[2])
+if total_limit >= 0 and total >= total_limit then
+  return 0
+end
+if purpose_limit >= 0 and spent >= purpose_limit then
+  return 0
+end
+return 1
+"""
+# One script increments both counters and sets their TTL.
+_CHARGE_SCRIPT = """
+-- sentica-budget-charge
+local tokens = tonumber(ARGV[1])
+local ttl = tonumber(ARGV[2])
+redis.call('INCRBY', KEYS[1], tokens)
+redis.call('EXPIRE', KEYS[1], ttl)
+redis.call('INCRBY', KEYS[2], tokens)
+redis.call('EXPIRE', KEYS[2], ttl)
+return redis.call('GET', KEYS[1])
+"""
+_ON_VALUES = frozenset({"1", "true", "yes", "on"})
+_OFF_VALUES = frozenset({"0", "false", "no", "off"})
+_GATEWAY_ENV = (
+    "SENTICA_GATEWAY_MODE",
+    "SENTICA_GATEWAY_BASE_URL",
+    "SENTICA_GATEWAY_DERIVER_BASE_URL",
+    "SENTICA_GATEWAY_SUMMARY_BASE_URL",
+    "SENTICA_GATEWAY_DIALECTIC_BASE_URL",
+    "SENTICA_GATEWAY_DREAM_BASE_URL",
+    "SENTICA_GATEWAY_EMBED_BASE_URL",
+    "SENTICA_GATEWAY_DERIVER_MODEL",
+    "SENTICA_GATEWAY_SUMMARY_MODEL",
+    "SENTICA_GATEWAY_DIALECTIC_MODEL",
+    "SENTICA_GATEWAY_DREAM_MODEL",
+    "SENTICA_GATEWAY_EMBED_MODEL",
+    "SENTICA_GATEWAY_DAILY_TOKEN_BUDGET",
+    "SENTICA_GATEWAY_DERIVER_DAILY_TOKEN_BUDGET",
+    "SENTICA_GATEWAY_SUMMARY_DAILY_TOKEN_BUDGET",
+    "SENTICA_GATEWAY_DIALECTIC_DAILY_TOKEN_BUDGET",
+    "SENTICA_GATEWAY_DREAM_DAILY_TOKEN_BUDGET",
+    "SENTICA_GATEWAY_EMBED_DAILY_TOKEN_BUDGET",
+    "SENTICA_GATEWAY_REDIS_URL",
+    "SENTICA_GATEWAY_TIMEOUT_SECONDS",
+    "SENTICA_GATEWAY_DERIVER_TIMEOUT_SECONDS",
+    "SENTICA_GATEWAY_SUMMARY_TIMEOUT_SECONDS",
+    "SENTICA_GATEWAY_DIALECTIC_TIMEOUT_SECONDS",
+    "SENTICA_GATEWAY_DREAM_TIMEOUT_SECONDS",
+    "SENTICA_GATEWAY_EMBED_TIMEOUT_SECONDS",
+    "SENTICA_GATEWAY_RETRY_ATTEMPTS",
+    "SENTICA_GATEWAY_RETRY_WAIT_SECONDS",
+    "SENTICA_GATEWAY_TOKENIZER",
+    "SENTICA_GATEWAY_TOKENIZER_ALIASES",
+)
+
+
+def gateway_env_names() -> tuple[str, ...]:
+    """Every gateway variable checked at startup."""
+    return _GATEWAY_ENV
 
 
 def gateway_enabled() -> bool:
@@ -118,17 +184,33 @@ def _sync_client() -> Any | None:
 
 
 def _async_client() -> Any | None:
+    """Return the pooled async client for the current Redis URL.
+
+    A new URL replaces the pool. The client is not closed here: closing it
+    closes the pool.
+    """
+    global _async_pool
     url = _redis_url()
     if url is None:
         return None
+    if _async_pool is not None and _async_pool[0] == url:
+        return _async_pool[1]
     import redis.asyncio as aioredis
 
     connect = cast(Callable[..., Any], aioredis.Redis.from_url)
-    return connect(url, decode_responses=True, protocol=2, socket_timeout=2.0)
+    client = connect(url, decode_responses=True, protocol=2, socket_timeout=2.0)
+    _async_pool = (url, client)
+    return client
+
+
+def _drop_async_pool() -> None:
+    global _async_pool
+    _async_pool = None
 
 
 def reset_token_counters() -> None:
     """Delete this process's budget keys. Tests use this between cases."""
+    _drop_async_pool()
     client = _sync_client()
     if client is None:
         return
@@ -187,10 +269,10 @@ async def charge_tokens(tenant: str, purpose: str, tokens: int) -> int:
     return tokens_spent(tenant)
 
 
-async def _read_spent(client: Any, tenant: str, purpose: str) -> tuple[int, int]:
-    total = await client.get(_total_key(tenant))
-    spent = await client.get(_purpose_key(tenant, purpose))
-    return int(total or 0), int(spent or 0)
+def _limit_arg(limit: int | None) -> str:
+    if limit is None:
+        return "-1"
+    return str(limit)
 
 
 async def _reserve(tenant: str, purpose: str) -> None:
@@ -203,19 +285,21 @@ async def _reserve(tenant: str, purpose: str) -> None:
             "Refusing to call: a gateway budget is set and Redis is not configured"
         )
     try:
-        try:
-            total, spent = await _read_spent(client, tenant, purpose)
-        except GatewayBudgetExceeded:
-            raise
-        except Exception as exc:
-            raise GatewayUnavailable(
-                "Refusing to call: the gateway budget store is unavailable"
-            ) from exc
-    finally:
-        await client.aclose()
-    if total_limit is not None and total >= total_limit:
-        raise GatewayBudgetExceeded("token budget exhausted")
-    if purpose_limit is not None and spent >= purpose_limit:
+        allowed = await client.eval(
+            _RESERVE_SCRIPT,
+            2,
+            _total_key(tenant),
+            _purpose_key(tenant, purpose),
+            _limit_arg(total_limit),
+            _limit_arg(purpose_limit),
+        )
+    except GatewayBudgetExceeded:
+        raise
+    except Exception as exc:
+        raise GatewayUnavailable(
+            "Refusing to call: the gateway budget store is unavailable"
+        ) from exc
+    if int(allowed) == 0:
         raise GatewayBudgetExceeded("token budget exhausted")
 
 
@@ -231,19 +315,20 @@ async def _charge(tenant: str, purpose: str, tokens: int) -> None:
             )
         return
     try:
-        try:
-            await client.incrby(_total_key(tenant), tokens)
-            await client.expire(_total_key(tenant), _BUDGET_TTL_SECONDS)
-            await client.incrby(_purpose_key(tenant, purpose), tokens)
-            await client.expire(_purpose_key(tenant, purpose), _BUDGET_TTL_SECONDS)
-        except Exception as exc:
-            if total_limit is not None or purpose_limit is not None:
-                raise GatewayUnavailable(
-                    "Refusing to call: the gateway budget store is unavailable"
-                ) from exc
-            logger.warning("gateway budget store did not record tokens")
-    finally:
-        await client.aclose()
+        await client.eval(
+            _CHARGE_SCRIPT,
+            2,
+            _total_key(tenant),
+            _purpose_key(tenant, purpose),
+            str(tokens),
+            str(_BUDGET_TTL_SECONDS),
+        )
+    except Exception as exc:
+        if total_limit is not None or purpose_limit is not None:
+            raise GatewayUnavailable(
+                "Refusing to call: the gateway budget store is unavailable"
+            ) from exc
+        logger.warning("gateway budget store did not record tokens")
 
 
 def _enabled_flag(name: str) -> str:
@@ -359,6 +444,100 @@ def _wait() -> float:
     )
 
 
+def _refuse(message: str) -> NoReturn:
+    from src.sentica.runtime import SenticaStartupError
+
+    raise SenticaStartupError("Refusing to start: " + message)
+
+
+def _optional_positive(name: str) -> None:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return
+    try:
+        number = float(raw.strip())
+    except ValueError:
+        _refuse(name + " is not a number")
+    if not math.isfinite(number) or number <= 0:
+        _refuse(name + " must be a positive number")
+
+
+def _optional_budget(name: str) -> None:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        _refuse(name + " is not an integer")
+    if value < 0:
+        _refuse(name + " is negative")
+
+
+def refuse_invalid_gateway_env() -> None:
+    """Refuse startup when any gateway environment value is invalid.
+
+    Blank optional values stay at their defaults. This runs in test mode and
+    in production. Call-time checks still refuse a bad value on a later call.
+    """
+    raw_mode = os.environ.get("SENTICA_GATEWAY_MODE")
+    if (
+        raw_mode is not None
+        and raw_mode.strip()
+        and raw_mode.strip().lower() not in _ON_VALUES | _OFF_VALUES
+    ):
+        _refuse("SENTICA_GATEWAY_MODE is invalid")
+
+    attempts = os.environ.get("SENTICA_GATEWAY_RETRY_ATTEMPTS")
+    if attempts is not None and attempts.strip():
+        try:
+            parsed_attempts = int(attempts.strip())
+        except ValueError:
+            _refuse("SENTICA_GATEWAY_RETRY_ATTEMPTS is not an integer")
+        if parsed_attempts < 1:
+            _refuse("SENTICA_GATEWAY_RETRY_ATTEMPTS must be positive")
+
+    _optional_positive("SENTICA_GATEWAY_RETRY_WAIT_SECONDS")
+    _optional_positive("SENTICA_GATEWAY_TIMEOUT_SECONDS")
+    for purpose in _PURPOSES:
+        _optional_positive("SENTICA_GATEWAY_" + purpose.upper() + "_TIMEOUT_SECONDS")
+        _optional_budget("SENTICA_GATEWAY_" + purpose.upper() + "_DAILY_TOKEN_BUDGET")
+    _optional_budget("SENTICA_GATEWAY_DAILY_TOKEN_BUDGET")
+
+    for name in (
+        "SENTICA_GATEWAY_BASE_URL",
+        *("SENTICA_GATEWAY_" + purpose.upper() + "_BASE_URL" for purpose in _PURPOSES),
+    ):
+        raw = os.environ.get(name)
+        if raw is None or not raw.strip():
+            continue
+        if not raw.strip().startswith(("http://", "https://")):
+            _refuse(name + " must be an http or https URL")
+
+    redis_url = os.environ.get("SENTICA_GATEWAY_REDIS_URL")
+    if (
+        redis_url is not None
+        and redis_url.strip()
+        and not redis_url.strip().startswith(("redis://", "rediss://"))
+    ):
+        _refuse("SENTICA_GATEWAY_REDIS_URL must be a redis or rediss URL")
+
+    for purpose in _PURPOSES:
+        name = "SENTICA_GATEWAY_" + purpose.upper() + "_MODEL"
+        raw = os.environ.get(name)
+        if raw is None:
+            continue
+        if not raw.strip():
+            _refuse(name + " is empty")
+
+    from src.sentica.tokenizer import validate_tokenizer_env
+
+    try:
+        validate_tokenizer_env()
+    except ValueError as exc:
+        _refuse(str(exc))
+
+
 def _headers(
     *,
     tenant: str,
@@ -454,7 +633,10 @@ def _emit_call(
 
 
 def _usage_pair(
-    payload: dict[str, Any], messages: list[dict[str, Any]], content: str
+    payload: dict[str, Any],
+    messages: list[dict[str, Any]],
+    content: str,
+    model: str,
 ) -> tuple[int, int, bool]:
     """Return prompt tokens, completion tokens, and whether usage was present."""
     usage = _mapping(payload.get("usage"))
@@ -468,7 +650,7 @@ def _usage_pair(
             and completion >= 0
         ):
             return prompt, completion, True
-    from src.utils.tokens import estimate_tokens
+    from src.sentica.tokenizer import count_gateway_tokens
 
     texts: list[str] = []
     for message in messages:
@@ -477,7 +659,7 @@ def _usage_pair(
             texts.append(value)
     if content:
         texts.append(content)
-    estimate = estimate_tokens(texts)
+    estimate = count_gateway_tokens(texts, model)
     if estimate < 1:
         estimate = 1
     return estimate, 0, False
@@ -795,7 +977,9 @@ async def _chat(
     _choice_row, message, finish = _choice(payload)
     del _choice_row
     content = _text(message)
-    prompt_tokens, completion_tokens, present = _usage_pair(payload, messages, content)
+    prompt_tokens, completion_tokens, present = _usage_pair(
+        payload, messages, content, model
+    )
     billed = (
         prompt_tokens + completion_tokens
         if present
@@ -848,15 +1032,31 @@ def _append_tools(
     )
 
 
+def _offered_names(tools: list[dict[str, Any]] | None) -> set[str]:
+    """Tool names from either a flat schema or an OpenAI function schema."""
+    names: set[str] = set()
+    for tool in tools or []:
+        direct = tool.get("name")
+        if isinstance(direct, str):
+            names.add(direct)
+        function = tool.get("function")
+        if isinstance(function, dict):
+            nested = cast(dict[str, Any], function).get("name")
+            if isinstance(nested, str):
+                names.add(nested)
+    return names
+
+
 async def _execute_tools(
     calls: list[dict[str, Any]],
     tool_executor: Callable[[str, dict[str, Any]], Any],
     offered: set[str],
-) -> tuple[list[dict[str, Any]], list[tuple[str, str]]]:
+) -> tuple[list[dict[str, Any]], list[tuple[str, str]], set[str]]:
     from src.utils.agent_tools import unoffered_tool_refusal
 
     made: list[dict[str, Any]] = []
     results: list[tuple[str, str]] = []
+    succeeded: set[str] = set()
     for call in calls:
         name = str(call["name"])
         parsed = cast(dict[str, Any], call["input"])
@@ -866,9 +1066,11 @@ async def _execute_tools(
             result = tool_executor(name, parsed)
             if isinstance(result, Awaitable):
                 result = await result
+            if not str(result).startswith("ERROR:"):
+                succeeded.add(name)
         made.append({"tool_name": name, "tool_input": parsed, "name": name})
         results.append((str(call["id"]), str(result)))
-    return made, results
+    return made, results, succeeded
 
 
 async def complete_llm(
@@ -885,6 +1087,8 @@ async def complete_llm(
     telemetry: LLMTelemetryContext | None,
     json_mode: bool = False,
     max_input_tokens: int | None = None,
+    force_tools_until: Collection[str] | None = None,
+    max_forced_iterations: int = 3,
 ) -> HonchoLLMCallResponse[Any] | StreamingResponseWithMetadata:
     """Send one function's chat call to its configured gateway model."""
     purpose = _purpose(telemetry)
@@ -1047,6 +1251,12 @@ async def complete_llm(
     message: dict[str, Any] = {}
     content = ""
     calls: list[dict[str, Any]] = []
+    # Same rule as src/llm/tool_loop.py: a required/any choice relaxes to auto
+    # once a gated tool has run, or after max_forced_iterations. An empty gate
+    # means there is no gate, so the first successful round is enough.
+    effective_tool_choice = tool_choice
+    gate = frozenset(force_tools_until or ()) or None
+    forced_rounds = 0
     for index in range(limit):
         iterations = index + 1
         history = _fit(history)
@@ -1060,19 +1270,35 @@ async def complete_llm(
             model,
             attempt,
             duration_ms,
-        ) = await _once(tools, tool_choice, iterations)
+        ) = await _once(tools, effective_tool_choice, iterations)
         total_input += prompt_tokens
         if not calls or tool_executor is None:
+            if (
+                not calls
+                and tool_executor is not None
+                and gate is not None
+                and effective_tool_choice in ("required", "any")
+                and forced_rounds + 1 < max_forced_iterations
+                and index < limit - 1
+            ):
+                forced_rounds += 1
+                history.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "Your last response called no tool. Call one of "
+                            + ", ".join(sorted(gate))
+                            + " to read the relevant memory before answering."
+                        ),
+                    }
+                )
+                continue
             hit_limit = False
             final_output = completion_tokens
-            parsed = await _accept(tools, tool_choice, fetched=True)
+            parsed = await _accept(tools, effective_tool_choice, fetched=True)
             break
-        offered = {
-            name
-            for tool in (tools or [])
-            if isinstance((name := tool.get("name")), str)
-        }
-        made, results = await _execute_tools(calls, tool_executor, offered)
+        offered = _offered_names(tools)
+        made, results, succeeded = await _execute_tools(calls, tool_executor, offered)
         tool_calls_made.extend(made)
         _append_tools(history, calls, results)
         tool_output += completion_tokens
@@ -1088,6 +1314,11 @@ async def complete_llm(
             outcome="success",
             error=None,
         )
+        if effective_tool_choice in ("required", "any"):
+            forced_rounds += 1
+            gate_met = gate is None or bool(succeeded & gate)
+            if gate_met or forced_rounds >= max_forced_iterations:
+                effective_tool_choice = "auto"
     if hit_limit:
         history.append({"role": "user", "content": _SYNTHESIS})
         iterations += 1
@@ -1103,6 +1334,7 @@ async def complete_llm(
     if not stream:
         return response
 
+    # v1 streaming is simulated: the completion is finished, then chunked.
     async def _chunks() -> AsyncIterator[HonchoLLMCallStreamChunk]:
         text = content if isinstance(parsed, str) else ""
         if not isinstance(parsed, str) and response_model is not None:
@@ -1166,7 +1398,9 @@ async def embed_texts(
         max_tokens=0,
         has_tools=False,
     )
-    prompt_tokens, completion_tokens, present = _usage_pair(payload, messages, "")
+    prompt_tokens, completion_tokens, present = _usage_pair(
+        payload, messages, "", model
+    )
     billed = (
         prompt_tokens + completion_tokens
         if present

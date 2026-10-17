@@ -10,13 +10,20 @@ Sentica's broker uses. A hostname, `private`, `0.0.0.0`, `::`, and an empty
 value refuse to start.
 
 The API must never be published to the internet, and it must never be
-reachable from an agent container. The broker is the only client. In the
-local proof, published ports bind `127.0.0.1` so a test on this machine can
-call the API. That bind is not a production exposure.
+reachable from an agent container. The broker is the only client. Bind the
+API on a private interface the broker can reach, not only `127.0.0.1`, and
+not `0.0.0.0`. `127.0.0.1` is only enough when the broker is on the same
+host. In the local proof, published ports bind `127.0.0.1` so a test on
+this machine can call the API. That bind is not a production exposure.
 
-`/health` and `/metrics` answer without a token so an orchestrator can probe
-the process. They return no memory content. Every other path, including
-`/v3` and `/deriver/metrics`, requires a broker token for this tenant.
+`/health`, `/ready`, and `/metrics` answer without a token so an
+orchestrator can probe the process. `/ready` caches a successful database
+check for a few seconds and returns no memory content. Every other path,
+including `/v3` and `/deriver/metrics`, requires a broker token for this
+tenant.
+
+A token may name several workspaces. It can create a workspace, peer,
+session, or webhook only in its primary workspace.
 
 ## Production configuration
 

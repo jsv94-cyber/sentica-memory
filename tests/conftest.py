@@ -132,6 +132,10 @@ _RLS_JOB_ONLY = frozenset(
     {
         "test_runtime_role_lockdown",
         "test_app_engine_is_the_runtime_role",
+        "test_http_red_team_hides_the_other_workspace",
+        "test_workspace_filter_and_rls_policy_are_present",
+        "test_removed_filter_and_disabled_rls_shows_the_canary",
+        "test_multi_workspace_token_creates_only_in_the_primary",
     }
 )
 

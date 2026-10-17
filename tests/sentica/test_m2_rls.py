@@ -103,6 +103,7 @@ def test_rls_job_collects_every_m2_file(request: pytest.FixtureRequest) -> None:
         "test_m2_fix.py",
         "test_m2_partitions.py",
         "test_m2_carryover.py",
+        "test_m2_isolation.py",
     ):
         assert name in proof
     assert "test-m2-rls collected" in (ROOT / "tests" / "conftest.py").read_text(

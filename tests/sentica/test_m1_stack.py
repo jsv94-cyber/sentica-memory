@@ -83,7 +83,10 @@ def _compose(
     if not cert_dir_holder:
         raise RuntimeError("CERT_DIR is not set")
     file_args = ["-f", str(COMPOSE_FILE)]
-    for extra in extra_files or []:
+    extras = list(extra_files or [])
+    if os.environ.get("SENTICA_GVISOR") == "1":
+        extras.append(str(ROOT / "docker-compose.gvisor.yml"))
+    for extra in extras:
         file_args.extend(["-f", extra])
     return _run(
         ["docker", "compose", "-p", PROJECT, *file_args, *args],
@@ -1881,3 +1884,89 @@ def test_deriver_reaches_the_mock_gateway_with_the_four_headers(stack: Path) -> 
     ]
     assert matched
     assert any(row["headers"]["X-Sentica-Purpose"] == "deriver" for row in matched)
+
+
+def _service_id(service: str) -> str:
+    found = _compose(["ps", "-q", service], check=True)
+    container_id = found.stdout.strip()
+    assert container_id, service
+    return container_id
+
+
+def test_api_and_deriver_cannot_reach_the_internet(stack: Path) -> None:
+    """Internal networks have no route to the public internet."""
+    del stack
+    script = (
+        "import socket\n"
+        "sock = socket.socket()\n"
+        "sock.settimeout(3)\n"
+        "try:\n"
+        "    sock.connect(('1.1.1.1', 443))\n"
+        "except OSError:\n"
+        "    raise SystemExit(0)\n"
+        "raise SystemExit(1)\n"
+    )
+    for service in ("api-a", "api-b", "deriver-a", "deriver-b"):
+        result = _compose(
+            ["exec", "-T", service, "python", "-c", script],
+            check=False,
+        )
+        assert result.returncode == 0, service + result.stderr
+
+
+def test_root_filesystem_is_read_only(stack: Path) -> None:
+    del stack
+    script = "open('/probe-write', 'w').write('x')\n"
+    for service in ("api-a", "api-b", "deriver-a", "deriver-b"):
+        result = _compose(
+            ["exec", "-T", service, "python", "-c", script],
+            check=False,
+        )
+        assert result.returncode != 0, service
+
+
+def test_redis_runs_as_a_non_root_user(stack: Path) -> None:
+    del stack
+    for service in ("redis-a", "redis-b"):
+        result = _compose(
+            ["exec", "-T", service, "cat", "/proc/1/status"],
+            check=True,
+        )
+        uid = ""
+        for line in result.stdout.splitlines():
+            if line.startswith("Uid:"):
+                uid = line.split()[1]
+        assert uid and uid != "0", service + " " + result.stdout
+
+
+def test_no_container_has_net_admin(stack: Path) -> None:
+    del stack
+    listing = _compose(["ps", "-q"], check=True)
+    ids = [line.strip() for line in listing.stdout.splitlines() if line.strip()]
+    assert ids
+    for container_id in ids:
+        inspected = _run(["docker", "inspect", container_id], check=True)
+        payload = cast(list[dict[str, Any]], json.loads(inspected.stdout))
+        host = cast(dict[str, Any], payload[0]["HostConfig"])
+        added = cast(list[object], host.get("CapAdd") or [])
+        assert "NET_ADMIN" not in added, container_id
+
+
+def test_publishers_are_single_port_and_non_root(stack: Path) -> None:
+    del stack
+    expected = {
+        "publish-a-api",
+        "publish-a-proxy",
+        "publish-b-api",
+        "publish-b-proxy",
+    }
+    for service in expected:
+        container_id = _service_id(service)
+        inspected = _run(["docker", "inspect", container_id], check=True)
+        payload = cast(list[dict[str, Any]], json.loads(inspected.stdout))
+        config = cast(dict[str, Any], payload[0]["Config"])
+        host = cast(dict[str, Any], payload[0]["HostConfig"])
+        assert str(config.get("User", "")).startswith("65534")
+        assert host.get("ReadonlyRootfs") is True
+        bindings = cast(dict[str, object], host.get("PortBindings") or {})
+        assert len(bindings) == 1, service

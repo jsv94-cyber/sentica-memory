@@ -292,14 +292,72 @@ jobs:
           test "$ready_gateway" = 1
           uv run pytest tests/sentica/test_m2_rls.py tests/sentica/test_m2_fix.py \
             tests/sentica/test_m2_partitions.py tests/sentica/test_m2_carryover.py \
-            tests/sentica/test_m2_data.py \
+            tests/sentica/test_m2_data.py tests/sentica/test_m2_isolation.py \
             -n0 -v --tb=short
+
+  build-default-image:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build the default image
+        run: docker build .
+
+  # Smoke subset of tests/sentica/test_m1_stack.py under runsc. The full
+  # proof stays on the default runtime in test-m1-stack. SENTICA_GVISOR=1
+  # adds docker-compose.gvisor.yml.
+  test-gvisor-smoke:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.3.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: "Set up Python"
+        uses: actions/setup-python@v7
+        with:
+          python-version-file: ".python-version"
+
+      - name: Install the project
+        run: uv sync --all-extras --dev
+
+      - name: Install gVisor runsc
+        run: |
+          set -eu
+          arch=$(uname -m)
+          tmp=$(mktemp -d)
+          url="https://storage.googleapis.com/gvisor/releases/release/latest/${arch}"
+          curl -fsSL -o "$tmp/runsc" "$url/runsc"
+          curl -fsSL -o "$tmp/runsc.sha512" "$url/runsc.sha512"
+          (cd "$tmp" && sha512sum -c runsc.sha512)
+          sudo install -m 0755 "$tmp/runsc" /usr/local/bin/runsc
+          sudo runsc install
+          sudo systemctl restart docker
+          docker info | grep -i runsc
+
+      - name: Run the gVisor smoke subset
+        env:
+          SENTICA_GVISOR: "1"
+        run: |
+          uv run pytest tests/sentica/test_m1_stack.py -n0 --tb=short -k \
+            "test_api_and_deriver_cannot_reach_the_internet or test_root_filesystem_is_read_only or test_redis_runs_as_a_non_root_user or test_no_container_has_net_admin"
 
   # Status check for branch protection rules
   # This job always runs and reports success only if all required jobs pass
   test-status:
     runs-on: ubuntu-24.04
-    needs: [test-python, test-m1-stack, test-m2-rls]
+    needs:
+      [
+        test-python,
+        test-m1-stack,
+        test-m2-rls,
+        build-default-image,
+        test-gvisor-smoke,
+      ]
     if: always()
     steps:
       - name: Check test results
@@ -314,6 +372,14 @@ jobs:
           fi
           if [[ "${{ needs.test-m2-rls.result }}" != "success" ]]; then
             echo "Runtime-role proof failed or was cancelled"
+            exit 1
+          fi
+          if [[ "${{ needs.build-default-image.result }}" != "success" ]]; then
+            echo "Default image build failed or was cancelled"
+            exit 1
+          fi
+          if [[ "${{ needs.test-gvisor-smoke.result }}" != "success" ]]; then
+            echo "gVisor smoke failed or was cancelled"
             exit 1
           fi
           echo "All required tests passed!"

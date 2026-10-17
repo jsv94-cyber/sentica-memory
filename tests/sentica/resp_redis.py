@@ -46,8 +46,40 @@ def _bulk(value: str) -> bytes:
     return b"$" + str(len(raw)).encode() + b"\r\n" + raw + b"\r\n"
 
 
-def _reply(store: dict[str, str], lock: threading.Lock, args: list[str]) -> bytes:
+def _eval(store: dict[str, str], lock: threading.Lock, args: list[str]) -> bytes:
+    script = args[1]
+    numkeys = int(args[2])
+    keys = args[3 : 3 + numkeys]
+    argv = args[3 + numkeys :]
+    with lock:
+        if "sentica-budget-reserve" in script:
+            total = int(store.get(keys[0], "0"))
+            spent = int(store.get(keys[1], "0"))
+            total_limit = int(argv[0])
+            purpose_limit = int(argv[1])
+            if total_limit >= 0 and total >= total_limit:
+                return b":0\r\n"
+            if purpose_limit >= 0 and spent >= purpose_limit:
+                return b":0\r\n"
+            return b":1\r\n"
+        if "sentica-budget-charge" in script:
+            tokens = int(argv[0])
+            store[keys[0]] = str(int(store.get(keys[0], "0")) + tokens)
+            store[keys[1]] = str(int(store.get(keys[1], "0")) + tokens)
+            return _bulk(store[keys[0]])
+    return b"-ERR unknown script\r\n"
+
+
+def _reply(
+    store: dict[str, str],
+    lock: threading.Lock,
+    args: list[str],
+    commands: list[str],
+) -> bytes:
     command = args[0].upper()
+    commands.append(command)
+    if command == "EVAL":
+        return _eval(store, lock, args)
     if command == "HELLO":
         return b"%1\r\n$5\r\nproto\r\n:2\r\n"
     if command in {"AUTH", "CLIENT", "SELECT", "PING"}:
@@ -101,13 +133,21 @@ def _reply(store: dict[str, str], lock: threading.Lock, args: list[str]) -> byte
 
 
 class _Server(socketserver.ThreadingTCPServer):
+    # The gateway keeps a pooled connection open. Waiting for that handler
+    # to finish would deadlock teardown.
+    daemon_threads: bool = True
+    block_on_close: bool = False
     store: dict[str, str]
     lock: threading.Lock
+    commands: list[str]
 
-    def __init__(self, store: dict[str, str], lock: threading.Lock) -> None:
+    def __init__(
+        self, store: dict[str, str], lock: threading.Lock, commands: list[str]
+    ) -> None:
         super().__init__(("127.0.0.1", 0), _Handler)
         self.store = store
         self.lock = lock
+        self.commands = commands
 
 
 class _Handler(socketserver.BaseRequestHandler):
@@ -115,6 +155,7 @@ class _Handler(socketserver.BaseRequestHandler):
         server = cast(_Server, self.server)
         store = server.store
         lock = server.lock
+        commands = server.commands
         buf = b""
         while True:
             chunk = self.request.recv(65536)
@@ -125,7 +166,7 @@ class _Handler(socketserver.BaseRequestHandler):
                 args, buf = _parse_one(buf)
                 if args is None:
                     break
-                self.request.sendall(_reply(store, lock, args))
+                self.request.sendall(_reply(store, lock, args, commands))
 
 
 class RespRedis:
@@ -133,13 +174,15 @@ class RespRedis:
 
     store: dict[str, str]
     lock: threading.Lock
+    commands: list[str]
     _server: _Server
     _thread: threading.Thread
 
     def __init__(self) -> None:
         self.store = {}
         self.lock = threading.Lock()
-        self._server = _Server(self.store, self.lock)
+        self.commands = []
+        self._server = _Server(self.store, self.lock, self.commands)
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
 

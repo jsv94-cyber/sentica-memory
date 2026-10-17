@@ -46,6 +46,7 @@ class _Gateway(ThreadingHTTPServer):
     status: int
     tool_round: bool
     always_tools: bool
+    ignore_tools_once: bool
     omit_usage: bool
     delay: float
     scripted: dict[str, str] | None
@@ -57,6 +58,7 @@ class _Gateway(ThreadingHTTPServer):
         self.status = 200
         self.tool_round = False
         self.always_tools = False
+        self.ignore_tools_once = False
         self.omit_usage = False
         self.delay = 0.0
         self.scripted = None
@@ -125,6 +127,11 @@ class _Handler(BaseHTTPRequestHandler):
                         "message": message,
                     }
                 ]
+            }
+        elif gateway.ignore_tools_once and len(gateway.requests) == 1:
+            payload = {
+                "choices": [{"message": {"role": "assistant", "content": "too soon"}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
             }
         elif (gateway.always_tools or gateway.tool_round) and body.get("tools"):
             if gateway.tool_round and len(gateway.requests) != 1:
@@ -980,3 +987,80 @@ async def test_gateway_forwards_limits_dimensions_and_truncation(
         body.get("dimensions") == settings.EMBEDDING.VECTOR_DIMENSIONS
         for body in bodies
     )
+
+
+async def test_force_tools_until_relaxes_tool_choice(gateway: _Gateway) -> None:
+    """tool_choice stays required until the gated tool runs, then becomes auto."""
+    gateway.tool_round = True
+
+    async def _search(_name: str, _arguments: dict[str, Any]) -> str:
+        return "found"
+
+    await honcho_llm_call(
+        model_config=settings.SUMMARY.MODEL_CONFIG,
+        prompt="find it",
+        max_tokens=16,
+        tools=[{"type": "function", "function": {"name": "search_memory"}}],
+        tool_choice="required",
+        tool_executor=_search,
+        force_tools_until=["search_memory"],
+        telemetry=LLMTelemetryContext(
+            workspace_name="left",
+            call_purpose="dialectic.answer",
+            parent_category="dialectic",
+        ),
+    )
+    choices = [row["body"].get("tool_choice") for row in gateway.requests]
+    assert choices[0] == "required"
+    assert choices[-1] == "auto"
+
+
+async def test_unmet_force_gate_nudges_before_accepting(gateway: _Gateway) -> None:
+    gateway.ignore_tools_once = True
+    gateway.tool_round = True
+
+    async def _search(_name: str, _arguments: dict[str, Any]) -> str:
+        return "found"
+
+    await honcho_llm_call(
+        model_config=settings.SUMMARY.MODEL_CONFIG,
+        prompt="find it",
+        max_tokens=16,
+        tools=[{"type": "function", "function": {"name": "search_memory"}}],
+        tool_choice="required",
+        tool_executor=_search,
+        force_tools_until=["search_memory"],
+        max_forced_iterations=3,
+        telemetry=LLMTelemetryContext(
+            workspace_name="left",
+            call_purpose="dialectic.answer",
+            parent_category="dialectic",
+        ),
+    )
+    contents = [str(row["body"].get("messages")) for row in gateway.requests]
+    assert any("called no tool" in text for text in contents)
+    assert [row["body"].get("tool_choice") for row in gateway.requests[:2]] == [
+        "required",
+        "required",
+    ]
+
+
+async def test_gateway_stream_is_simulated(gateway: _Gateway) -> None:
+    """v1 waits for the full completion, then yields it as chunks."""
+    response = await honcho_llm_call(
+        model_config=settings.SUMMARY.MODEL_CONFIG,
+        prompt="hello",
+        max_tokens=16,
+        stream=True,
+        telemetry=LLMTelemetryContext(
+            workspace_name="left",
+            call_purpose="dialectic.answer",
+            parent_category="dialectic",
+        ),
+    )
+    assert gateway.requests
+    assert gateway.requests[0]["body"].get("stream") is not True
+    chunks = [chunk async for chunk in response]
+    assert chunks[0].content == "gateway ok"
+    assert chunks[0].is_done is False
+    assert chunks[-1].is_done is True

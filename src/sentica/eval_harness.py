@@ -1,13 +1,19 @@
 """Deterministic scores for the synthetic-business retrieval eval.
 
 No model judges a result. Recall is the share of gold conclusions found in
-the top k. An abstention question scores full marks only when the search
-returns nothing. A forbidden id in the results scores zero, which is how a
-superseded or out-of-date fact fails the question.
+the top k of hybrid keyword-plus-vector search. An abstention question
+scores full marks only when the search returns nothing. A forbidden id in
+the results scores zero, which is how a superseded or out-of-date fact fails
+the question.
+
+Embeddings are hashed character n-grams of the text. They are not one-hot
+slot vectors, so a query is not an exact copy of its gold fact.
 """
 
 from __future__ import annotations
 
+import hashlib
+import math
 import re
 from datetime import UTC, datetime
 from typing import NamedTuple
@@ -54,11 +60,31 @@ class Question(NamedTuple):
     abstain: bool = False
 
 
-def one_hot(slot: int, dimensions: int) -> list[float]:
-    """A unit vector. Different slots are orthogonal, so distance is 1."""
-    values = [0.0] * dimensions
-    values[slot] = 1.0
-    return values
+def text_embedding(text: str, dimensions: int) -> list[float]:
+    """L2-normalized hashed character n-grams.
+
+    Widths 3, 4, and 5 are signed into buckets with SHA-256. Two different
+    strings do not land on the same single axis, so vector recall is not 100
+    by construction.
+    """
+    if dimensions < 2:
+        raise ValueError("dimensions must be at least 2")
+    buckets = [0.0] * dimensions
+    folded = " " + text.lower() + " "
+    for width in (3, 4, 5):
+        if len(folded) < width:
+            continue
+        for index in range(len(folded) - width + 1):
+            gram = folded[index : index + width]
+            digest = hashlib.sha256(gram.encode()).digest()
+            bucket = int.from_bytes(digest[:4], "big") % dimensions
+            sign = 1.0 if digest[4] & 1 else -1.0
+            buckets[bucket] += sign
+    norm = math.sqrt(sum(value * value for value in buckets))
+    if norm == 0.0:
+        buckets[0] = 1.0
+        return buckets
+    return [value / norm for value in buckets]
 
 
 def _noise() -> tuple[Fact, ...]:

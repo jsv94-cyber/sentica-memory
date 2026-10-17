@@ -27,10 +27,10 @@ from src.sentica.eval_harness import (
     Fact,
     baseline_leak_count,
     category_means,
-    one_hot,
     parse_baseline,
     question_scores,
     regressions,
+    text_embedding,
 )
 from src.sentica.queue import SenticaTenantRefused, pop_and_check_tenant
 from src.sentica.retrieval import prepare_brief, search_conclusions
@@ -77,6 +77,51 @@ def _tokens(text: str) -> set[str]:
 
 def _by_key() -> dict[str, Fact]:
     return {fact.key: fact for fact in FACTS}
+
+
+def test_embeddings_are_not_one_hot_copies() -> None:
+    """A query vector is not the gold fact, and it is not a single axis."""
+    dimensions = settings.EMBEDDING.VECTOR_DIMENSIONS
+    compared = 0
+    for question in QUESTIONS:
+        if not question.gold:
+            continue
+        compared += 1
+        query = text_embedding(question.query, dimensions)
+        fact = next(item for item in FACTS if item.key == question.gold[0])
+        gold = text_embedding(fact.content, dimensions)
+        assert query != gold, question.name
+        nonzero = sum(1 for value in query if value != 0.0)
+        assert nonzero > 1, question.name
+    assert compared >= 2
+
+
+def test_vector_only_recall_is_not_perfect() -> None:
+    """Nearest n-gram neighbor is not the gold fact for every question."""
+    dimensions = settings.EMBEDDING.VECTOR_DIMENSIONS
+    misses = 0
+    scored = 0
+    for question in QUESTIONS:
+        if question.abstain or not question.gold:
+            continue
+        scored += 1
+        query = text_embedding(question.query, dimensions)
+        pool = [fact for fact in FACTS if fact.business == question.business]
+        nearest = max(
+            pool,
+            key=lambda fact: sum(
+                left * right
+                for left, right in zip(
+                    query,
+                    text_embedding(fact.content, dimensions),
+                    strict=True,
+                )
+            ),
+        )
+        if nearest.key not in question.gold:
+            misses += 1
+    assert scored >= 2
+    assert misses >= 1
 
 
 def test_seed_facts_are_not_banned() -> None:
@@ -143,7 +188,7 @@ def _document(fact: Fact) -> schemas.DocumentCreate:
             message_ids=[1],
             message_created_at="2026-01-02T00:00:00Z",
         ),
-        embedding=one_hot(fact.slot, settings.EMBEDDING.VECTOR_DIMENSIONS),
+        embedding=text_embedding(fact.content, settings.EMBEDDING.VECTOR_DIMENSIONS),
     )
 
 
@@ -221,7 +266,7 @@ async def _search(
     db: AsyncSession,
     workspace_name: str,
     query: str,
-    slot: int,
+    _slot: int,
     *,
     since: datetime | None = None,
 ) -> list[models.Document]:
@@ -233,7 +278,7 @@ async def _search(
         observed=_PEER,
         since=since,
         top_k=10,
-        embedding=one_hot(slot, settings.EMBEDDING.VECTOR_DIMENSIONS),
+        embedding=text_embedding(query, settings.EMBEDDING.VECTOR_DIMENSIONS),
     )
 
 
@@ -411,7 +456,7 @@ async def test_isolation_red_team_reports_zero_leaks(
         token_budget=800,
         query=secret.content,
         top_k=10,
-        embedding=one_hot(secret.slot, settings.EMBEDDING.VECTOR_DIMENSIONS),
+        embedding=text_embedding(secret.content, settings.EMBEDDING.VECTOR_DIMENSIONS),
     )
     if "violetkey" in brief.model_dump_json():
         leaks.append("brief included the other workspace secret")
