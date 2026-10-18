@@ -262,27 +262,31 @@ structural.
   the deriver is `10.8.0.11`, migrate is `10.8.0.12`, the certificate
   proxy is `10.8.0.13:6432`, and the model gateway is `10.8.0.14:443`.
   Those are the `--ip` values on the run commands above. `DOCKER-USER` is
-  the host firewall for traffic that leaves those containers. Established
-  replies return. The API, the deriver, and migrate may open the proxy.
-  The API and the deriver may open the gateway. The gateway may open the
-  provider hosts on port 443. Every container address is then dropped, so
-  an address Docker would otherwise assign cannot leave the host.
+  the host firewall for traffic that leaves those containers. Docker creates
+  that chain with a RETURN that matches every packet. `-A` appends after
+  that RETURN, so the new rule never runs. Insert each rule with `-I` at
+  the position below. The positions keep this order and stay in front of
+  the default RETURN. Established replies return. The API, the deriver,
+  and migrate may open the proxy. The API and the deriver may open the
+  gateway. The gateway may open the provider hosts on port 443. Every
+  container address is then dropped, so an address Docker would otherwise
+  assign cannot leave the host.
 
 ```bash
-iptables -A DOCKER-USER -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
-iptables -A DOCKER-USER -s 10.8.0.10/32 -d 10.8.0.13/32 -p tcp --dport 6432 -j RETURN
-iptables -A DOCKER-USER -s 10.8.0.11/32 -d 10.8.0.13/32 -p tcp --dport 6432 -j RETURN
-iptables -A DOCKER-USER -s 10.8.0.12/32 -d 10.8.0.13/32 -p tcp --dport 6432 -j RETURN
-iptables -A DOCKER-USER -s 10.8.0.10/32 -d 10.8.0.14/32 -p tcp --dport 443 -j RETURN
-iptables -A DOCKER-USER -s 10.8.0.11/32 -d 10.8.0.14/32 -p tcp --dport 443 -j RETURN
-iptables -A DOCKER-USER -s 10.8.0.14/32 -p tcp -d api.openai.com --dport 443 -j RETURN
-iptables -A DOCKER-USER -s 10.8.0.14/32 -p tcp -d api.anthropic.com --dport 443 -j RETURN
-iptables -A DOCKER-USER -s 10.8.0.14/32 -p tcp -d generativelanguage.googleapis.com --dport 443 -j RETURN
-iptables -A DOCKER-USER -s 10.8.0.10/32 -j DROP
-iptables -A DOCKER-USER -s 10.8.0.11/32 -j DROP
-iptables -A DOCKER-USER -s 10.8.0.12/32 -j DROP
-iptables -A DOCKER-USER -s 10.8.0.13/32 -j DROP
-iptables -A DOCKER-USER -s 10.8.0.14/32 -j DROP
+iptables -I DOCKER-USER 1 -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+iptables -I DOCKER-USER 2 -s 10.8.0.10/32 -d 10.8.0.13/32 -p tcp --dport 6432 -j RETURN
+iptables -I DOCKER-USER 3 -s 10.8.0.11/32 -d 10.8.0.13/32 -p tcp --dport 6432 -j RETURN
+iptables -I DOCKER-USER 4 -s 10.8.0.12/32 -d 10.8.0.13/32 -p tcp --dport 6432 -j RETURN
+iptables -I DOCKER-USER 5 -s 10.8.0.10/32 -d 10.8.0.14/32 -p tcp --dport 443 -j RETURN
+iptables -I DOCKER-USER 6 -s 10.8.0.11/32 -d 10.8.0.14/32 -p tcp --dport 443 -j RETURN
+iptables -I DOCKER-USER 7 -s 10.8.0.14/32 -p tcp -d api.openai.com --dport 443 -j RETURN
+iptables -I DOCKER-USER 8 -s 10.8.0.14/32 -p tcp -d api.anthropic.com --dport 443 -j RETURN
+iptables -I DOCKER-USER 9 -s 10.8.0.14/32 -p tcp -d generativelanguage.googleapis.com --dport 443 -j RETURN
+iptables -I DOCKER-USER 10 -s 10.8.0.10/32 -j DROP
+iptables -I DOCKER-USER 11 -s 10.8.0.11/32 -j DROP
+iptables -I DOCKER-USER 12 -s 10.8.0.12/32 -j DROP
+iptables -I DOCKER-USER 13 -s 10.8.0.13/32 -j DROP
+iptables -I DOCKER-USER 14 -s 10.8.0.14/32 -j DROP
 ```
 
 Redis runs as the `redis` user. The entry script starts as root only long

@@ -7,7 +7,7 @@ import ipaddress
 import re
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 
 import pytest
 from fastapi.testclient import TestClient
@@ -237,6 +237,188 @@ def _drop_sources(command: str) -> list[ipaddress.IPv4Network]:
     return [network]
 
 
+class _FirewallRule(NamedTuple):
+    source: ipaddress.IPv4Network | None
+    dest: ipaddress.IPv4Network | None
+    hostname: bool
+    dport: int | None
+    established: bool
+    target: str
+    default: bool
+
+
+def _token_after(tokens: list[str], flag: str) -> str | None:
+    if flag not in tokens:
+        return None
+    index = tokens.index(flag)
+    if index + 1 >= len(tokens):
+        return None
+    return tokens[index + 1]
+
+
+def _ipv4_network(raw: str | None) -> ipaddress.IPv4Network | None:
+    if raw is None:
+        return None
+    try:
+        network = ipaddress.ip_network(raw, strict=False)
+    except ValueError:
+        return None
+    if not isinstance(network, ipaddress.IPv4Network):
+        return None
+    return network
+
+
+def _iptables_rule(command: str) -> tuple[str, int | None, _FirewallRule] | None:
+    """Parse one ``DOCKER-USER`` command into its op, position, and match."""
+    if not command.startswith("iptables ") or "DOCKER-USER" not in command.split():
+        return None
+    tokens = command.split()
+    index = tokens.index("DOCKER-USER")
+    if index == 0 or tokens[index - 1] not in {"-A", "-I"}:
+        return None
+    op = tokens[index - 1]
+    rest = tokens[index + 1 :]
+    position: int | None = None
+    if op == "-I" and rest and rest[0].isdigit():
+        position = int(rest[0])
+        rest = rest[1:]
+    dest_token = _token_after(rest, "-d")
+    dest = _ipv4_network(dest_token)
+    dport_token = _token_after(rest, "--dport")
+    dport = int(dport_token) if dport_token and dport_token.isdigit() else None
+    target = "RETURN"
+    if "-j" in rest:
+        target = rest[rest.index("-j") + 1]
+    ctstate = _token_after(rest, "--ctstate")
+    rule = _FirewallRule(
+        source=_ipv4_network(_token_after(rest, "-s")),
+        dest=dest,
+        hostname=dest_token is not None and dest is None,
+        dport=dport,
+        established=ctstate is not None and "ESTABLISHED" in ctstate,
+        target=target,
+        default=False,
+    )
+    return op, position, rule
+
+
+def _docker_user_chain(commands: list[str]) -> list[_FirewallRule]:
+    """Apply the documented rules in front of Docker's default RETURN."""
+    chain = [
+        _FirewallRule(
+            source=None,
+            dest=None,
+            hostname=False,
+            dport=None,
+            established=False,
+            target="RETURN",
+            default=True,
+        )
+    ]
+    for command in commands:
+        parsed = _iptables_rule(command)
+        if parsed is None:
+            continue
+        op, position, rule = parsed
+        if op == "-A":
+            chain.append(rule)
+            continue
+        insert_at = 0 if position is None else position - 1
+        if insert_at < 0:
+            insert_at = 0
+        if insert_at > len(chain):
+            insert_at = len(chain)
+        chain.insert(insert_at, rule)
+    return chain
+
+
+def _named_container_ips(
+    commands: list[str],
+) -> dict[str, ipaddress.IPv4Address]:
+    found: dict[str, ipaddress.IPv4Address] = {}
+    for command in commands:
+        if not command.startswith("docker run "):
+            continue
+        name = _flag(command, "--name")
+        raw = _flag(command, "--ip")
+        address = _ipv4_network(raw)
+        if name is None or address is None or address.prefixlen != 32:
+            continue
+        found[name] = address.network_address
+    return found
+
+
+def _rule_matches(
+    rule: _FirewallRule,
+    src: ipaddress.IPv4Address,
+    dst: ipaddress.IPv4Address,
+    dport: int,
+    *,
+    established: bool,
+) -> bool:
+    if rule.default:
+        return True
+    if rule.established and not established:
+        return False
+    if rule.source is not None and src not in rule.source:
+        return False
+    if rule.hostname:
+        return False
+    if rule.dest is not None and dst not in rule.dest:
+        return False
+    return rule.dport is None or rule.dport == dport
+
+
+def _verdict(
+    chain: list[_FirewallRule],
+    src: ipaddress.IPv4Address,
+    dst: ipaddress.IPv4Address,
+    dport: int,
+) -> str:
+    for rule in chain:
+        if _rule_matches(rule, src, dst, dport, established=False):
+            if rule.default:
+                return "DEFAULT"
+            return rule.target
+    return "NONE"
+
+
+_ALLOWS = (
+    ("sentica-memory-api", "sentica-memory-proxy", 6432),
+    ("sentica-memory-deriver", "sentica-memory-proxy", 6432),
+    ("sentica-memory-migrate", "sentica-memory-proxy", 6432),
+    ("sentica-memory-api", "sentica-memory-gateway", 443),
+    ("sentica-memory-deriver", "sentica-memory-gateway", 443),
+)
+
+
+def docker_user_order_gaps(deploy: str) -> list[str]:
+    """Rules that sit behind Docker's RETURN, or that drop an allowed flow.
+
+    ``DOCKER-USER`` is created with a RETURN that matches every packet.
+    ``-A`` appends after it. ``-I`` without a position inserts at the head,
+    which reverses a list that was written allow-then-drop.
+    """
+    commands = _bash_commands(deploy)
+    chain = _docker_user_chain(commands)
+    gaps: list[str] = []
+    if not chain or not chain[-1].default:
+        gaps.append("DOCKER-USER rules are appended after the default RETURN")
+    public = ipaddress.ip_address("1.2.3.4")
+    ips = _named_container_ips(commands)
+    for address in ips.values():
+        if _verdict(chain, address, public, 443) != "DROP":
+            gaps.append(str(address) + " is behind the default RETURN")
+    for source_name, dest_name, port in _ALLOWS:
+        source = ips.get(source_name)
+        dest = ips.get(dest_name)
+        if source is None or dest is None:
+            continue
+        if _verdict(chain, source, dest, port) != "RETURN":
+            gaps.append(source_name + " to " + dest_name + " is not allowed")
+    return gaps
+
+
 def firewall_gaps(deploy: str) -> list[str]:
     """Container addresses the DROP rules miss, and a subnet on the broker."""
     gaps: list[str] = []
@@ -297,8 +479,40 @@ def test_deploy_firewall_covers_every_container_ip() -> None:
 
     A substring check for ``-j DROP`` still passed when Docker assigned an
     address the rules do not name, and when the bridge included ``10.8.0.4``.
+    Appending to ``DOCKER-USER`` still passed that check when Docker's
+    default RETURN was evaluated first.
     """
-    assert firewall_gaps(_text("docs/DEPLOY.md")) == []
+    deploy = _text("docs/DEPLOY.md")
+    assert firewall_gaps(deploy) == []
+    assert docker_user_order_gaps(deploy) == []
+    appended = """```bash
+docker run --name sentica-memory-api --ip 10.8.0.10 img
+docker run --name sentica-memory-deriver --ip 10.8.0.11 img
+docker run --name sentica-memory-migrate --ip 10.8.0.12 img
+docker run --name sentica-memory-proxy --ip 10.8.0.13 img
+docker run --name sentica-memory-gateway --ip 10.8.0.14 img
+```
+```bash
+iptables -A DOCKER-USER -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+iptables -A DOCKER-USER -s 10.8.0.10/32 -d 10.8.0.13/32 -p tcp --dport 6432 -j RETURN
+iptables -A DOCKER-USER -s 10.8.0.11/32 -d 10.8.0.13/32 -p tcp --dport 6432 -j RETURN
+iptables -A DOCKER-USER -s 10.8.0.12/32 -d 10.8.0.13/32 -p tcp --dport 6432 -j RETURN
+iptables -A DOCKER-USER -s 10.8.0.10/32 -d 10.8.0.14/32 -p tcp --dport 443 -j RETURN
+iptables -A DOCKER-USER -s 10.8.0.11/32 -d 10.8.0.14/32 -p tcp --dport 443 -j RETURN
+iptables -A DOCKER-USER -s 10.8.0.10/32 -j DROP
+iptables -A DOCKER-USER -s 10.8.0.11/32 -j DROP
+iptables -A DOCKER-USER -s 10.8.0.12/32 -j DROP
+iptables -A DOCKER-USER -s 10.8.0.13/32 -j DROP
+iptables -A DOCKER-USER -s 10.8.0.14/32 -j DROP
+```
+"""
+    assert any(
+        "behind the default RETURN" in item for item in docker_user_order_gaps(appended)
+    )
+    reversed_insert = appended.replace("-A DOCKER-USER", "-I DOCKER-USER")
+    assert any(
+        "is not allowed" in item for item in docker_user_order_gaps(reversed_insert)
+    )
     open_egress = """```bash
 docker network create --driver bridge --subnet 10.8.0.0/24 sentica-instance
 ```
