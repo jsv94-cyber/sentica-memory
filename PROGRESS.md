@@ -462,6 +462,9 @@ Built:
   `source_trust`. Production refuses a missing label.
 - The default image pins `python:3.13-slim-bookworm` and `uv` by
   digest. `docs/RELEASE-v0.2.0-sentica.md` records the built digest.
+- CI job `build-default-image` creates a docker-container builder
+  before the tar export. The runner's default driver refused that
+  exporter.
 - The footprint table in `docs/INTEGRATION.md` is a throwaway stack on
   this host. Jose's Redis on port 6379 was not used.
 

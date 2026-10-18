@@ -31,8 +31,11 @@ command is:
 docker build --provenance=false --sbom=false -o type=docker,dest=image.tar,rewrite-timestamp=true .
 ```
 
-A second build with `--no-cache` wrote the same manifest and the same
-layer blobs. The image manifest digest is:
+That export needs a Buildx driver other than the default `docker`
+driver. The hosted runner refuses it. CI creates a `docker-container`
+builder, then runs `docker buildx build` with the same flags. A second
+build with `--no-cache` wrote the same manifest and the same layer
+blobs. The image manifest digest is:
 
 `sha256:35a6bf1f11b39428d31a9e06b81dc0279ab7ce1d5180879690e28fc59db7f055`
 

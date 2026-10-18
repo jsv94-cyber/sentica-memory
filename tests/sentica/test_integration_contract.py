@@ -49,7 +49,12 @@ def test_release_notes_pin_the_base_images() -> None:
     assert uv_digest in notes
     assert "SOURCE_DATE_EPOCH" in dockerfile
     assert "rewrite-timestamp" in notes
+    assert "docker-container" in notes
     assert "IMAGE_DIGEST_PENDING" not in notes
+    workflow = _text(".github/workflows/unittest.yml")
+    assert "--driver docker-container" in workflow
+    assert "rewrite-timestamp=true" in workflow
+    assert "--provenance=false" in workflow
     image = "sha256:35a6bf1f11b39428d31a9e06b81dc0279ab7ce1d5180879690e28fc59db7f055"
     assert image in notes
     assert re.search(r"sha256:[0-9a-f]{64}", notes)
