@@ -480,11 +480,29 @@ def provider_egress_gaps(deploy: str) -> list[str]:
     return gaps
 
 
+def _spare_address_gap(
+    subnet: ipaddress.IPv4Network,
+    gateway: ipaddress.IPv4Address | None,
+    assigned: list[ipaddress.IPv4Address],
+) -> str | None:
+    """A bridge with no host left after the gateway and the containers."""
+    hosts = list(subnet.hosts())
+    if not hosts:
+        return "bridge subnet has no spare address"
+    bridge = gateway if gateway is not None else hosts[0]
+    if bridge not in subnet:
+        return "bridge gateway is outside the subnet"
+    spare = [host for host in hosts if host != bridge and host not in assigned]
+    if not spare:
+        return "bridge subnet has no spare address"
+    return None
+
+
 def firewall_gaps(deploy: str) -> list[str]:
     """Container addresses the DROP rules miss, and a subnet on the broker."""
     gaps: list[str] = []
     commands = _bash_commands(deploy)
-    subnets: list[ipaddress.IPv4Network] = []
+    subnets: list[tuple[ipaddress.IPv4Network, ipaddress.IPv4Address | None]] = []
     for command in commands:
         if not command.startswith("docker network create"):
             continue
@@ -500,13 +518,24 @@ def firewall_gaps(deploy: str) -> list[str]:
         if not isinstance(subnet, ipaddress.IPv4Network):
             gaps.append("docker network create subnet is not IPv4")
             continue
-        subnets.append(subnet)
+        gateway: ipaddress.IPv4Address | None = None
+        raw_gateway = _flag(command, "--gateway")
+        if raw_gateway is not None:
+            try:
+                parsed_gateway = ipaddress.ip_address(raw_gateway)
+            except ValueError:
+                gaps.append("bridge gateway is not an address")
+                parsed_gateway = None
+            if isinstance(parsed_gateway, ipaddress.IPv4Address):
+                gateway = parsed_gateway
+        subnets.append((subnet, gateway))
         if _BROKER in subnet:
             gaps.append("subnet " + raw + " overlaps the broker 10.8.0.4")
     drops: list[ipaddress.IPv4Network] = []
     for command in commands:
         drops.extend(_drop_sources(command))
     names: set[str] = set()
+    assigned: list[ipaddress.IPv4Address] = []
     for command in commands:
         if not command.startswith("docker run "):
             continue
@@ -525,10 +554,15 @@ def firewall_gaps(deploy: str) -> list[str]:
         if not isinstance(address, ipaddress.IPv4Address):
             gaps.append(raw_ip + " is not an IPv4 address")
             continue
-        if subnets and not any(address in subnet for subnet in subnets):
+        assigned.append(address)
+        if subnets and not any(address in subnet for subnet, _gateway in subnets):
             gaps.append(raw_ip + " is outside the bridge subnet")
         if not any(address in network for network in drops):
             gaps.append(raw_ip + " is not covered by a DROP rule")
+    for subnet, gateway in subnets:
+        spare = _spare_address_gap(subnet, gateway, assigned)
+        if spare is not None:
+            gaps.append(spare)
     for name in _REQUIRED_CONTAINERS:
         if name not in names:
             gaps.append(name + " has no run command")
@@ -624,6 +658,7 @@ iptables -A DOCKER-USER -s 10.8.0.14/32 -j DROP
 """
     )
     assert any("10.8.0.10" in item and "DROP" in item for item in limited)
+    assert any("no spare address" in item for item in limited)
 
 
 def test_dockerignore_excludes_bytecode() -> None:

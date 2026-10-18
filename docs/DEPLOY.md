@@ -13,14 +13,16 @@ seccomp profile stays on. Do not disable seccomp.
 Create the instance network once. The API, deriver, migrate, certificate
 proxy, and model gateway containers join it. `10.8.0.4` is the host
 address the broker uses. It is not an address on this bridge. The subnet
-is `10.8.0.8/29` (`10.8.0.8` through `10.8.0.15`). The bridge gateway is
-`10.8.0.9`. Each container below has a fixed `--ip` in that range.
+is `10.8.0.16/28` (`10.8.0.16` through `10.8.0.31`). The bridge gateway is
+`10.8.0.17`. The containers use `10.8.0.18` through `10.8.0.22`.
+`10.8.0.23` through `10.8.0.30` are spare. Each container below has a
+fixed `--ip` in that range.
 
 ```bash
 docker network create \
   --driver bridge \
-  --subnet 10.8.0.8/29 \
-  --gateway 10.8.0.9 \
+  --subnet 10.8.0.16/28 \
+  --gateway 10.8.0.17 \
   sentica-instance
 ```
 
@@ -34,7 +36,7 @@ docker run --rm \
   --security-opt no-new-privileges:true \
   --runtime runsc \
   --network sentica-instance \
-  --ip 10.8.0.10 \
+  --ip 10.8.0.18 \
   -p 10.8.0.4:8000:8000 \
   -v /run/sentica/certs/client.crt:/certs/client.crt:ro \
   -v /run/sentica/certs/client.key:/certs/client.key:ro \
@@ -68,7 +70,7 @@ docker run --rm \
   --security-opt no-new-privileges:true \
   --runtime runsc \
   --network sentica-instance \
-  --ip 10.8.0.11 \
+  --ip 10.8.0.19 \
   -v /run/sentica/certs/client.crt:/certs/client.crt:ro \
   -v /run/sentica/certs/client.key:/certs/client.key:ro \
   -v /run/sentica/certs/ca.crt:/certs/ca.crt:ro \
@@ -94,7 +96,7 @@ docker run --rm \
   --security-opt no-new-privileges:true \
   --runtime runsc \
   --network sentica-instance \
-  --ip 10.8.0.12 \
+  --ip 10.8.0.20 \
   -v /run/sentica/certs/client.crt:/certs/client.crt:ro \
   -v /run/sentica/certs/client.key:/certs/client.key:ro \
   -v /run/sentica/certs/ca.crt:/certs/ca.crt:ro \
@@ -106,7 +108,7 @@ docker run --rm \
 
 ## Certificate proxy
 
-The proxy listens on `10.8.0.13:6432` for the API, the deriver, and
+The proxy listens on `10.8.0.21:6432` for the API, the deriver, and
 migrate. It is not published on the host. Postgres is on the internal
 `db` network, not on `10.8.0.4` and not on this bridge. A `RETURN` for
 that Postgres address has to be inserted before the proxy `DROP` below.
@@ -120,7 +122,7 @@ docker run --rm \
   --security-opt no-new-privileges:true \
   --runtime runsc \
   --network sentica-instance \
-  --ip 10.8.0.13 \
+  --ip 10.8.0.21 \
   -v /run/sentica/certs/proxy.crt:/certs/proxy.crt:ro \
   -v /run/sentica/certs/proxy.key:/certs/proxy.key:ro \
   -v /run/sentica/certs/ca.crt:/certs/ca.crt:ro \
@@ -130,7 +132,7 @@ docker run --rm \
 
 ## Model gateway
 
-The gateway listens on `10.8.0.14:443` for the API and the deriver. It is
+The gateway listens on `10.8.0.22:443` for the API and the deriver. It is
 the only container that may open a new connection to the egress proxy.
 Provider hosts stay denied for every other container.
 
@@ -142,7 +144,7 @@ docker run --rm \
   --security-opt no-new-privileges:true \
   --runtime runsc \
   --network sentica-instance \
-  --ip 10.8.0.14 \
+  --ip 10.8.0.22 \
   --env-file /run/sentica/gateway.env \
   sentica-gateway:0.1.0
 ```
@@ -272,9 +274,9 @@ generativelanguage.googleapis.com
 
   A hostname that is not on that list is refused.
 
-  On the `10.8.0.8/29` instance network the API container is `10.8.0.10`,
-  the deriver is `10.8.0.11`, migrate is `10.8.0.12`, the certificate
-  proxy is `10.8.0.13:6432`, and the model gateway is `10.8.0.14:443`.
+  On the `10.8.0.16/28` instance network the API container is `10.8.0.18`,
+  the deriver is `10.8.0.19`, migrate is `10.8.0.20`, the certificate
+  proxy is `10.8.0.21:6432`, and the model gateway is `10.8.0.22:443`.
   Those are the `--ip` values on the run commands above. `DOCKER-USER` is
   the host firewall for traffic that leaves those containers. Docker creates
   that chain with a RETURN that matches every packet. `-A` appends after
@@ -288,17 +290,17 @@ generativelanguage.googleapis.com
 
 ```bash
 iptables -I DOCKER-USER 1 -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
-iptables -I DOCKER-USER 2 -s 10.8.0.10/32 -d 10.8.0.13/32 -p tcp --dport 6432 -j RETURN
-iptables -I DOCKER-USER 3 -s 10.8.0.11/32 -d 10.8.0.13/32 -p tcp --dport 6432 -j RETURN
-iptables -I DOCKER-USER 4 -s 10.8.0.12/32 -d 10.8.0.13/32 -p tcp --dport 6432 -j RETURN
-iptables -I DOCKER-USER 5 -s 10.8.0.10/32 -d 10.8.0.14/32 -p tcp --dport 443 -j RETURN
-iptables -I DOCKER-USER 6 -s 10.8.0.11/32 -d 10.8.0.14/32 -p tcp --dport 443 -j RETURN
-iptables -I DOCKER-USER 7 -s 10.8.0.14/32 -d 10.8.0.5/32 -p tcp --dport 8443 -j RETURN
-iptables -I DOCKER-USER 8 -s 10.8.0.10/32 -j DROP
-iptables -I DOCKER-USER 9 -s 10.8.0.11/32 -j DROP
-iptables -I DOCKER-USER 10 -s 10.8.0.12/32 -j DROP
-iptables -I DOCKER-USER 11 -s 10.8.0.13/32 -j DROP
-iptables -I DOCKER-USER 12 -s 10.8.0.14/32 -j DROP
+iptables -I DOCKER-USER 2 -s 10.8.0.18/32 -d 10.8.0.21/32 -p tcp --dport 6432 -j RETURN
+iptables -I DOCKER-USER 3 -s 10.8.0.19/32 -d 10.8.0.21/32 -p tcp --dport 6432 -j RETURN
+iptables -I DOCKER-USER 4 -s 10.8.0.20/32 -d 10.8.0.21/32 -p tcp --dport 6432 -j RETURN
+iptables -I DOCKER-USER 5 -s 10.8.0.18/32 -d 10.8.0.22/32 -p tcp --dport 443 -j RETURN
+iptables -I DOCKER-USER 6 -s 10.8.0.19/32 -d 10.8.0.22/32 -p tcp --dport 443 -j RETURN
+iptables -I DOCKER-USER 7 -s 10.8.0.22/32 -d 10.8.0.5/32 -p tcp --dport 8443 -j RETURN
+iptables -I DOCKER-USER 8 -s 10.8.0.18/32 -j DROP
+iptables -I DOCKER-USER 9 -s 10.8.0.19/32 -j DROP
+iptables -I DOCKER-USER 10 -s 10.8.0.20/32 -j DROP
+iptables -I DOCKER-USER 11 -s 10.8.0.21/32 -j DROP
+iptables -I DOCKER-USER 12 -s 10.8.0.22/32 -j DROP
 ```
 
 Redis runs as the `redis` user. The entry script starts as root only long
