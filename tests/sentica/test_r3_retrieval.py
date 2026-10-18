@@ -529,11 +529,13 @@ async def test_neighbor_scan_after_a_large_delete_returns_a_full_page(
     assert len(rows) == page
 
 
-async def test_top_k_keeps_the_closer_stale_row(db_session: AsyncSession) -> None:
-    """The closest row wins top_k even when the scan lists it after fresh rows.
+async def test_top_k_returns_the_fresh_row_ahead_of_a_closer_stale_row(
+    db_session: AsyncSession,
+) -> None:
+    """top_k returns the fresh row when a stale row is closer.
 
-    Fresh neighbors are concatenated ahead of stale ones. Cutting that list
-    at top_k returns a far fresh row and drops the closer stale row.
+    Fresh neighbors are concatenated ahead of stale ones. Ranking by
+    distance alone would cut to the closer stale row.
     """
     from src.crud.document import query_documents
 
@@ -589,7 +591,7 @@ async def test_top_k_keeps_the_closer_stale_row(db_session: AsyncSession) -> Non
         embedding=query,
         top_k=1,
     )
-    assert [doc.content for doc in found] == ["close stale"]
+    assert [doc.content for doc in found] == ["far fresh"]
 
 
 async def test_aborted_neighbor_scan_keeps_its_original_error(

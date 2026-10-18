@@ -383,9 +383,10 @@ async def _query_documents_pgvector(
     from src.sentica.vector_query import execute_neighbors, within_distance
 
     rows = await execute_neighbors(db, stmt, embedding, top_k)
-    # Fresh rows are concatenated ahead of stale ones. Rank by distance
-    # before the cut so a closer stale row is not dropped.
-    rows.sort(key=lambda row: _cosine_rank(row, embedding))
+    # relaxed_order can return a page slightly out of distance order.
+    # Every fresh row precedes every stale row. Distance orders each
+    # group, then the page is cut to top_k.
+    rows.sort(key=lambda row: (bool(row.stale), _cosine_rank(row, embedding)))
     if max_distance is None:
         return rows[:top_k]
     return within_distance(rows, embedding, max_distance, top_k)
