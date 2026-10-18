@@ -204,3 +204,27 @@ security fix taken is `5df80a0`: `src/utils/agent_tools.py:243`
 `LLM.MAX_TOOL_OUTPUT_CHARS`, and `src/llm/tool_loop.py:629` uses that
 helper for unexpected tool exceptions. Its own commit. Test:
 `test_tool_error_text_is_capped_before_it_reaches_the_model`.
+
+## Fix round 3
+
+Each row is one commit on `r3-release`. The test fails on the previous code.
+
+| Finding | Commit | Test |
+| --- | --- | --- |
+| Distance-only rank put a closer stale conclusion first | `c271de51` | `test_stale_ranks_after_a_fresh_conclusion`, `test_top_k_returns_the_fresh_row_ahead_of_a_closer_stale_row` |
+| Budget concurrency was proved only on the in-process stand-in | `8209ba56` | `test_concurrent_redis_holds_stay_inside_a_100_token_budget` |
+
+`src/crud/document.py` sorts neighbors by `(stale, distance)` before the `top_k` cut. `relaxed_order` can return a page slightly out of distance order, so the page is still re-sorted. Every fresh row precedes every stale row. `test_stale_ranks_after_a_fresh_conclusion` uses different embeddings: stale "lives in Boston" is the query vector and fresh "lives in Denver" is another vector. With `top_k=2` Denver is first. With `top_k=1` Denver is the only row. On the distance-only sort that test returned Boston first. `test_top_k_keeps_the_closer_stale_row` expected that old result. It is now `test_top_k_returns_the_fresh_row_ahead_of_a_closer_stale_row` and expects the fresh row. Hybrid search already keeps this order: `src/sentica/retrieval.py` `_merge` lists fresh rows, then stale rows. A closer stale "lives in Boston" still came out after fresh "lives in Denver" with the distance-only sort, so no hybrid test was added.
+
+`test_concurrent_redis_holds_stay_inside_a_100_token_budget` reads `SENTICA_BUDGET_TEST_REDIS_URL`. The `test-python` job sets it to the `redis:8.2` service. A missing URL fails the test. Each run uses a `budget-redis-` key prefix and deletes only those keys. It does not call `flushdb` or `flushall`. Ten concurrent holds of 40 on a 100-token budget stay at 80. Changing the reserve check to `total > total_limit` admitted 120 and the test failed (`assert 120 <= 100`). The in-process stand-in test is unchanged. That stand-in reimplements the check, so it still passed while the script was wrong.
+
+Round-3 local Python suite, ignoring `tests/sentica/test_m1_stack.py`, against the throwaway database on port 5437 and Redis on port 6382: 3448 passed, 53 skipped, 2 failed, 260.74s. Both failures are `tests/sdk_typescript/test_sdk.py` because `bun` is not installed on this machine.
+
+## R4 follow-ups
+
+- iptables `-A` versus `-I`, and the Docker version pin. `docs/DEPLOY.md:272` appends every `DOCKER-USER` rule with `-A`, so a rule already on that chain is evaluated first. `Dockerfile:5` and `Dockerfile:37` use `python:3.13-slim-bookworm` with no digest.
+- Hostname resolution in iptables. `docs/DEPLOY.md:278` uses `-d api.openai.com`, `docs/DEPLOY.md:279` uses `-d api.anthropic.com`, and `docs/DEPLOY.md:280` uses `-d generativelanguage.googleapis.com`. Those rules need addresses.
+- No spare `/29` addresses. `docs/DEPLOY.md:16` uses `10.8.0.8/29`. `.8` is the network, `.15` is the broadcast, `.9` is the bridge, and `.10` through `.14` are api, deriver, migrate, proxy, and gateway.
+- Static RLS check gaps covered by the runtime test. `tests/sentica/test_m2_isolation.py:183` `test_workspace_filter_and_rls_policy_are_present` checks policy text. The runtime red-team test is what covers the gaps that text check misses.
+- Hold count missing dict keys. `src/sentica/gateway.py:741` `_strings` walks dict values and skips keys, so a key that is not also a string value is absent from `_chat_hold`.
+- Exact-scan probe cost growing with table size before about 1M rows. `src/sentica/vector_query.py:241` probes with `OFFSET` and `LIMIT 1`, so a short HNSW page still walks the table.
