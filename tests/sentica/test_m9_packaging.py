@@ -419,6 +419,67 @@ def docker_user_order_gaps(deploy: str) -> list[str]:
     return gaps
 
 
+_PROVIDER_HOSTS = (
+    "api.openai.com",
+    "api.anthropic.com",
+    "generativelanguage.googleapis.com",
+)
+
+
+def _allowlist_hosts(deploy: str) -> set[str]:
+    """Hostnames in fences other than bash. iptables rules are not an allowlist."""
+    hosts: set[str] = set()
+    for lang, body in re.findall(r"```([a-z]*)\n(.*?)```", deploy, re.DOTALL):
+        if lang == "bash":
+            continue
+        for line in body.splitlines():
+            name = line.strip()
+            if name:
+                hosts.add(name)
+    return hosts
+
+
+def provider_egress_gaps(deploy: str) -> list[str]:
+    """Hostname iptables destinations, and a gateway that skips the proxy.
+
+    ``iptables -d`` with a hostname resolves that name when the rule is
+    inserted and keeps the address. Provider names belong on the egress
+    proxy allowlist, which is checked on each connection.
+    """
+    gaps: list[str] = []
+    commands = _bash_commands(deploy)
+    for command in commands:
+        parsed = _iptables_rule(command)
+        if parsed is None:
+            continue
+        rule = parsed[2]
+        if rule.hostname:
+            gaps.append("iptables destination is resolved when the rule is inserted")
+    allowlist = _allowlist_hosts(deploy)
+    for host in _PROVIDER_HOSTS:
+        if host not in allowlist:
+            gaps.append(host + " is missing from the egress proxy allowlist")
+    matched = re.search(
+        r"egress proxy listens on `(\d+\.\d+\.\d+\.\d+):(\d+)`",
+        deploy,
+    )
+    if matched is None:
+        gaps.append("egress proxy address is not documented")
+        return gaps
+    proxy = ipaddress.ip_address(matched.group(1))
+    port = int(matched.group(2))
+    if not isinstance(proxy, ipaddress.IPv4Address):
+        gaps.append("egress proxy address is not IPv4")
+        return gaps
+    gateway = _named_container_ips(commands).get("sentica-memory-gateway")
+    if gateway is None:
+        gaps.append("sentica-memory-gateway has no --ip")
+        return gaps
+    if _verdict(_docker_user_chain(commands), gateway, proxy, port) != "RETURN":
+        gaps.append("gateway to the egress proxy is not allowed")
+    return gaps
+
+
 def firewall_gaps(deploy: str) -> list[str]:
     """Container addresses the DROP rules miss, and a subnet on the broker."""
     gaps: list[str] = []
@@ -485,6 +546,15 @@ def test_deploy_firewall_covers_every_container_ip() -> None:
     deploy = _text("docs/DEPLOY.md")
     assert firewall_gaps(deploy) == []
     assert docker_user_order_gaps(deploy) == []
+    assert provider_egress_gaps(deploy) == []
+    hostname_rule = """```bash
+iptables -I DOCKER-USER 1 -s 10.8.0.14/32 -p tcp -d api.openai.com --dport 443 -j RETURN
+```
+"""
+    assert any(
+        "resolved when the rule is inserted" in item
+        for item in provider_egress_gaps(hostname_rule)
+    )
     appended = """```bash
 docker run --name sentica-memory-api --ip 10.8.0.10 img
 docker run --name sentica-memory-deriver --ip 10.8.0.11 img

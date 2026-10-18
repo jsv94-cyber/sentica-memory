@@ -131,8 +131,8 @@ docker run --rm \
 ## Model gateway
 
 The gateway listens on `10.8.0.14:443` for the API and the deriver. It is
-the only container that may open a new connection to a provider host, and
-only on port 443. Those hosts stay denied for every other container.
+the only container that may open a new connection to the egress proxy.
+Provider hosts stay denied for every other container.
 
 ```bash
 docker run --rm \
@@ -254,9 +254,23 @@ structural.
   (`SENTICA_GATEWAY_BASE_URL`, or a purpose-specific
   `SENTICA_GATEWAY_DERIVER_BASE_URL`, `SENTICA_GATEWAY_SUMMARY_BASE_URL`,
   `SENTICA_GATEWAY_DIALECTIC_BASE_URL`, `SENTICA_GATEWAY_DREAM_BASE_URL`,
-  or `SENTICA_GATEWAY_EMBED_BASE_URL`). Deny provider hosts
-  (`api.openai.com`, `api.anthropic.com`,
-  `generativelanguage.googleapis.com`) and the rest of the public internet.
+  or `SENTICA_GATEWAY_EMBED_BASE_URL`). Provider egress goes through the
+  egress proxy. The proxy checks the destination hostname on each
+  connection. A hostname in `iptables -d` is resolved once, when the rule
+  is inserted, and the rule keeps that address, so provider hosts are not
+  iptables destinations.
+
+  The egress proxy listens on `10.8.0.5:8443`. That address is on the host.
+  It is not on the instance bridge, and it is not the broker at `10.8.0.4`.
+  The egress proxy allowlist is:
+
+```
+api.openai.com
+api.anthropic.com
+generativelanguage.googleapis.com
+```
+
+  A hostname that is not on that list is refused.
 
   On the `10.8.0.8/29` instance network the API container is `10.8.0.10`,
   the deriver is `10.8.0.11`, migrate is `10.8.0.12`, the certificate
@@ -268,7 +282,7 @@ structural.
   the position below. The positions keep this order and stay in front of
   the default RETURN. Established replies return. The API, the deriver,
   and migrate may open the proxy. The API and the deriver may open the
-  gateway. The gateway may open the provider hosts on port 443. Every
+  gateway. The gateway may open the egress proxy on port 8443. Every
   container address is then dropped, so an address Docker would otherwise
   assign cannot leave the host.
 
@@ -279,14 +293,12 @@ iptables -I DOCKER-USER 3 -s 10.8.0.11/32 -d 10.8.0.13/32 -p tcp --dport 6432 -j
 iptables -I DOCKER-USER 4 -s 10.8.0.12/32 -d 10.8.0.13/32 -p tcp --dport 6432 -j RETURN
 iptables -I DOCKER-USER 5 -s 10.8.0.10/32 -d 10.8.0.14/32 -p tcp --dport 443 -j RETURN
 iptables -I DOCKER-USER 6 -s 10.8.0.11/32 -d 10.8.0.14/32 -p tcp --dport 443 -j RETURN
-iptables -I DOCKER-USER 7 -s 10.8.0.14/32 -p tcp -d api.openai.com --dport 443 -j RETURN
-iptables -I DOCKER-USER 8 -s 10.8.0.14/32 -p tcp -d api.anthropic.com --dport 443 -j RETURN
-iptables -I DOCKER-USER 9 -s 10.8.0.14/32 -p tcp -d generativelanguage.googleapis.com --dport 443 -j RETURN
-iptables -I DOCKER-USER 10 -s 10.8.0.10/32 -j DROP
-iptables -I DOCKER-USER 11 -s 10.8.0.11/32 -j DROP
-iptables -I DOCKER-USER 12 -s 10.8.0.12/32 -j DROP
-iptables -I DOCKER-USER 13 -s 10.8.0.13/32 -j DROP
-iptables -I DOCKER-USER 14 -s 10.8.0.14/32 -j DROP
+iptables -I DOCKER-USER 7 -s 10.8.0.14/32 -d 10.8.0.5/32 -p tcp --dport 8443 -j RETURN
+iptables -I DOCKER-USER 8 -s 10.8.0.10/32 -j DROP
+iptables -I DOCKER-USER 9 -s 10.8.0.11/32 -j DROP
+iptables -I DOCKER-USER 10 -s 10.8.0.12/32 -j DROP
+iptables -I DOCKER-USER 11 -s 10.8.0.13/32 -j DROP
+iptables -I DOCKER-USER 12 -s 10.8.0.14/32 -j DROP
 ```
 
 Redis runs as the `redis` user. The entry script starts as root only long
