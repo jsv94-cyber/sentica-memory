@@ -166,6 +166,14 @@ _EXACT_SCAN_SQL = text(
     + "set_config('enable_seqscan', 'on', true), "
     + "set_config('enable_sort', 'on', true)"
 )
+# The probe has no ORDER BY, so it cannot use HNSW. Btree scans stay on and
+# sequential scans stay off: the workspace predicate then uses
+# ix_documents_workspace_name instead of reading every document.
+_PROBE_SCAN_SQL = text(
+    "SELECT set_config('enable_indexscan', 'on', true), "
+    + "set_config('enable_bitmapscan', 'on', true), "
+    + "set_config('enable_seqscan', 'off', true)"
+)
 _INDEX_MODE_SQL = text(
     "SELECT set_config('enable_indexscan', :indexscan, true), "
     + "set_config('enable_bitmapscan', :bitmap, true), "
@@ -224,10 +232,12 @@ async def _index_missed_rows(
     stmt: Select[tuple[models.Document]],
     seen: int,
 ) -> bool:
-    """True when a sequential probe can see a row the index page left out.
+    """True when a workspace-index probe can see a row the index page left out.
 
     An empty stale page is honest when no stale row exists. The probe reads
-    identifiers only, so that case does not rank every embedding.
+    identifiers only and has no ORDER BY, so it cannot use the HNSW index.
+    Btree scans stay on. A sequential scan would read every document in the
+    instance before it applied the workspace predicate.
     """
     indexscan = _setting(
         await db.scalar(text("SELECT current_setting('enable_indexscan')")),
@@ -237,7 +247,7 @@ async def _index_missed_rows(
         await db.scalar(text("SELECT current_setting('enable_bitmapscan')")),
         "on",
     )
-    await db.execute(_EXACT_SCAN_SQL)
+    await db.execute(_PROBE_SCAN_SQL)
     probe = (
         stmt.order_by(None)
         .limit(None)
@@ -246,7 +256,7 @@ async def _index_missed_rows(
         .limit(1)
     )
     try:
-        found = await db.scalar(probe)
+        found = (await db.execute(probe)).scalar()
     except Exception:
         with contextlib.suppress(Exception):
             await _index_mode(db, indexscan, bitmap)
