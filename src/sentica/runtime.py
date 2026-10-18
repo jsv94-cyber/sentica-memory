@@ -129,9 +129,11 @@ def _llm_api_key_env_names() -> tuple[str, ...]:
 
 
 def _fingerprint() -> tuple[tuple[str, str | None], ...]:
+    from src.sentica.gateway import gateway_env_names
+
     names = (
         "SENTICA_MODE",
-        "SENTICA_GATEWAY_MODE",
+        *gateway_env_names(),
         "PGPASSFILE",
         "HOME",
         "DB_SQL_DEBUG",
@@ -228,6 +230,9 @@ def load_instance() -> SenticaInstance | None:
 def _load_instance() -> SenticaInstance | None:
     selected = mode()
     db_call_timeout_seconds()
+    from src.sentica.gateway import refuse_invalid_gateway_env
+
+    refuse_invalid_gateway_env()
     if selected == TEST_MODE:
         return None
 

@@ -289,16 +289,14 @@ async def health_check():
 
 @app.get("/ready")
 async def ready_check() -> JSONResponse:
-    """Readiness. The process can serve traffic only when the database answers."""
-    from sqlalchemy import text
+    """Readiness. Tokenless, and the body is only the status.
 
-    from src.dependencies import tracked_db
+    A successful database check is cached for a few seconds.
+    """
+    from src.sentica.ready import database_ready
 
-    try:
-        async with tracked_db("ready") as db:
-            await db.execute(text("SELECT 1"))
-    except Exception as exc:
-        logger.error("readiness failed: %s", exc.__class__.__name__)
+    if not await database_ready():
+        logger.error("readiness failed")
         return JSONResponse(status_code=503, content={"status": "unavailable"})
     return JSONResponse(status_code=200, content={"status": "ok"})
 

@@ -1,17 +1,51 @@
 # Optional runtime override. The Docker daemon must have runsc installed.
 #   docker compose -f docker-compose.sentica.yml -f docker-compose.gvisor.yml up -d --build
 # The agent container is not in this file and must not join db, net-a, or net-b.
+#
+# runsc keeps its own network stack, so it cannot reach Docker's embedded DNS
+# at 127.0.0.11. Hostnames stay in extra_hosts: the proxy certificate is
+# issued for pgbouncer-a and pgbouncer-b, and verify-full checks that name.
+# embeddings is not runsc. Its addresses exist only in this file.
 
 services:
+  embeddings:
+    networks:
+      net-a:
+        ipv4_address: 172.28.10.20
+      net-b:
+        ipv4_address: 172.28.11.20
+
   migrate-a:
     runtime: runsc
+    extra_hosts:
+      - "pgbouncer-a:172.28.10.13"
+      - "embeddings:172.28.10.20"
   migrate-b:
     runtime: runsc
+    extra_hosts:
+      - "pgbouncer-b:172.28.11.13"
+      - "embeddings:172.28.11.20"
   api-a:
     runtime: runsc
+    extra_hosts:
+      - "pgbouncer-a:172.28.10.13"
+      - "redis-a:172.28.10.12"
+      - "embeddings:172.28.10.20"
   api-b:
     runtime: runsc
+    extra_hosts:
+      - "pgbouncer-b:172.28.11.13"
+      - "redis-b:172.28.11.12"
+      - "embeddings:172.28.11.20"
   deriver-a:
     runtime: runsc
+    extra_hosts:
+      - "pgbouncer-a:172.28.10.13"
+      - "redis-a:172.28.10.12"
+      - "embeddings:172.28.10.20"
   deriver-b:
     runtime: runsc
+    extra_hosts:
+      - "pgbouncer-b:172.28.11.13"
+      - "redis-b:172.28.11.12"
+      - "embeddings:172.28.11.20"

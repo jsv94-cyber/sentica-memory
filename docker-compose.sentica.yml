@@ -13,8 +13,9 @@
 # data are tmpfs and disappear when the containers stop. Logs use the none
 # driver so Docker does not write them to the host disk.
 # Published ports bind 127.0.0.1 for this local proof only. Docker does not
-# publish a port from an internal network, so publish-a and publish-b forward
-# those ports. The API, deriver, proxy, and database are not on that network.
+# publish a port from an internal network, so four proof-only forwarders
+# each publish one port. They are not part of the instance. The API, deriver,
+# proxy, and database are not on the proof network.
 
 name: sentica-m1
 
@@ -457,23 +458,51 @@ services:
     networks:
       - net-b
 
-  publish-a:
+  publish-a-api:
     image: python:3.13-slim
     logging: *no-disk-logs
+    user: "65534:65534"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      HOME: /tmp
     depends_on:
       api-a:
         condition: service_healthy
-      pgbouncer-a:
-        condition: service_healthy
-    command:
-      [
-        "python",
-        "/publish.py",
-        "8000=172.28.10.10:8000",
-        "6432=172.28.10.13:6432",
-      ]
+    command: ["python", "/publish.py", "8000=172.28.10.10:8000"]
     ports:
       - "127.0.0.1:${SENTICA_API_A_PORT:-8101}:8000"
+    volumes:
+      - ./docker/sentica/publish.py:/publish.py:ro
+    networks:
+      - proof
+      - net-a
+
+  publish-a-proxy:
+    image: python:3.13-slim
+    logging: *no-disk-logs
+    user: "65534:65534"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      HOME: /tmp
+    depends_on:
+      pgbouncer-a:
+        condition: service_healthy
+    command: ["python", "/publish.py", "6432=172.28.10.13:6432"]
+    ports:
       - "127.0.0.1:${SENTICA_PROXY_A_PORT:-6433}:6432"
     volumes:
       - ./docker/sentica/publish.py:/publish.py:ro
@@ -481,23 +510,51 @@ services:
       - proof
       - net-a
 
-  publish-b:
+  publish-b-api:
     image: python:3.13-slim
     logging: *no-disk-logs
+    user: "65534:65534"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      HOME: /tmp
     depends_on:
       api-b:
         condition: service_healthy
-      pgbouncer-b:
-        condition: service_healthy
-    command:
-      [
-        "python",
-        "/publish.py",
-        "8000=172.28.11.10:8000",
-        "6432=172.28.11.13:6432",
-      ]
+    command: ["python", "/publish.py", "8000=172.28.11.10:8000"]
     ports:
       - "127.0.0.1:${SENTICA_API_B_PORT:-8102}:8000"
+    volumes:
+      - ./docker/sentica/publish.py:/publish.py:ro
+    networks:
+      - proof
+      - net-b
+
+  publish-b-proxy:
+    image: python:3.13-slim
+    logging: *no-disk-logs
+    user: "65534:65534"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      HOME: /tmp
+    depends_on:
+      pgbouncer-b:
+        condition: service_healthy
+    command: ["python", "/publish.py", "6432=172.28.11.13:6432"]
+    ports:
       - "127.0.0.1:${SENTICA_PROXY_B_PORT:-6434}:6432"
     volumes:
       - ./docker/sentica/publish.py:/publish.py:ro

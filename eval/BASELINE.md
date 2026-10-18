@@ -1,9 +1,17 @@
 # Retrieval baseline
 
-Recorded from the first full run of `tests/sentica/test_m8_eval.py` on the
-seeded Harbor Glass and Northline Diesel businesses. Scores are percents.
-CI fails when a category falls more than 2 points below this table, or when
-the isolation red-team reports any leak.
+Recorded from `tests/sentica/test_m8_eval.py::test_retrieval_eval_matches_baseline`
+on the seeded Harbor Glass and Northline Diesel businesses. Each cell is the
+mean, across that category's questions, of hybrid keyword-plus-vector
+reciprocal-rank-fusion recall. Recall at k is the percent of gold conclusion
+ids present in the first k results. An abstention question scores 100 only
+when the search returns no rows. A forbidden id anywhere in the results
+scores 0 for both columns. CI fails when a category falls more than 2 points
+below this table, or when the isolation red-team reports any leak.
+
+Embeddings are hashed character n-grams of the text (widths 3, 4, and 5,
+SHA-256 buckets, L2-normalized). Vector neighbors farther than cosine
+distance 0.65 are dropped before the fusion.
 
 | Category | Recall@5 | Recall@10 |
 | --- | --- | --- |
@@ -13,13 +21,40 @@ the isolation red-team reports any leak.
 | knowledge_updates | 100 | 100 |
 | abstention | 100 | 100 |
 
+## What each score measures
+
+- information_extraction: two questions whose tokens are disjoint from every
+  seeded fact, so the keyword channel has no hit. Each query carries n-gram
+  pieces of a marker stored only on its gold fact. That distance is under
+  0.65, and the next fact in the same business is farther than 0.65, so
+  hybrid recall is the vector channel: 100 at 5 and at 10.
+- multi_session_reasoning: two questions that share tokens with both gold
+  facts, and those facts live in two sessions. Keyword search places both
+  gold facts inside the top 10. Recall is 100 at 5 and at 10.
+- temporal_reasoning: two questions that share tokens with the current fact
+  and with the older fact. The `since` bound leaves the older fact out, and
+  the current fact is inside the top 10. Recall is 100 at 5 and at 10.
+- knowledge_updates: two questions whose tokens are disjoint from every
+  seeded fact, so the keyword channel has no hit. The replacement fact
+  shares a marker with the older fact, so the older row is superseded and
+  stays out of the results. The query's n-gram pieces sit within 0.65 of
+  the replacement. Recall is 100 at 5 and at 10.
+- abstention: two questions with no keyword hit whose nearest n-gram
+  neighbor is farther than 0.65. An empty result scores 100 at 5 and at 10.
+
+`test_vector_only_recall_is_not_perfect` measures a different quantity: the
+nearest n-gram neighbor, ignoring the keyword channel and the 0.65 cutoff.
+That test requires at least one question whose nearest fact is outside the
+gold set.
+
 ## Latency
 
 Local unit suite on the seeded business, separate from the 10,000-row brief
-measured in M6. These figures are a record, not a fail threshold.
+measured in M6. These figures are a record, not a fail threshold. Recorded
+with the n-gram embeddings above.
 
-- Cold: 7.1 ms
-- Warm p95: 7.0 ms
+- Cold: 14.0 ms
+- Warm p95: 16.8 ms
 
 ## Isolation
 

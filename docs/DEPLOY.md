@@ -10,6 +10,20 @@ seccomp profile stays on. Do not disable seccomp.
 
 ## API
 
+Create the instance network once. The API, deriver, migrate, certificate
+proxy, and model gateway containers join it. `10.8.0.4` is the host
+address the broker uses. It is not an address on this bridge. The subnet
+is `10.8.0.8/29` (`10.8.0.8` through `10.8.0.15`). The bridge gateway is
+`10.8.0.9`. Each container below has a fixed `--ip` in that range.
+
+```bash
+docker network create \
+  --driver bridge \
+  --subnet 10.8.0.8/29 \
+  --gateway 10.8.0.9 \
+  sentica-instance
+```
+
 ```bash
 docker run --rm \
   --name sentica-memory-api \
@@ -20,15 +34,27 @@ docker run --rm \
   --security-opt no-new-privileges:true \
   --runtime runsc \
   --network sentica-instance \
-  -p 127.0.0.1:8000:8000 \
+  --ip 10.8.0.10 \
+  -p 10.8.0.4:8000:8000 \
+  -v /run/sentica/certs/client.crt:/certs/client.crt:ro \
+  -v /run/sentica/certs/client.key:/certs/client.key:ro \
+  -v /run/sentica/certs/ca.crt:/certs/ca.crt:ro \
+  -v /run/sentica/certs/token.pub:/certs/token.pub:ro \
   --env-file /run/sentica/api.env \
   sentica-memory:0.1.0
 ```
 
-`/health` is liveness. `/ready` is readiness and answers only when the
-database accepts `SELECT 1`. Both are probes and do not require a token.
-`/metrics` is the Prometheus scrape, also a probe, and it must be reachable
-only from the broker network.
+`SENTICA_BIND_HOST` is that private interface address (`10.8.0.4` in the
+example). The broker is not assumed to be on the same host, so the publish
+is not `127.0.0.1` and it is not `0.0.0.0`. `127.0.0.1` is only enough when
+the broker process is on the API host. Set `SENTICA_BIND_HOST` to the same
+address the broker uses.
+
+`/health` is liveness. `/ready` is readiness. It answers only when the
+database accepts `SELECT 1`, caches that success for a few seconds, takes
+no token, and the body is only `{"status":"ok"}` or
+`{"status":"unavailable"}`. `/metrics` is the Prometheus scrape, also a
+probe, and it must be reachable only from the broker network.
 
 ## Deriver
 
@@ -42,10 +68,121 @@ docker run --rm \
   --security-opt no-new-privileges:true \
   --runtime runsc \
   --network sentica-instance \
+  --ip 10.8.0.11 \
+  -v /run/sentica/certs/client.crt:/certs/client.crt:ro \
+  -v /run/sentica/certs/client.key:/certs/client.key:ro \
+  -v /run/sentica/certs/ca.crt:/certs/ca.crt:ro \
+  -v /run/sentica/certs/token.pub:/certs/token.pub:ro \
   --env-file /run/sentica/deriver.env \
   sentica-memory:0.1.0 \
   /app/.venv/bin/python -m src.deriver
 ```
+
+## Migrate
+
+The image entrypoint is the API. The one-shot migration job replaces it.
+`SENTICA_MIGRATION_TIMEOUT_SECONDS` must be greater than
+`DB_MIGRATION_LOCK_WAIT_SECONDS`.
+
+```bash
+docker run --rm \
+  --name sentica-memory-migrate \
+  --user 100:100 \
+  --read-only \
+  --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+  --cap-drop ALL \
+  --security-opt no-new-privileges:true \
+  --runtime runsc \
+  --network sentica-instance \
+  --ip 10.8.0.12 \
+  -v /run/sentica/certs/client.crt:/certs/client.crt:ro \
+  -v /run/sentica/certs/client.key:/certs/client.key:ro \
+  -v /run/sentica/certs/ca.crt:/certs/ca.crt:ro \
+  -v /run/sentica/certs/token.pub:/certs/token.pub:ro \
+  --env-file /run/sentica/migrate.env \
+  --entrypoint /app/docker/migrate-entrypoint.sh \
+  sentica-memory:0.1.0
+```
+
+## Certificate proxy
+
+The proxy listens on `10.8.0.13:6432` for the API, the deriver, and
+migrate. It is not published on the host. Postgres is on the internal
+`db` network, not on `10.8.0.4` and not on this bridge. A `RETURN` for
+that Postgres address has to be inserted before the proxy `DROP` below.
+Do not return the public internet.
+
+```bash
+docker run --rm \
+  --name sentica-memory-proxy \
+  --read-only \
+  --cap-drop ALL \
+  --security-opt no-new-privileges:true \
+  --runtime runsc \
+  --network sentica-instance \
+  --ip 10.8.0.13 \
+  -v /run/sentica/certs/proxy.crt:/certs/proxy.crt:ro \
+  -v /run/sentica/certs/proxy.key:/certs/proxy.key:ro \
+  -v /run/sentica/certs/ca.crt:/certs/ca.crt:ro \
+  --env-file /run/sentica/proxy.env \
+  edoburu/pgbouncer:v1.24.1-p1
+```
+
+## Model gateway
+
+The gateway listens on `10.8.0.14:443` for the API and the deriver. It is
+the only container that may open a new connection to a provider host, and
+only on port 443. Those hosts stay denied for every other container.
+
+```bash
+docker run --rm \
+  --name sentica-memory-gateway \
+  --read-only \
+  --cap-drop ALL \
+  --security-opt no-new-privileges:true \
+  --runtime runsc \
+  --network sentica-instance \
+  --ip 10.8.0.14 \
+  --env-file /run/sentica/gateway.env \
+  sentica-gateway:0.1.0
+```
+
+## Key files
+
+`SENTICA_UID` and `SENTICA_GID` are image build args. The defaults are
+`100` and `100`. The container runs as that numeric uid, so a mode `600`
+key is readable only when the file is owned by that uid and gid:
+
+```bash
+chown "${SENTICA_UID:-100}:${SENTICA_GID:-100}" \
+  /run/sentica/certs/client.key \
+  /run/sentica/certs/client.crt \
+  /run/sentica/certs/ca.crt \
+  /run/sentica/certs/token.pub
+chmod 600 /run/sentica/certs/client.key
+```
+
+The env files point the process at those mounts:
+
+```bash
+SENTICA_CLIENT_CERT_PATH=/certs/client.crt
+SENTICA_CLIENT_KEY_PATH=/certs/client.key
+SENTICA_PROXY_CA_PATH=/certs/ca.crt
+SENTICA_TOKEN_PUBLIC_KEY_PATH=/certs/token.pub
+```
+
+Build the image with the same ids when they are not 100:
+
+```bash
+docker build \
+  --build-arg SENTICA_UID=100 \
+  --build-arg SENTICA_GID=100 \
+  .
+```
+
+A plain `docker build .` uses those defaults. The runtime image reuses gid
+100 when the base image already has it (`users` on
+`python:3.13-slim-bookworm`) instead of failing `addgroup`.
 
 The local two-instance proof is `docker-compose.sentica.yml`. It sets
 `read_only`, `cap_drop: ALL`, and `no-new-privileges` on the API, deriver,
@@ -55,9 +192,20 @@ and migrate containers. gVisor is the extra file `docker-compose.gvisor.yml`:
 docker compose -f docker-compose.sentica.yml -f docker-compose.gvisor.yml up -d --build
 ```
 
-That override requires the `runsc` runtime on the Docker daemon. The proof
-job in CI uses the default runtime because the hosted runner does not ship
-`runsc`.
+That override requires the `runsc` runtime on the Docker daemon. runsc
+keeps its own network stack and cannot use Docker's embedded DNS at
+127.0.0.11, so the file pins `embeddings` at `172.28.10.20` and
+`172.28.11.20` and writes `extra_hosts` for the proxy, Redis, and gateway
+names. Those names stay: the proxy certificate is issued for `pgbouncer-a`
+and `pgbouncer-b`. CI job `test-gvisor-smoke` downloads `gvisor.tar.bz2`
+for the runner architecture, checks `gvisor.tar.bz2.sha512`, installs
+`runsc` with its sidecar binaries, and runs the smoke subset with
+`SENTICA_GVISOR=1`: egress denied, read-only root, non-root Redis, and no
+`NET_ADMIN`. The full two-instance proof stays on the default runtime in
+`test-m1-stack`. `publish-a-api`, `publish-a-proxy`,
+`publish-b-api`, and `publish-b-proxy` are proof-only. Each runs as uid
+65534, read-only, and forwards exactly one port. They are not part of the
+instance.
 
 ## Gateway timeouts
 
@@ -70,7 +218,15 @@ to override every purpose, or set one of
 `SENTICA_GATEWAY_DIALECTIC_TIMEOUT_SECONDS`,
 `SENTICA_GATEWAY_SUMMARY_TIMEOUT_SECONDS`, and
 `SENTICA_GATEWAY_EMBED_TIMEOUT_SECONDS` for a single purpose. A value
-that is not a positive number refuses the call.
+that is not a positive number refuses startup and refuses the call.
+
+| Purpose | Default timeout |
+| --- | --- |
+| deriver | 120 seconds |
+| dream | 180 seconds |
+| dialectic | 60 seconds |
+| summary | 60 seconds |
+| embed | 30 seconds |
 
 ## Network
 
@@ -79,9 +235,10 @@ structural.
 
 - Networks `db`, `net-a`, and `net-b` are `internal: true`. They have no
   route to the internet. Docker does not publish a port from an internal
-  network, so the local proof uses `publish-a` and `publish-b` to forward
-  `127.0.0.1` to the API and the proxy. Those forwarders are not part of
-  the instance.
+  network, so the local proof uses four proof-only forwarders,
+  `publish-a-api`, `publish-a-proxy`, `publish-b-api`, and
+  `publish-b-proxy`. Each forwards exactly one port to `127.0.0.1` on the
+  host. Those forwarders are not part of the instance.
 - Postgres accepts TCP only from the PgBouncer addresses (`pg_hba.conf`).
   The proxy connects to Postgres with `server_tls_sslmode = verify-full`
   and the test CA. Clients of the instance reach Postgres only through
@@ -92,11 +249,45 @@ structural.
   private address. Do not publish that port on a public interface.
 - The agent container is not attached to `db`, `net-a`, `net-b`, or the
   instance network. It has no route to the API or to the proxy.
-- Outbound from the instance is the proxy and, when gateway mode is on,
-  the model gateway URL. Provider hosts are not used in that mode.
+- Egress from the API and the deriver allows only the certificate proxy
+  (`SENTICA_DB_PROXY_HOST`:`SENTICA_DB_PROXY_PORT`) and the model gateway
+  (`SENTICA_GATEWAY_BASE_URL`, or a purpose-specific
+  `SENTICA_GATEWAY_DERIVER_BASE_URL`, `SENTICA_GATEWAY_SUMMARY_BASE_URL`,
+  `SENTICA_GATEWAY_DIALECTIC_BASE_URL`, `SENTICA_GATEWAY_DREAM_BASE_URL`,
+  or `SENTICA_GATEWAY_EMBED_BASE_URL`). Deny provider hosts
+  (`api.openai.com`, `api.anthropic.com`,
+  `generativelanguage.googleapis.com`) and the rest of the public internet.
+
+  On the `10.8.0.8/29` instance network the API container is `10.8.0.10`,
+  the deriver is `10.8.0.11`, migrate is `10.8.0.12`, the certificate
+  proxy is `10.8.0.13:6432`, and the model gateway is `10.8.0.14:443`.
+  Those are the `--ip` values on the run commands above. `DOCKER-USER` is
+  the host firewall for traffic that leaves those containers. Established
+  replies return. The API, the deriver, and migrate may open the proxy.
+  The API and the deriver may open the gateway. The gateway may open the
+  provider hosts on port 443. Every container address is then dropped, so
+  an address Docker would otherwise assign cannot leave the host.
+
+```bash
+iptables -A DOCKER-USER -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+iptables -A DOCKER-USER -s 10.8.0.10/32 -d 10.8.0.13/32 -p tcp --dport 6432 -j RETURN
+iptables -A DOCKER-USER -s 10.8.0.11/32 -d 10.8.0.13/32 -p tcp --dport 6432 -j RETURN
+iptables -A DOCKER-USER -s 10.8.0.12/32 -d 10.8.0.13/32 -p tcp --dport 6432 -j RETURN
+iptables -A DOCKER-USER -s 10.8.0.10/32 -d 10.8.0.14/32 -p tcp --dport 443 -j RETURN
+iptables -A DOCKER-USER -s 10.8.0.11/32 -d 10.8.0.14/32 -p tcp --dport 443 -j RETURN
+iptables -A DOCKER-USER -s 10.8.0.14/32 -p tcp -d api.openai.com --dport 443 -j RETURN
+iptables -A DOCKER-USER -s 10.8.0.14/32 -p tcp -d api.anthropic.com --dport 443 -j RETURN
+iptables -A DOCKER-USER -s 10.8.0.14/32 -p tcp -d generativelanguage.googleapis.com --dport 443 -j RETURN
+iptables -A DOCKER-USER -s 10.8.0.10/32 -j DROP
+iptables -A DOCKER-USER -s 10.8.0.11/32 -j DROP
+iptables -A DOCKER-USER -s 10.8.0.12/32 -j DROP
+iptables -A DOCKER-USER -s 10.8.0.13/32 -j DROP
+iptables -A DOCKER-USER -s 10.8.0.14/32 -j DROP
+```
 
 Redis runs as the `redis` user. The entry script starts as root only long
-enough to create the password file, then `su redis` replaces it.
+enough to create the password file, then `setpriv` execs `redis-server` so
+pid 1 is that user.
 
 ## Metrics
 

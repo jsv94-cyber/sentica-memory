@@ -570,6 +570,18 @@ class Document(Base):
                 "embedding": "vector_cosine_ops"
             },  # Cosine distance operator
         ),
+        # Current rows only, so ORDER BY cosine distance can use HNSW.
+        Index(
+            "ix_documents_embedding_hnsw_current",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_with={"m": 16, "ef_construction": 64},
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+            postgresql_where=text(
+                "stale IS FALSE AND deleted_at IS NULL AND "
+                + "superseded_by IS NULL AND embedding IS NOT NULL"
+            ),
+        ),
         # Composite index for efficient reconciliation queries
         Index(
             "ix_documents_sync_state_last_sync_at",

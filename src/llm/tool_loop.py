@@ -619,12 +619,20 @@ async def execute_tool_loop(
 
                     if is_safety_outage(e):
                         raise
-                    logger.error(f"Tool execution failed for {tool_name}: {e}")
+                    from src.utils.agent_tools import (
+                        _describe_tool_error,  # pyright: ignore[reportPrivateUsage]
+                    )
+
+                    logger.error(
+                        "Tool execution failed for %s: %s",
+                        tool_name,
+                        _describe_tool_error(e),
+                    )
                     tool_results.append(
                         {
                             "tool_id": tool_id,
                             "tool_name": tool_name,
-                            "result": f"Error: {str(e)}",
+                            "result": "Error: " + _describe_tool_error(e),
                             "is_error": True,
                         }
                     )

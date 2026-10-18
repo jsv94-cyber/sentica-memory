@@ -31,6 +31,15 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+      redis:
+        image: redis:8.2
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
 
     steps:
       - uses: actions/checkout@v7
@@ -93,6 +102,7 @@ jobs:
           DIALECTIC_QUERY_GENERATION_MODEL: test
           SUMMARY_PROVIDER: openai
           SUMMARY_MODEL: test
+          SENTICA_BUDGET_TEST_REDIS_URL: redis://127.0.0.1:6379/0
 
   test-m1-stack:
     runs-on: ubuntu-24.04
@@ -292,14 +302,87 @@ jobs:
           test "$ready_gateway" = 1
           uv run pytest tests/sentica/test_m2_rls.py tests/sentica/test_m2_fix.py \
             tests/sentica/test_m2_partitions.py tests/sentica/test_m2_carryover.py \
-            tests/sentica/test_m2_data.py \
+            tests/sentica/test_m2_data.py tests/sentica/test_m2_isolation.py \
             -n0 -v --tb=short
+
+  build-default-image:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build the default image
+        run: docker build .
+
+  # Smoke subset of tests/sentica/test_m1_stack.py under runsc. The full
+  # proof stays on the default runtime in test-m1-stack. SENTICA_GVISOR=1
+  # adds docker-compose.gvisor.yml.
+  test-gvisor-smoke:
+    runs-on: ubuntu-24.04
+    services:
+      database:
+        image: pgvector/pgvector:pg15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      SENTICA_MODE: test
+      AUTH_USE_AUTH: "false"
+      SENTRY_ENABLED: "false"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.3.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: "Set up Python"
+        uses: actions/setup-python@v7
+        with:
+          python-version-file: ".python-version"
+
+      - name: Install the project
+        run: uv sync --all-extras --dev
+
+      - name: Install gVisor runsc
+        run: |
+          set -eu
+          arch=$(uname -m)
+          tmp=$(mktemp -d)
+          url="https://storage.googleapis.com/gvisor/releases/release/20261012/${arch}"
+          # The standalone runsc object 404s. The release tarball carries runsc
+          # and the gvisor-bin sidecars, which have to stay next to it.
+          curl -fsSL -o "$tmp/gvisor.tar.bz2" "$url/gvisor.tar.bz2"
+          hash=$(awk -v arch="$arch" '$2 == arch {print $1}' docker/sentica/runsc-20261012.sha512)
+          test -n "$hash"
+          printf '%s  gvisor.tar.bz2\n' "$hash" > "$tmp/gvisor.tar.bz2.sha512"
+          (cd "$tmp" && sha512sum -c gvisor.tar.bz2.sha512)
+          sudo tar -xjf "$tmp/gvisor.tar.bz2" -C /usr/local/bin
+          sudo /usr/local/bin/runsc install
+          sudo systemctl reload docker
+          docker info | grep -i runsc
+
+      - name: Run the gVisor smoke subset
+        env:
+          SENTICA_GVISOR: "1"
+        run: |
+          uv run pytest tests/sentica/test_m1_stack.py -n0 --tb=short -k \
+            "test_api_and_deriver_cannot_reach_the_internet or test_root_filesystem_is_read_only or test_redis_runs_as_a_non_root_user or test_no_container_has_net_admin or test_gvisor_services_use_runsc or test_gvisor_runtime_lookup_includes_exited_containers"
 
   # Status check for branch protection rules
   # This job always runs and reports success only if all required jobs pass
   test-status:
     runs-on: ubuntu-24.04
-    needs: [test-python, test-m1-stack, test-m2-rls]
+    needs: [test-python, test-m1-stack, test-m2-rls, build-default-image, test-gvisor-smoke]
     if: always()
     steps:
       - name: Check test results
@@ -314,6 +397,14 @@ jobs:
           fi
           if [[ "${{ needs.test-m2-rls.result }}" != "success" ]]; then
             echo "Runtime-role proof failed or was cancelled"
+            exit 1
+          fi
+          if [[ "${{ needs.build-default-image.result }}" != "success" ]]; then
+            echo "Default image build failed or was cancelled"
+            exit 1
+          fi
+          if [[ "${{ needs.test-gvisor-smoke.result }}" != "success" ]]; then
+            echo "gVisor smoke failed or was cancelled"
             exit 1
           fi
           echo "All required tests passed!"

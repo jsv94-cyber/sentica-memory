@@ -180,35 +180,53 @@ async def test_contradiction_supersedes_too(
 async def test_stale_ranks_after_a_fresh_conclusion(
     db_session: AsyncSession, sample_data: tuple[Workspace, Peer]
 ) -> None:
+    """A closer stale conclusion still ranks after a current one.
+
+    Boston uses the query vector. Denver is a different vector, so a
+    distance-only sort would return Boston first and, at top_k=1, alone.
+    """
     workspace, peer = sample_data
     await _ready(db_session, workspace, peer)
     await crud.create_documents(
         db_session,
         [
-            _document("fresh fact"),
-            _document("old fact"),
+            _document("lives in Denver", slot=1),
+            _document("lives in Boston", slot=0),
         ],
         workspace.name,
         observer=peer.name,
         observed=peer.name,
     )
-    old = (
+    boston = (
         await db_session.scalars(
-            select(models.Document).where(models.Document.content == "old fact")
+            select(models.Document).where(models.Document.content == "lives in Boston")
         )
     ).one()
-    old.stale = True
+    boston.stale = True
     await db_session.commit()
-    found = await crud.query_documents(
+    both = await crud.query_documents(
         db_session,
         workspace.name,
-        "fact",
+        "lives",
+        observer=peer.name,
+        observed=peer.name,
+        embedding=_vector(0),
+        top_k=2,
+    )
+    assert [doc.content for doc in both] == [
+        "lives in Denver",
+        "lives in Boston",
+    ]
+    one = await crud.query_documents(
+        db_session,
+        workspace.name,
+        "lives",
         observer=peer.name,
         observed=peer.name,
         embedding=_vector(0),
         top_k=1,
     )
-    assert [doc.content for doc in found] == ["fresh fact"]
+    assert [doc.content for doc in one] == ["lives in Denver"]
 
 
 async def test_decay_and_purge_follow_the_schedule(

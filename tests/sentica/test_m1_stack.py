@@ -83,7 +83,10 @@ def _compose(
     if not cert_dir_holder:
         raise RuntimeError("CERT_DIR is not set")
     file_args = ["-f", str(COMPOSE_FILE)]
-    for extra in extra_files or []:
+    extras = list(extra_files or [])
+    if os.environ.get("SENTICA_GVISOR") == "1":
+        extras.append(str(ROOT / "docker-compose.gvisor.yml"))
+    for extra in extras:
         file_args.extend(["-f", extra])
     return _run(
         ["docker", "compose", "-p", PROJECT, *file_args, *args],
@@ -1881,3 +1884,182 @@ def test_deriver_reaches_the_mock_gateway_with_the_four_headers(stack: Path) -> 
     ]
     assert matched
     assert any(row["headers"]["X-Sentica-Purpose"] == "deriver" for row in matched)
+
+
+def _service_id(service: str) -> str:
+    """Container id, including a one-shot service that has already exited.
+
+    ``compose ps`` hides exited containers. The migrate jobs exit 0, so a
+    runtime check has to ask for every status.
+    """
+    found = _compose(["ps", "-a", "-q", service], check=True)
+    ids = [line.strip() for line in found.stdout.splitlines() if line.strip()]
+    assert len(ids) == 1, (service, ids)
+    return ids[0]
+
+
+def test_gvisor_runtime_lookup_includes_exited_containers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The runsc check must see migrate containers after they exit."""
+    captured: list[list[str]] = []
+
+    def fake_compose(
+        args: list[str],
+        *,
+        check: bool = True,
+        stdin: str | None = None,
+        timeout: float | None = None,
+        extra_files: list[str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del check, stdin, timeout, extra_files
+        captured.append(list(args))
+        return subprocess.CompletedProcess(args, 0, stdout="abc123\n", stderr="")
+
+    monkeypatch.setattr(f"{__name__}._compose", fake_compose)
+    assert _service_id("migrate-a") == "abc123"
+    assert captured == [["ps", "-a", "-q", "migrate-a"]]
+
+
+def test_api_and_deriver_cannot_reach_the_internet(stack: Path) -> None:
+    """Internal networks have no route to the public internet."""
+    del stack
+    script = (
+        "import socket\n"
+        "sock = socket.socket()\n"
+        "sock.settimeout(3)\n"
+        "try:\n"
+        "    sock.connect(('1.1.1.1', 443))\n"
+        "except OSError:\n"
+        "    raise SystemExit(0)\n"
+        "raise SystemExit(1)\n"
+    )
+    for service in ("api-a", "api-b", "deriver-a", "deriver-b"):
+        result = _compose(
+            ["exec", "-T", service, "python", "-c", script],
+            check=False,
+        )
+        assert result.returncode == 0, service + result.stderr
+
+
+def test_root_filesystem_is_read_only(stack: Path) -> None:
+    """The app user cannot create a file under /app on a read-only root."""
+    del stack
+    script = "open('/app/probe-write', 'w').write('x')\n"
+    for service in ("api-a", "api-b", "deriver-a", "deriver-b"):
+        inspected = _run(["docker", "inspect", _service_id(service)], check=True)
+        payload = cast(list[dict[str, Any]], json.loads(inspected.stdout))
+        host = cast(dict[str, Any], payload[0]["HostConfig"])
+        assert host.get("ReadonlyRootfs") is True, service
+        result = _compose(
+            ["exec", "-T", service, "python", "-c", script],
+            check=False,
+        )
+        assert result.returncode != 0, service
+        assert "Read-only file system" in result.stderr, service + result.stderr
+
+
+def test_redis_runs_as_a_non_root_user(stack: Path) -> None:
+    del stack
+    for service in ("redis-a", "redis-b"):
+        result = _compose(
+            ["exec", "-T", service, "cat", "/proc/1/status"],
+            check=True,
+        )
+        uid = ""
+        for line in result.stdout.splitlines():
+            if line.startswith("Uid:"):
+                uid = line.split()[1]
+        assert uid and uid != "0", service + " " + result.stdout
+
+
+def test_no_container_has_net_admin(stack: Path) -> None:
+    del stack
+    listing = _compose(["ps", "-q"], check=True)
+    ids = [line.strip() for line in listing.stdout.splitlines() if line.strip()]
+    assert ids
+    for container_id in ids:
+        inspected = _run(["docker", "inspect", container_id], check=True)
+        payload = cast(list[dict[str, Any]], json.loads(inspected.stdout))
+        host = cast(dict[str, Any], payload[0]["HostConfig"])
+        added = cast(list[object], host.get("CapAdd") or [])
+        dropped = [str(item) for item in cast(list[object], host.get("CapDrop") or [])]
+        assert "NET_ADMIN" not in added, container_id
+        assert host.get("Privileged") is False, container_id
+        labels = cast(dict[str, object], payload[0]["Config"].get("Labels") or {})
+        service = str(labels.get("com.docker.compose.service", ""))
+        hardened = service.startswith(("api-", "deriver-", "migrate-", "publish-"))
+        if hardened:
+            assert "ALL" in dropped, service
+
+
+def _runsc_service_names(overlay: str) -> list[str]:
+    """Service names in the gVisor overlay whose runtime is runsc."""
+    current = ""
+    found: list[str] = []
+    for line in overlay.splitlines():
+        if line.startswith("  ") and not line.startswith("   ") and line.endswith(":"):
+            current = line.strip()[:-1]
+        if line.strip() == "runtime: runsc" and current:
+            found.append(current)
+    return found
+
+
+def test_gvisor_services_use_runsc(stack: Path) -> None:
+    """Every service the overlay assigns to runsc is on that runtime.
+
+    The default stack job does not install runsc. It still checks the overlay
+    and the pinned checksum. The gVisor job sets SENTICA_GVISOR and reads
+    HostConfig.Runtime.
+    """
+    del stack
+    overlay = Path("docker-compose.gvisor.yml").read_text(encoding="utf-8")
+    services = _runsc_service_names(overlay)
+    required = {"migrate-a", "migrate-b", "api-a", "api-b", "deriver-a", "deriver-b"}
+    assert required.issubset(services)
+    assert "embeddings" not in services
+    pin = Path("docker/sentica/runsc-20261012.sha512").read_text(encoding="utf-8")
+    assert (
+        "9606445eed5aedfcf05310e7ccef61d994089914c6622fc82624c24d2b18db1b"
+        "2210f40e40a7be27b8b7772859de7d95c501b4eba66423053c960bf671377c5e" in pin
+    )
+    assert (
+        "2fe7425abd16ad6ca649ab9bc3d7e8e76756834d86ffcc08dbe97c82c3b7262a"
+        "7d6401f23632f2b296649cc1408b560416b2ab65a4043aa123fc7b90f3a1b2e2" in pin
+    )
+    workflow = Path(".github/workflows/unittest.yml").read_text(encoding="utf-8")
+    assert "release/latest" not in workflow
+    assert "release/20261012/" in workflow
+    if os.environ.get("SENTICA_GVISOR") != "1":
+        return
+    for service in services:
+        inspected = _run(["docker", "inspect", _service_id(service)], check=True)
+        payload = cast(list[dict[str, Any]], json.loads(inspected.stdout))
+        host = cast(dict[str, Any], payload[0]["HostConfig"])
+        assert host.get("Runtime") == "runsc", service
+
+
+def test_publishers_are_single_port_and_non_root(stack: Path) -> None:
+    del stack
+    expected = {
+        "publish-a-api",
+        "publish-a-proxy",
+        "publish-b-api",
+        "publish-b-proxy",
+    }
+    for service in expected:
+        container_id = _service_id(service)
+        inspected = _run(["docker", "inspect", container_id], check=True)
+        payload = cast(list[dict[str, Any]], json.loads(inspected.stdout))
+        config = cast(dict[str, Any], payload[0]["Config"])
+        host = cast(dict[str, Any], payload[0]["HostConfig"])
+        assert str(config.get("User", "")).startswith("65534")
+        assert host.get("ReadonlyRootfs") is True
+        bindings = cast(dict[str, object], host.get("PortBindings") or {})
+        assert len(bindings) == 1, service
+        for targets in bindings.values():
+            assert isinstance(targets, list), service
+            entries = cast(list[object], targets)
+            for binding in entries:
+                record = cast(dict[str, object], binding)
+                assert record.get("HostIp") == "127.0.0.1", service

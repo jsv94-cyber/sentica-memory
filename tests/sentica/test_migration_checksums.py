@@ -37,6 +37,7 @@ _EXPECTED: dict[str, str] = {
     "c3828084f472_add_indexes_for_messages_and_.py": "15751708deaaaf8ac8bcd23425704ae85c852f9f05d018be94f43469377c10f7",
     "c4e8b1a2d6f0_runtime_role_and_pending_counts.py": "7125256ec3427c95a3d41d064ec6fcbb84e823ecbf849858a2d232e3a143933a",
     "c9d4e2a71b58_digests_and_deletion_records.py": "0656360f7d13252417bc87e3d4c2b8a25c8b4a4d6edcdf16676279cb82be3e6a",
+    "d4a8c1e27b90_documents_hnsw_current.py": "fd54e72e022866035f3289a35313d0ee51f8ec0be6e174cdae953cc9b3fc50b9",
     "d429de0e5338_adopt_peer_paradigm.py": "a2d224d9cdb03ab5eb0044f043709b2d27a592fc6db9446ebef3cab2ee681943",
     "e4eba9cfaa6f_make_document_session_name_nullable.py": "c66c166914a75c8b737eb6408b4eedaaf658f790877124de69dcfc2df0bdde57",
     "e6b2d8f04a17_dreams_due_superset.py": "537c1c9377c04b03a13f2ff7359f8b5dc9f6c86fc71586ed0f8eb552f3a6fc31",

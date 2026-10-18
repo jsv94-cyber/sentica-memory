@@ -6,6 +6,7 @@ from eval/BASELINE.md, or when any workspace or tenant probe leaks.
 
 from __future__ import annotations
 
+import inspect
 import math
 import re
 import warnings
@@ -27,10 +28,10 @@ from src.sentica.eval_harness import (
     Fact,
     baseline_leak_count,
     category_means,
-    one_hot,
     parse_baseline,
     question_scores,
     regressions,
+    text_embedding,
 )
 from src.sentica.queue import SenticaTenantRefused, pop_and_check_tenant
 from src.sentica.retrieval import prepare_brief, search_conclusions
@@ -77,6 +78,51 @@ def _tokens(text: str) -> set[str]:
 
 def _by_key() -> dict[str, Fact]:
     return {fact.key: fact for fact in FACTS}
+
+
+def test_embeddings_are_not_one_hot_copies() -> None:
+    """A query vector is not the gold fact, and it is not a single axis."""
+    dimensions = settings.EMBEDDING.VECTOR_DIMENSIONS
+    compared = 0
+    for question in QUESTIONS:
+        if not question.gold:
+            continue
+        compared += 1
+        query = text_embedding(question.query, dimensions)
+        fact = next(item for item in FACTS if item.key == question.gold[0])
+        gold = text_embedding(fact.content, dimensions)
+        assert query != gold, question.name
+        nonzero = sum(1 for value in query if value != 0.0)
+        assert nonzero > 1, question.name
+    assert compared >= 2
+
+
+def test_vector_only_recall_is_not_perfect() -> None:
+    """Nearest n-gram neighbor is not the gold fact for every question."""
+    dimensions = settings.EMBEDDING.VECTOR_DIMENSIONS
+    misses = 0
+    scored = 0
+    for question in QUESTIONS:
+        if question.abstain or not question.gold:
+            continue
+        scored += 1
+        query = text_embedding(question.query, dimensions)
+        pool = [fact for fact in FACTS if fact.business == question.business]
+        nearest = max(
+            pool,
+            key=lambda fact: sum(
+                left * right
+                for left, right in zip(
+                    query,
+                    text_embedding(fact.content, dimensions),
+                    strict=True,
+                )
+            ),
+        )
+        if nearest.key not in question.gold:
+            misses += 1
+    assert scored >= 2
+    assert misses >= 1
 
 
 def test_seed_facts_are_not_banned() -> None:
@@ -143,7 +189,7 @@ def _document(fact: Fact) -> schemas.DocumentCreate:
             message_ids=[1],
             message_created_at="2026-01-02T00:00:00Z",
         ),
-        embedding=one_hot(fact.slot, settings.EMBEDDING.VECTOR_DIMENSIONS),
+        embedding=text_embedding(fact.content, settings.EMBEDDING.VECTOR_DIMENSIONS),
     )
 
 
@@ -217,11 +263,14 @@ def _p95(samples: list[float]) -> float:
     return ordered[index]
 
 
+def test_search_helper_takes_no_slot() -> None:
+    assert "_slot" not in inspect.signature(_search).parameters
+
+
 async def _search(
     db: AsyncSession,
     workspace_name: str,
     query: str,
-    slot: int,
     *,
     since: datetime | None = None,
 ) -> list[models.Document]:
@@ -233,7 +282,7 @@ async def _search(
         observed=_PEER,
         since=since,
         top_k=10,
-        embedding=one_hot(slot, settings.EMBEDDING.VECTOR_DIMENSIONS),
+        embedding=text_embedding(query, settings.EMBEDDING.VECTOR_DIMENSIONS),
     )
 
 
@@ -269,7 +318,6 @@ async def _knowledge_update_details(
             db,
             businesses[question.business].name,
             question.query,
-            question.slot,
             since=question.since,
         )
         retrieved = {item.id for item in found}
@@ -307,7 +355,6 @@ async def test_retrieval_eval_matches_baseline(db_session: AsyncSession) -> None
             db_session,
             businesses[question.business].name,
             question.query,
-            question.slot,
             since=question.since,
         )
         retrieved = [item.id for item in found]
@@ -331,7 +378,6 @@ async def test_retrieval_eval_matches_baseline(db_session: AsyncSession) -> None
         db_session,
         businesses[sample.business].name,
         sample.query,
-        sample.slot,
         since=sample.since,
     )
     cold_ms = (perf_counter() - started) * 1000
@@ -342,7 +388,6 @@ async def test_retrieval_eval_matches_baseline(db_session: AsyncSession) -> None
             db_session,
             businesses[sample.business].name,
             sample.query,
-            sample.slot,
             since=sample.since,
         )
         warm.append((perf_counter() - started) * 1000)
@@ -363,6 +408,48 @@ async def test_retrieval_eval_matches_baseline(db_session: AsyncSession) -> None
     assert "Cold:" in text
     assert "Warm p95:" in text
     assert "PENDING" not in text
+
+
+async def test_blank_vector_channel_misses_the_baseline(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A vector stub that returns nothing drops a category under the gate.
+
+    Information extraction and knowledge updates share no tokens with the
+    seeded facts. With the vector channel removed, those scores fall from
+    100 to 0, which is more than DROP_POINTS under the baseline. A category
+    recorded at 0 could not trip that rule.
+    """
+    from src.sentica import retrieval
+
+    baseline = parse_baseline(_BASELINE.read_text(encoding="utf-8"))
+    for name, scores in baseline.items():
+        assert min(scores) > 2, name
+
+    async def _no_rows(*_args: object, **_kwargs: object) -> list[models.Document]:
+        return []
+
+    monkeypatch.setattr(retrieval, "_vector", _no_rows)
+    businesses, ids = await _seed(db_session)
+    rows: list[tuple[str, float, float]] = []
+    for question in QUESTIONS:
+        found = await _search(
+            db_session,
+            businesses[question.business].name,
+            question.query,
+            since=question.since,
+        )
+        retrieved = [item.id for item in found]
+        gold = {ids[key] for key in question.gold}
+        forbidden = {ids[key] for key in question.forbidden}
+        recall5, recall10 = question_scores(
+            retrieved, gold, forbidden, abstain=question.abstain
+        )
+        rows.append((question.category, recall5, recall10))
+    failed = regressions(category_means(rows), parse_baseline(_BASELINE.read_text()))
+    assert failed
+    assert any(item.startswith("information_extraction") for item in failed)
+    assert any(item.startswith("knowledge_updates") for item in failed)
 
 
 @final
@@ -395,12 +482,12 @@ async def test_isolation_red_team_reports_zero_leaks(
     invoice = _by_key()["ie-invoice"]
     leaks: list[str] = []
 
-    control = await _search(db_session, northline, secret.content, secret.slot)
+    control = await _search(db_session, northline, secret.content)
     assert any(row.content == secret.content for row in control)
 
-    harbor_secret = await _search(db_session, harbor, secret.content, secret.slot)
-    harbor_same_vector = await _search(db_session, harbor, secret.content, invoice.slot)
-    north_invoice = await _search(db_session, northline, invoice.content, invoice.slot)
+    harbor_secret = await _search(db_session, harbor, secret.content)
+    harbor_same_vector = await _search(db_session, harbor, secret.content)
+    north_invoice = await _search(db_session, northline, invoice.content)
     leaks.extend(_crossed(harbor_secret, harbor, harbor=harbor))
     leaks.extend(_crossed(harbor_same_vector, harbor, harbor=harbor))
     leaks.extend(_crossed(north_invoice, northline, harbor=harbor))
@@ -411,7 +498,7 @@ async def test_isolation_red_team_reports_zero_leaks(
         token_budget=800,
         query=secret.content,
         top_k=10,
-        embedding=one_hot(secret.slot, settings.EMBEDDING.VECTOR_DIMENSIONS),
+        embedding=text_embedding(secret.content, settings.EMBEDDING.VECTOR_DIMENSIONS),
     )
     if "violetkey" in brief.model_dump_json():
         leaks.append("brief included the other workspace secret")

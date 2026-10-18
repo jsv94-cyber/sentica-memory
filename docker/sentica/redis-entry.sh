@@ -13,5 +13,7 @@ chmod 711 /secret
 chmod 700 /data
 chmod 644 /secret/password
 password=$(tr -d '\n' < /secret/password)
-exec su redis -s /bin/sh -c \
-    "exec redis-server --save '' --appendonly no --requirepass '$password'"
+# setpriv execs redis-server, so pid 1 is the server and its uid is redis.
+# su would stay pid 1 as root and only fork the server.
+exec setpriv --reuid=redis --regid=redis --init-groups --inh-caps=-all \
+    redis-server --save '' --appendonly no --requirepass "$password"

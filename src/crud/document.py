@@ -348,6 +348,16 @@ async def fetch_documents_by_ids(
     return [documents[doc_id] for doc_id in document_ids if doc_id in documents]
 
 
+def _cosine_rank(row: models.Document, embedding: list[float]) -> float:
+    """Cosine distance of one stored vector. Missing vectors sort last."""
+    from src.sentica.vector_query import cosine_distance
+
+    vector = row.embedding
+    if vector is None:
+        return float("inf")
+    return cosine_distance([float(item) for item in vector], embedding)
+
+
 async def _query_documents_pgvector(
     db: AsyncSession,
     workspace_name: str,
@@ -369,19 +379,17 @@ async def _query_documents_pgvector(
         .where(models.Document.superseded_by.is_(None))
     )
 
-    if max_distance is not None:
-        stmt = stmt.where(
-            models.Document.embedding.cosine_distance(embedding) <= max_distance
-        )
-
     stmt = apply_filter(stmt, models.Document, filters)
-    stmt = stmt.order_by(
-        models.Document.stale.asc(),
-        models.Document.embedding.cosine_distance(embedding),
-    ).limit(top_k)
+    from src.sentica.vector_query import execute_neighbors, within_distance
 
-    result = await db.execute(stmt)
-    return list(result.scalars().all())
+    rows = await execute_neighbors(db, stmt, embedding, top_k)
+    # relaxed_order can return a page slightly out of distance order.
+    # Every fresh row precedes every stale row. Distance orders each
+    # group, then the page is cut to top_k.
+    rows.sort(key=lambda row: (bool(row.stale), _cosine_rank(row, embedding)))
+    if max_distance is None:
+        return rows[:top_k]
+    return within_distance(rows, embedding, max_distance, top_k)
 
 
 async def query_documents(

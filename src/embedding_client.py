@@ -775,14 +775,17 @@ class EmbeddingClient:
         )
 
     def _local_encoding(self) -> tiktoken.Encoding:
-        """Tiktoken for the configured model. No provider client."""
+        """Tiktoken for the configured model. No provider client.
+
+        Gateway aliases use ``SENTICA_GATEWAY_TOKENIZER`` and
+        ``SENTICA_GATEWAY_TOKENIZER_ALIASES``.
+        """
+        from src.sentica.tokenizer import encoding_for_gateway_model
+
         model = os.environ.get("SENTICA_GATEWAY_EMBED_MODEL", "").strip()
         if not model:
             model = self._resolve_runtime_config().model
-        try:
-            return tiktoken.encoding_for_model(model)
-        except KeyError:
-            return tiktoken.get_encoding("cl100k_base")
+        return encoding_for_gateway_model(model)
 
     def _local_token_cap(self) -> int:
         return settings.EMBEDDING.MAX_INPUT_TOKENS

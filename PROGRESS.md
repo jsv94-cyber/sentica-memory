@@ -296,8 +296,10 @@ Built:
   same subject, observer, and observed peer. Within cosine distance 0.35
   it is an update, or a contradiction when the text says the old fact no
   longer holds. The old row stays and `superseded_by` points at the new
-  one. Retrieval skips superseded rows and sorts stale rows after current
-  ones.
+  one. Retrieval skips superseded rows. Stale rows are still returned and
+  sort after current ones: vector search reads them with a second HNSW scan
+  on `ix_documents_embedding_hnsw` and appends that page after the fresh page
+  from `ix_documents_embedding_hnsw_current`.
 - `retrieved_count` and `used_count` record use. The conclusions query
   route counts a retrieval. Decay halves unused weight every
   `SENTICA_DECAY_INTERVAL_DAYS` (30), soft-deletes below
@@ -414,4 +416,32 @@ Decisions:
   `tests/sentica/rls_job.py`, or the `test-m2-rls` job changed. The
   `.review/M2-summary.md` deferral note stays where it is.
 - Local unit tests: 3325 passed, 53 skipped.
+
+## R3. Release verification
+
+Built:
+
+- A plain `docker build .` reuses gid 100 when the base image already has the `users` group. CI job `build-default-image` runs that build with no build args.
+- CI job `test-gvisor-smoke` installs `runsc` from `gvisor.tar.bz2` after checking `gvisor.tar.bz2.sha512`, then runs the two-instance smoke subset with `runtime: runsc`. runsc cannot use Docker's embedded DNS at 127.0.0.11, so `docker-compose.gvisor.yml` pins `embeddings` and writes `extra_hosts` for the proxy, Redis, and gateway names.
+- `/ready` caches a successful database check for 5 seconds. The body stays `{"status":"ok"}` or `{"status":"unavailable"}`.
+- Eval embeddings are hashed character n-grams. Information extraction and knowledge updates score 100 only through the vector channel. `eval/BASELINE.md` states what each score measures. `live-eval.yml` is `workflow_dispatch` only.
+- The isolation red-team runs in `test-m2-rls` over HTTP with signed broker tokens. The collected pin is 94 node ids.
+- Vector search orders fresh rows by cosine distance on the partial HNSW index `ix_documents_embedding_hnsw_current`, then appends stale rows from `ix_documents_embedding_hnsw`. Superseded and deleted rows stay out. A filtered scan sets `hnsw.iterative_scan` to `relaxed_order` so the page fills.
+- Gateway budget reserve and charge are Redis Lua scripts on a pooled client. Invalid gateway environment values refuse startup.
+
+gVisor result, measured on Actions (this host has no Docker daemon):
+
+- Commit `f9df321f6a0066437c7265711fe69eaae56402e1`.
+- Workflow run: https://github.com/jsv94-cyber/sentica-memory/actions/runs/39007240804
+- `test-gvisor-smoke`: 4 passed, 26 deselected, 80.74s. The four tests are egress denied, read-only root, non-root Redis, and no `NET_ADMIN`.
+- Same run, other jobs: `test-python` 3431 passed and 53 skipped; `test-m1-stack` 30 passed; `test-m2-rls` 94 passed; `build-default-image` success; `test-status` success.
+- Static analysis run: https://github.com/jsv94-cyber/sentica-memory/actions/runs/39007240678
+- Jobs `basedpyright`, `ruff`, `issue-gate`, `openapi-drift`, and `alembic-heads` succeeded.
+- 11 checks, 0 failures.
+
+Decisions:
+
+- A local-only `spike-hindsight` branch exists. The bake-off was cancelled 2026-10-17.
+- The runtime-role pin is 94 collected node ids in `tests/sentica/rls_job.py`. Four isolation node ids were added. Existing ids stayed.
+- `.review/M2-summary.md` deferral note stays where it is.
 
