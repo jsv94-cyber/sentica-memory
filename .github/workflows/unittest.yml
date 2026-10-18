@@ -102,6 +102,7 @@ jobs:
           DIALECTIC_QUERY_GENERATION_MODEL: test
           SUMMARY_PROVIDER: openai
           SUMMARY_MODEL: test
+          SENTICA_BUDGET_TEST_REDIS_URL: redis://127.0.0.1:6379/0
 
   test-m1-stack:
     runs-on: ubuntu-24.04

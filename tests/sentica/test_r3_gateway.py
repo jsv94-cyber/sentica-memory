@@ -166,6 +166,71 @@ async def test_concurrent_holds_stay_inside_a_100_token_budget(
         redis.close()
 
 
+async def test_concurrent_redis_holds_stay_inside_a_100_token_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ten concurrent holds of 40 never pass a 100-token budget on Redis.
+
+    ``SENTICA_BUDGET_TEST_REDIS_URL`` is the Redis the test-python job
+    provides. A missing URL fails the test. The in-process stand-in above
+    reimplements the reserve check, so this test is what fails when the
+    script compares ``total > total_limit`` and skips adding the hold.
+    """
+    import asyncio
+    import os
+    import uuid
+
+    from src.exceptions import GatewayBudgetExceeded
+    from src.sentica.gateway import (
+        _async_client,  # pyright: ignore[reportPrivateUsage]
+        _drop_async_pool,  # pyright: ignore[reportPrivateUsage]
+        _purpose_key,  # pyright: ignore[reportPrivateUsage]
+        _reserve,  # pyright: ignore[reportPrivateUsage]
+        _settle,  # pyright: ignore[reportPrivateUsage]
+        _total_key,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    url = os.environ.get("SENTICA_BUDGET_TEST_REDIS_URL", "").strip()
+    in_ci = os.environ.get("GITHUB_ACTIONS") == "true" or os.environ.get("CI") == "true"
+    assert url, "SENTICA_BUDGET_TEST_REDIS_URL is not set" + (" in CI" if in_ci else "")
+    tenant = "budget-redis-" + uuid.uuid4().hex
+    monkeypatch.setenv("SENTICA_GATEWAY_REDIS_URL", url)
+    monkeypatch.setenv("SENTICA_GATEWAY_DAILY_TOKEN_BUDGET", "100")
+    monkeypatch.delenv("SENTICA_GATEWAY_DERIVER_DAILY_TOKEN_BUDGET", raising=False)
+    _drop_async_pool()
+
+    async def _one() -> int:
+        try:
+            applied = await _reserve(tenant, "deriver", 40)
+        except GatewayBudgetExceeded:
+            return 0
+        await _settle(tenant, "deriver", 40, applied)
+        return applied
+
+    try:
+        admitted = await asyncio.gather(*(_one() for _ in range(10)))
+        spent = sum(admitted)
+        client = await _async_client()
+        assert client is not None
+        stored = int(await client.get(_total_key(tenant)) or "0")
+        purpose = int(await client.get(_purpose_key(tenant, "deriver")) or "0")
+        assert spent <= 100
+        assert stored <= 100
+        assert purpose <= 100
+        assert spent == 80
+        assert stored == 80
+        assert purpose == 80
+    finally:
+        client = await _async_client()
+        if client is not None:
+            match = "sentica:budget:" + tenant + ":*"
+            keys = [key async for key in client.scan_iter(match=match, count=50)]
+            if keys:
+                await client.delete(*keys)
+            await client.aclose(close_connection_pool=True)
+        _drop_async_pool()
+
+
 def test_chat_hold_counts_tool_schemas_and_list_content() -> None:
     """A hold covers multipart text and the tool schemas sent with the call."""
     from typing import Any
