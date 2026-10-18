@@ -404,7 +404,7 @@ def docker_user_order_gaps(deploy: str) -> list[str]:
     gaps: list[str] = []
     if not chain or not chain[-1].default:
         gaps.append("DOCKER-USER rules are appended after the default RETURN")
-    public = ipaddress.ip_address("1.2.3.4")
+    public = ipaddress.IPv4Address("1.2.3.4")
     ips = _named_container_ips(commands)
     for address in ips.values():
         if _verdict(chain, address, public, 443) != "DROP":
