@@ -261,6 +261,39 @@ def test_chat_hold_counts_tool_schemas_and_list_content() -> None:
     assert plain >= count_gateway_tokens([prose], model) + 8
 
 
+def test_chat_hold_counts_tool_parameter_names() -> None:
+    """A parameter name that is only a schema key still counts toward the hold."""
+    from typing import Any
+
+    from src.sentica.gateway import _chat_hold  # pyright: ignore[reportPrivateUsage]
+    from src.sentica.tokenizer import count_gateway_tokens
+
+    model = "gpt-4o-mini"
+    parameter = "window_seat_preference"
+    messages: list[dict[str, Any]] = [{"role": "user", "content": "x"}]
+    named: list[dict[str, Any]] = [
+        {
+            "type": "function",
+            "function": {
+                "name": "book",
+                "parameters": {"type": "object", "properties": {parameter: {}}},
+            },
+        }
+    ]
+    empty: list[dict[str, Any]] = [
+        {
+            "type": "function",
+            "function": {
+                "name": "book",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+    hold = _chat_hold(messages, 1, model, named)
+    plain = _chat_hold(messages, 1, model, empty)
+    assert hold - plain >= count_gateway_tokens([parameter], model)
+
+
 async def test_a_failed_chat_releases_its_hold(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

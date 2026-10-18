@@ -739,12 +739,18 @@ def _usage_pair(
 
 
 def _strings(value: object) -> list[str]:
-    """Every string nested in a message part or a tool schema."""
+    """Every string nested in a message part or a tool schema.
+
+    Dict keys are included. A tool parameter name is a key, and a name that
+    is not also a string value would otherwise be absent from the chat hold.
+    """
     if isinstance(value, str):
         return [value] if value else []
     if isinstance(value, dict):
         found: list[str] = []
-        for item in cast(dict[object, object], value).values():
+        for key, item in cast(dict[object, object], value).items():
+            if isinstance(key, str) and key:
+                found.append(key)
             found.extend(_strings(item))
         return found
     if isinstance(value, list):
@@ -764,7 +770,8 @@ def _chat_hold(
     """Upper bound for one chat call: prompt tokens plus the completion cap.
 
     The prompt count includes string content, text inside list content, and
-    the tool schemas sent with the call.
+    the tool schemas sent with the call, including object keys such as
+    parameter names.
     """
     from src.sentica.tokenizer import count_gateway_tokens
 
