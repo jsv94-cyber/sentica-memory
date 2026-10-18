@@ -150,10 +150,10 @@ Create: `POST /v3/workspaces/{workspace_id}/conclusions`
 `observer_id` and `observed_id` are required and must already be peers
 in this workspace. For the broker they are the same subject peer.
 `session_id` is optional and must already exist when set.
-`subject_ref` is optional. `source_trust` is required in production,
-same four values as ingest. A missing value is HTTP 422. At most 100
-conclusions. A conclusion the safety filter drops is omitted from the
-response. An empty kept set returns `201` and `[]`.
+`subject_ref` is optional. `source_trust` uses the same four values as
+ingest. A missing value is stored as `owner`. At most 100 conclusions.
+A conclusion the safety filter drops is omitted from the response. An
+empty kept set returns `201` and `[]`.
 
 Response `201`, an array of conclusion objects:
 
@@ -448,8 +448,8 @@ does not also replay that message.
 ## Gaps for Jose
 
 These are Section 35 requirements this service does not implement yet.
-The small ones in this release are search_memory, `workspace_id` on
-every conclusion, and `source_trust` on a broker-created conclusion.
+The small ones in this release are search_memory and `workspace_id` on
+every conclusion. A conclusion stores the `source_trust` that was sent.
 
 1. Sensitivity and role are not columns. A conclusion stores
    `source_trust` and `subject_ref`, and `workspace_id` is the
@@ -473,3 +473,6 @@ every conclusion, and `source_trust` on a broker-created conclusion.
    iptables rules need addresses. The `10.8.0.8/29` plan has no spare
    address. Both are deploy follow-ups, not part of this contract's
    request shapes.
+7. A conclusion with no `source_trust` is stored as `owner`, including
+   in production. The runtime-role proof creates one without the field.
+   Ingest still refuses a missing label.

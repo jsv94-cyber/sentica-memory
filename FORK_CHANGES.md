@@ -96,7 +96,7 @@ release v3.3.0 (`608aec8a928da13c540262ed980c569448fb53ab`).
 | `src/sentica/retrieval.py` | `prepare_search` counts the conclusions that search returned. | M-INT |
 | `src/schemas/api.py` | Conclusion responses include `workspace_id`. Create accepts `source_trust`. | M-INT |
 | `src/schemas/__init__.py` | Exports `MemorySearchRequest`. | M-INT |
-| `src/crud/document.py` | Production refuses a conclusion with no `source_trust` and stores the label that was sent. | M-INT |
+| `src/crud/document.py` | A missing conclusion `source_trust` is stored as owner. The label that was sent is stored. | M-INT |
 | `docs/INTEGRATION.md` | Broker contract: routes, tokens, placement, footprint, failure modes. | M-INT |
 | `docs/RELEASE-v0.2.0-sentica.md` | Release notes for `v0.2.0-sentica`. | M-INT |
 | `Dockerfile` | Base image and uv are pinned by digest. `SOURCE_DATE_EPOCH` has a default. | M-INT |

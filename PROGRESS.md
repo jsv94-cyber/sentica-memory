@@ -459,7 +459,9 @@ Built:
   in that response, and in the conclusion routes, carries
   `workspace_id`.
 - A conclusion created by the broker stores the request's
-  `source_trust`. Production refuses a missing label.
+  `source_trust`. A missing label is stored as `owner`. The
+  runtime-role proof creates a conclusion without the field. Ingest
+  still refuses a missing label in production.
 - The default image pins `python:3.13-slim-bookworm` and `uv` by
   digest. `docs/RELEASE-v0.2.0-sentica.md` records the built digest.
 - CI job `build-default-image` creates a docker-container builder

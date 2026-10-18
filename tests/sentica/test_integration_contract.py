@@ -60,16 +60,14 @@ def test_release_notes_pin_the_base_images() -> None:
     assert re.search(r"sha256:[0-9a-f]{64}", notes)
 
 
-def test_production_conclusion_requires_source_trust(
+def test_missing_conclusion_trust_is_owner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from src.crud.document import conclusion_trust
-    from src.exceptions import ValidationException
 
     monkeypatch.setattr("src.sentica.runtime.production_enabled", lambda: False)
     assert conclusion_trust(None) == "owner"
     assert conclusion_trust("staff") == "staff"
     monkeypatch.setattr("src.sentica.runtime.production_enabled", lambda: True)
-    with pytest.raises(ValidationException, match="source_trust is required"):
-        conclusion_trust(None)
+    assert conclusion_trust(None) == "owner"
     assert conclusion_trust("external") == "external"

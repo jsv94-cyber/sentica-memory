@@ -14,7 +14,8 @@ degrade when memory is down. Writes stay in the broker's durable queue.
 `POST /v3/workspaces/{workspace_id}/peers/{peer_id}/search_memory` is
 the hybrid search the brief already used. Conclusion responses include
 `workspace_id`. A broker-created conclusion stores the `source_trust`
-on the request. Production refuses a missing label.
+on the request. A missing label is stored as `owner`. Ingest still
+refuses a missing label in production.
 
 ## Image
 
