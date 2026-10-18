@@ -1232,6 +1232,18 @@ async def delete_document_by_id(
     await db.commit()
 
 
+def conclusion_trust(value: str | None) -> str:
+    """The label to store. Production refuses a missing label."""
+    from src.exceptions import ValidationException
+    from src.sentica.runtime import production_enabled
+
+    if value is None:
+        if production_enabled():
+            raise ValidationException("source_trust is required")
+        return "owner"
+    return value
+
+
 async def create_observations(
     db: AsyncSession,
     observations: Sequence[schemas.ConclusionCreate],
@@ -1315,6 +1327,10 @@ async def create_observations(
             db, workspace_name, observer=observer, observed=observed
         )
 
+    # Refuse a missing label before any embedding call.
+    for obs in observations:
+        conclusion_trust(obs.source_trust)
+
     # Generate embeddings in batch
     contents = [obs.content for obs in observations]
     try:
@@ -1346,7 +1362,7 @@ async def create_observations(
                 content=obs.content,
                 level="explicit",  # Manually created observations are always explicit
                 times_derived=1,
-                internal_metadata={"source_trust": "owner"},
+                internal_metadata={"source_trust": conclusion_trust(obs.source_trust)},
                 session_name=obs.session_id,
                 embedding=embedding,
             )
@@ -1358,7 +1374,7 @@ async def create_observations(
                 content=obs.content,
                 level="explicit",  # Manually created observations are always explicit
                 times_derived=1,
-                internal_metadata={"source_trust": "owner"},
+                internal_metadata={"source_trust": conclusion_trust(obs.source_trust)},
                 session_name=obs.session_id,
             )
         doc.subject_ref = obs.subject_ref

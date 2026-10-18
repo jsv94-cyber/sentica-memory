@@ -681,7 +681,7 @@ class Conclusion(BaseModel):
     )
     source_trust: Literal["owner", "staff", "external", "system"] | None = Field(
         default=None,
-        description="external when every source message was external. Empty when the conclusion is not external-only.",
+        description="owner, staff, external, or system. Empty when no label was stored.",
     )
     subject_ref: str | None = Field(
         default=None,
@@ -701,6 +701,10 @@ class Conclusion(BaseModel):
     retrieved_count: int = Field(default=0)
     used_count: int = Field(default=0)
     created_at: datetime.datetime
+    workspace_name: str = Field(
+        serialization_alias="workspace_id",
+        description="Workspace this conclusion was stored in.",
+    )
 
     @field_validator("source_ids", mode="before")
     @classmethod
@@ -738,6 +742,33 @@ class ConclusionQuery(BaseModel):
     filters: dict[str, Any] | None = Field(
         default=None,
         description="Additional filters to apply",
+    )
+
+
+class MemorySearchRequest(BaseModel):
+    """Hybrid conclusion search Sentica's broker runs before it answers."""
+
+    query: str = Field(
+        min_length=1,
+        description="Words or a paraphrase. Keyword and vector results are merged.",
+    )
+    subject_ref: str | None = Field(
+        default=None,
+        description="Only conclusions about this subject, such as customer:123.",
+    )
+    since: datetime.datetime | None = Field(
+        default=None,
+        description="Only conclusions created at or after this time.",
+    )
+    top_k: int = Field(
+        default=10,
+        ge=1,
+        le=50,
+        description="How many conclusions to return.",
+    )
+    workspaces: list[str] | None = Field(
+        default=None,
+        description="Workspaces to read. Each one is queried on its own.",
     )
 
 
@@ -811,6 +842,7 @@ class ConclusionCreate(BaseModel):
         default=None,
         description="Subject this conclusion is about, such as customer:123.",
     )
+    source_trust: Literal["owner", "staff", "external", "system"] | None = None
 
     _token_count: int = PrivateAttr(default=0)
 

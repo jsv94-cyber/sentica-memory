@@ -445,3 +445,37 @@ Decisions:
 - The runtime-role pin is 94 collected node ids in `tests/sentica/rls_job.py`. Four isolation node ids were added. Existing ids stayed.
 - `.review/M2-summary.md` deferral note stays where it is.
 
+## M-INT. Integration contract
+
+Built:
+
+- `docs/INTEGRATION.md` is the broker contract. Ingest, conclusions,
+  `search_memory`, and brief are specified with request and response
+  fields. The token audience is `sentica-memory`. Reads degrade when
+  the instance returns `memory unavailable`. Writes stay in the
+  broker's durable queue.
+- `POST /v3/workspaces/{workspace_id}/peers/{peer_id}/search_memory`
+  calls the hybrid retrieval the brief already used. Each conclusion
+  in that response, and in the conclusion routes, carries
+  `workspace_id`.
+- A conclusion created by the broker stores the request's
+  `source_trust`. Production refuses a missing label.
+- The default image pins `python:3.13-slim-bookworm` and `uv` by
+  digest. `docs/RELEASE-v0.2.0-sentica.md` records the built digest.
+- The footprint table in `docs/INTEGRATION.md` is a throwaway stack on
+  this host. Jose's Redis on port 6379 was not used.
+
+Decisions:
+
+- Role and sensitivity stay off the memory row. The workspace is the
+  partition the token allows. Adding those columns, the Restricted
+  upgrade classifier, and idempotency keys is listed for Jose in
+  `docs/INTEGRATION.md`.
+- The runtime-role pin stays 94. No `tests/sentica/test_m2_*` file,
+  `tests/sentica/rls_job.py`, or the `test-m2-rls` job changed.
+
+Test counts, on this host, against throwaway Postgres on port 5441 and Redis on port 6391:
+
+- Unit suite, optional extras installed, `tests/sentica/test_m1_stack.py` excluded: 3455 passed, 53 skipped, 2 failed. Both failures are `tests/sdk_typescript/test_sdk.py` because `bun` is not installed here. CI installs bun.
+- Two-instance stack: 33 passed. The on-disk scan in `test_stopped_stack_leaves_no_memory_on_disk` calls `sudo grep`. This host asks for a sudo password, so that scan did not run to completion here. CI runners that have passwordless sudo still run it.
+

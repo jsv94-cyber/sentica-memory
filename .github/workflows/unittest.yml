@@ -311,7 +311,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Build the default image
-        run: docker build .
+        run: docker build --provenance=false --sbom=false -o type=docker,dest=image.tar,rewrite-timestamp=true .
 
   # Smoke subset of tests/sentica/test_m1_stack.py under runsc. The full
   # proof stays on the default runtime in test-m1-stack. SENTICA_GVISOR=1

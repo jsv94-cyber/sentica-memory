@@ -456,3 +456,67 @@ async def test_context_latency_on_ten_thousand_conclusions(
         "the customer prefers the window seat"
     ]
     assert warm_p95 < 0.3
+
+
+async def test_search_memory_returns_the_keyword_hit_with_its_workspace(
+    client: TestClient,
+    db_session: AsyncSession,
+    sample_data: tuple[Workspace, Peer],
+    monkeypatch: Any,
+) -> None:
+    """The broker route is hybrid search, and each hit names its workspace."""
+    workspace, peer = sample_data
+
+    async def embed(query: str) -> list[float]:
+        del query
+        return _vector(0)
+
+    async def batch(texts: list[str], **_kwargs: object) -> list[list[float]]:
+        return [await embed(text) for text in texts]
+
+    monkeypatch.setattr("src.embedding_client.embedding_client.embed", embed)
+    monkeypatch.setattr(
+        "src.embedding_client.embedding_client.simple_batch_embed", batch
+    )
+    created = client.post(
+        "/v3/workspaces/" + workspace.name + "/conclusions",
+        json={
+            "conclusions": [
+                {
+                    "content": "the customer prefers the window seat",
+                    "observer_id": peer.name,
+                    "observed_id": peer.name,
+                    "subject_ref": "customer:123",
+                    "source_trust": "external",
+                }
+            ]
+        },
+    )
+    assert created.status_code == 201, created.text
+    created_rows = cast(list[dict[str, Any]], created.json())
+    assert created_rows[0]["workspace_id"] == workspace.name
+    found = client.post(
+        "/v3/workspaces/" + workspace.name + "/peers/" + peer.name + "/search_memory",
+        json={"query": "window seat", "subject_ref": "customer:123", "top_k": 5},
+    )
+    assert found.status_code == 200, found.text
+    rows = cast(list[dict[str, Any]], found.json())
+    assert rows[0]["content"] == "the customer prefers the window seat"
+    assert rows[0]["workspace_id"] == workspace.name
+    assert rows[0]["subject_ref"] == "customer:123"
+    assert rows[0]["source_trust"] == "external"
+    assert rows[0]["observer_id"] == peer.name
+    blank = client.post(
+        "/v3/workspaces/" + workspace.name + "/peers/" + peer.name + "/search_memory",
+        json={"query": "   "},
+    )
+    assert blank.status_code == 422
+    stored = (
+        await db_session.scalars(
+            select(models.Document).where(
+                models.Document.content == "the customer prefers the window seat"
+            )
+        )
+    ).one()
+    await db_session.refresh(stored)
+    assert stored.retrieved_count == 1

@@ -2,13 +2,18 @@
 
 # https://pythonspeed.com/articles/base-image-python-docker-images/
 # https://testdriven.io/blog/docker-best-practices/
-FROM python:3.13-slim-bookworm AS builder
+# Digests are the linux/amd64 manifests recorded for a reproducible default
+# image. python:3.13-slim-bookworm already has the users group at gid 100.
+ARG SOURCE_DATE_EPOCH=1760832000
+FROM python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641 AS builder
 
-COPY --from=ghcr.io/astral-sh/uv:0.9.24 /uv /bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.9.24@sha256:816fdce3387ed2142e37d2e56e1b1b97ccc1ea87731ba199dc8a25c04e4997c5 /uv /bin/uv
 
 WORKDIR /app
 
-# Enable bytecode compilation
+# Enable bytecode compilation. The epoch keeps compiled files stable.
+ARG SOURCE_DATE_EPOCH=1760832000
+ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
 ENV UV_COMPILE_BYTECODE=1
 
 # Copy from the cache instead of linking since it's a mounted volume
@@ -34,13 +39,15 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         exit 2; \
     fi
 
-FROM python:3.13-slim-bookworm AS runtime
+FROM python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641 AS runtime
 
 WORKDIR /app
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV SENTICA_MODE=production
+ARG SOURCE_DATE_EPOCH=1760832000
+ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
 
 # The proof build passes the runner uid so certificate files can stay mode 600
 # without a root chown on the host. The published image keeps uid 100.
