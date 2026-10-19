@@ -180,8 +180,11 @@ only from conclusions that are not external.
 
 `POST /v3/workspaces/{workspace_id}/peers/{peer_id}/brief` takes
 `token_budget` on the request. There is no environment setting for it.
-Vector neighbors farther than cosine distance 0.65 are left out of that
-half of the search. A keyword match is still returned.
+`POST /v3/workspaces/{workspace_id}/peers/{peer_id}/search_memory` is the
+same keyword-plus-vector search without the card or the summary. Vector
+neighbors farther than cosine distance 0.65 are left out of that half of
+the search. A keyword match is still returned. The request and response
+shapes are in `docs/INTEGRATION.md`.
 
 ## Freshness
 

@@ -977,6 +977,8 @@ async def get_peer_brief(
     from src.telemetry.events import EmbeddingCallPurpose
     from src.utils.types import embedding_call_purpose
 
+    allowed = token_allowed(jwt_params)
+    targets = enforce_targets(workspace_id, body.workspaces, allowed)
     embedding: list[float] | None = None
     if body.query and body.query.strip():
         try:
@@ -991,9 +993,6 @@ async def get_peer_brief(
                 "Query exceeds maximum token limit of "
                 + f"{settings.EMBEDDING.MAX_INPUT_TOKENS}."
             ) from exc
-
-    allowed = token_allowed(jwt_params)
-    targets = enforce_targets(workspace_id, body.workspaces, allowed)
     if body.workspaces and len(targets) > 1:
         briefs: list[schemas.PeerBrief] = []
         for name in targets:
@@ -1023,6 +1022,74 @@ async def get_peer_brief(
         top_k=body.top_k,
         embedding=embedding,
     )
+
+
+@router.post(
+    "/{peer_id}/search_memory",
+    response_model=list[schemas.Conclusion],
+)
+async def search_peer_memory(
+    workspace_id: str = Path(...),
+    peer_id: str = Path(..., description="Peer the memory is about"),
+    body: schemas.MemorySearchRequest = Body(
+        ...,
+        description="Query, optional subject and recency filters, and workspace set",
+    ),
+    jwt_params: JWTParams = Depends(
+        require_auth(workspace_name="workspace_id", peer_name="peer_id")
+    ),
+) -> list[schemas.Conclusion]:
+    """Keyword plus vector search inside the token's workspaces.
+
+    Each hit carries its workspace id. A workspace outside the token is
+    refused. The query text is not logged.
+    """
+    from src.embedding_client import EmbeddingTokenLimitError
+    from src.sentica.retrieval import prepare_search
+    from src.sentica.workspace_scope import (
+        enforce_targets,
+        open_workspace,
+        reset_workspace,
+        token_allowed,
+    )
+    from src.telemetry.events import EmbeddingCallPurpose
+    from src.utils.types import embedding_call_purpose
+
+    query = body.query.strip()
+    if not query:
+        raise ValidationException("query is empty")
+    allowed = token_allowed(jwt_params)
+    targets = enforce_targets(workspace_id, body.workspaces, allowed)
+    try:
+        with embedding_call_purpose(
+            EmbeddingCallPurpose.SEARCH_MEMORY.value,
+            workspace_name=workspace_id,
+            parent_category="api",
+        ):
+            embedding = await embedding_client.embed(query)
+    except EmbeddingTokenLimitError as exc:
+        raise ValidationException(
+            "Query exceeds maximum token limit of "
+            + f"{settings.EMBEDDING.MAX_INPUT_TOKENS}."
+        ) from exc
+    found: list[schemas.Conclusion] = []
+    for name in targets:
+        token = await open_workspace(name, jwt_params, peer_name=peer_id)
+        try:
+            found.extend(
+                await prepare_search(
+                    name,
+                    peer_id,
+                    query=query,
+                    subject_ref=body.subject_ref,
+                    since=body.since,
+                    top_k=body.top_k,
+                    embedding=embedding,
+                )
+            )
+        finally:
+            reset_workspace(token)
+    return found
 
 
 @router.post(

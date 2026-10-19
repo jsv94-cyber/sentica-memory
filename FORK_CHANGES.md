@@ -92,4 +92,17 @@ release v3.3.0 (`608aec8a928da13c540262ed980c569448fb53ab`).
 | `SECURITY.md` | Fork isolation model and where to report a vulnerability. | M9 |
 | `docs/RELEASES.md` | Notes for `v0.1.0-sentica`. | M9 |
 | `.review/M2-summary.md` | Review notes for M2, including the M9 deferrals. | M2 |
+| `src/routers/peers.py` | `POST /peers/{peer_id}/search_memory` runs hybrid retrieval for the broker. | M-INT |
+| `src/sentica/retrieval.py` | `prepare_search` counts the conclusions that search returned. | M-INT |
+| `src/schemas/api.py` | Conclusion responses include `workspace_id`. Create accepts `source_trust`. | M-INT |
+| `src/schemas/__init__.py` | Exports `MemorySearchRequest`. | M-INT |
+| `src/crud/document.py` | Production refuses a missing conclusion `source_trust`. The label that was sent is stored. | M-INT |
+| `docs/INTEGRATION.md` | Broker contract: routes, tokens, placement, footprint, failure modes. | M-INT |
+| `docs/RELEASE-v0.2.0-sentica.md` | Release notes for `v0.2.0-sentica`. | M-INT |
+| `Dockerfile` | Base image and uv are pinned by digest. Copied files are stamped to `SOURCE_DATE_EPOCH`, bytecode is compiled with one worker, and the virtualenv layer is packed in sorted order. | M-INT |
+| `tests/sentica/test_integration_contract.py` | The written contract and the production trust refusal. | M-INT |
+| `tests/sentica/test_m1_stack.py` | Signed-token exercise of every contract route. | M-INT |
+| `tests/sentica/test_m6_retrieval.py` | search_memory returns the keyword hit and its workspace. | M-INT |
+| `tests/routes/test_scope_route_policy.py` | A scope in the search_memory peer position is refused. | M-INT |
+| `.github/workflows/unittest.yml` | The default image build pins BuildKit by digest, checks out the head commit, sets `SOURCE_DATE_EPOCH` from that commit, and fails unless two clean builds match the recorded digest. | M-INT |
 

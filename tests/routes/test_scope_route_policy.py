@@ -283,6 +283,13 @@ def _b_peer_brief(c: TestClient, ws: str, _s: str, p: str):
     )
 
 
+def _b_peer_search_memory(c: TestClient, ws: str, _s: str, p: str):
+    return c.post(
+        f"/v3/workspaces/{ws}/peers/{p}/search_memory",
+        json={"query": "window"},
+    )
+
+
 def _b_context_perspective(c: TestClient, ws: str, s: str, p: str):
     query = f"?peer_perspective={p}&peer_target={_OTHER}"
     return c.get(f"/v3/workspaces/{ws}/sessions/{s}/context{query}")
@@ -606,6 +613,14 @@ POLICY: tuple[Case, ...] = (
         True,
         refuse_missing=True,
         build=_b_peer_brief,
+    ),
+    Case(
+        "POST",
+        f"{_W}/peers/{{peer_id}}/search_memory",
+        "peer_id",
+        True,
+        refuse_missing=True,
+        build=_b_peer_search_memory,
     ),
     Case(
         "GET",

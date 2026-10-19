@@ -197,4 +197,10 @@ def test_none_hs256_and_algorithm_mismatch_are_forged(tmp_path: Path) -> None:
     assert isinstance(without_aud, str)
     with pytest.raises(AuthenticationException, match="forged"):
         verify_sentica_token(without_aud, instance)
-    assert refusal_count("forged") == 4
+    wrong_aud = dict(payload)
+    wrong_aud["aud"] = "other-service"
+    present_wrong_aud = jwt.encode(wrong_aud, ed, algorithm="EdDSA")
+    assert isinstance(present_wrong_aud, str)
+    with pytest.raises(AuthenticationException, match="forged"):
+        verify_sentica_token(present_wrong_aud, instance)
+    assert refusal_count("forged") == 5

@@ -1102,6 +1102,7 @@ async def test_safety_model_check_fails_closed_in_production(
                         observer_id="p1",
                         observed_id="p1",
                         session_id="s1",
+                        source_trust="owner",
                     )
                 ],
                 workspace,
@@ -1142,6 +1143,7 @@ async def test_safety_model_check_refuses_an_open_session(
         observer_id="p1",
         observed_id="p1",
         session_id="s1",
+        source_trust="owner",
     )
     seen: list[int] = []
 
@@ -1163,6 +1165,7 @@ async def test_safety_model_check_refuses_an_open_session(
                         "observer_id": "p1",
                         "observed_id": "p1",
                         "session_id": "s1",
+                        "source_trust": "owner",
                     }
                 ]
             },
