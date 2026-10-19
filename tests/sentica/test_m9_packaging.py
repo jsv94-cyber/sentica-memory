@@ -187,6 +187,7 @@ _REQUIRED_CONTAINERS = (
     "sentica-memory-proxy",
     "sentica-memory-gateway",
     "sentica-memory-egress",
+    "sentica-memory-postgres",
 )
 
 
@@ -930,6 +931,40 @@ def database_path_gaps(deploy: str) -> list[str]:
     return gaps
 
 
+def certificate_bridge_gaps(deploy: str) -> list[str]:
+    """The certificate proxy is not on a bridge with the gateway.
+
+    The API, deriver, and migrate reach it on one internal bridge. The
+    gateway does not join that bridge, so it has no route to the proxy.
+    """
+    commands = _bash_commands(deploy)
+    topology = _topology(commands)
+    gaps: list[str] = []
+    proxy = "sentica-memory-proxy"
+    gateway = "sentica-memory-gateway"
+    shared = topology.networks_of(proxy) & topology.networks_of(gateway)
+    if shared:
+        gaps.append("certificate proxy shares a bridge with the gateway")
+    clients = [name for name in topology.networks_of(proxy) if name != "sentica-db"]
+    if len(clients) != 1:
+        gaps.append("certificate proxy has no single client bridge")
+        return gaps
+    name = clients[0]
+    net = topology.networks.get(name)
+    if net is None or not net.internal:
+        gaps.append("certificate proxy client bridge is not internal")
+    members = topology.containers_on(name)
+    expected = {
+        "sentica-memory-api",
+        "sentica-memory-deriver",
+        "sentica-memory-migrate",
+        "sentica-memory-proxy",
+    }
+    if members != expected:
+        gaps.append("certificate proxy client bridge has the wrong members")
+    return gaps
+
+
 def _spare_address_gap(
     subnet: ipaddress.IPv4Network,
     gateway: ipaddress.IPv4Address | None,
@@ -1052,12 +1087,13 @@ def test_deploy_firewall_covers_every_container_ip() -> None:
     assert docker_user_order_gaps(deploy) == []
     assert provider_egress_gaps(deploy) == []
     assert database_path_gaps(deploy) == []
+    assert certificate_bridge_gaps(deploy) == []
     assert idempotent_gaps(commands) == []
     sentica = [
         command for command in commands if command.startswith("iptables -A SENTICA ")
     ]
-    routed = "iptables -A SENTICA -s 10.8.0.21/32 -j DROP"
-    assert sentica[7] == routed
+    routed = "iptables -A SENTICA -s 10.8.0.85/32 -j DROP"
+    assert sentica[11] == routed
     assert not any("--dport 5432" in command for command in sentica)
     assert not any("10.8.0.23" in command for command in sentica)
     topology = _topology(commands)
@@ -1083,6 +1119,24 @@ def test_deploy_firewall_covers_every_container_ip() -> None:
         _packet_path(
             ipaddress.IPv4Address("10.8.0.18"),
             ipaddress.IPv4Address("10.8.0.22"),
+            topology,
+            set(),
+        )
+        == "BRIDGE"
+    )
+    assert (
+        _packet_path(
+            ipaddress.IPv4Address("10.8.0.22"),
+            ipaddress.IPv4Address("10.8.0.85"),
+            topology,
+            set(),
+        )
+        == "UNREACHABLE"
+    )
+    assert (
+        _packet_path(
+            ipaddress.IPv4Address("10.8.0.82"),
+            ipaddress.IPv4Address("10.8.0.85"),
             topology,
             set(),
         )
@@ -1233,6 +1287,86 @@ iptables -A DOCKER-USER -s 10.8.0.14/32 -j DROP
     )
     assert any("10.8.0.10" in item and "DROP" in item for item in limited)
     assert any("no spare address" in item for item in limited)
+    shared_proxy = """```bash
+docker network create --driver bridge --subnet 10.8.0.16/28 --gateway 10.8.0.17 sentica-instance
+docker run --name sentica-memory-proxy --network sentica-instance --ip 10.8.0.21 img
+docker run --name sentica-memory-gateway --network sentica-instance --ip 10.8.0.22 img
+```
+"""
+    assert any(
+        "shares a bridge" in item for item in certificate_bridge_gaps(shared_proxy)
+    )
+
+
+_POSTGRES_IMAGE = (
+    "pgvector/pgvector:pg15"
+    + "@sha256:47af0b65960b14f1c6945aa4ccae37836c632e9a6fe0eea9160936e616e5b2e9"
+)
+_PGBOUNCER_IMAGE = (
+    "edoburu/pgbouncer:v1.24.1-p1"
+    + "@sha256:3db3d7223e93af52b4116f642951a1a5fa44702a88c2a59cf7562cac19320c9e"
+)
+
+
+def test_deploy_postgres_pins_a_digest_and_rejects_trust() -> None:
+    """The Postgres command stays hardened and does not use trust auth."""
+    deploy = " ".join(_text("docs/DEPLOY.md").split())
+    assert _POSTGRES_IMAGE in deploy
+    assert _PGBOUNCER_IMAGE in deploy
+    assert "POSTGRES_PASSWORD_FILE=/run/secrets/password" in deploy
+    assert "POSTGRES_HOST_AUTH_METHOD=" not in deploy
+    assert "does not set `POSTGRES_PASSWORD` or `POSTGRES_HOST_AUTH_METHOD`" in deploy
+    assert "-e POSTGRES_PASSWORD=" not in deploy
+    assert "/var/lib/sentica/postgres:/var/lib/postgresql/data" in deploy
+    assert "--user 999:999" in deploy
+    assert "ident_file=/etc/sentica/pg_ident.conf" in deploy
+    hba = _text("docker/sentica/instance-pg_hba.conf")
+    lowered = hba.lower()
+    assert "trust" not in lowered
+    assert "local all sentica peer map=sentica" in lowered
+    assert "host all all 10.8.0.67/32 scram-sha-256" in lowered
+    assert "host all all 0.0.0.0/0 reject" in lowered
+    assert "host all all ::/0 reject" in lowered
+    ident = _text("docker/sentica/instance-pg_ident.conf").lower()
+    assert "trust" not in ident
+    assert "sentica postgres sentica" in ident
+
+
+def test_firewall_script_matches_the_guide() -> None:
+    """The unit runs the same rules the guide shows, after Docker."""
+    guide = [
+        command
+        for command in _bash_commands(_text("docs/DEPLOY.md"))
+        if command.startswith("iptables ")
+    ]
+    script_lines = [
+        line.strip()
+        for line in _text("docker/sentica/sentica-firewall.sh").splitlines()
+        if line.strip().startswith("iptables ")
+    ]
+    assert script_lines == guide
+    assert guide[0].startswith("iptables -N SENTICA")
+    assert "iptables -F SENTICA" in guide
+    assert guide[-1].startswith("iptables -C DOCKER-USER -j SENTICA")
+    unit = _text("docker/sentica/sentica-firewall.service")
+    assert "After=docker.service" in unit
+    assert "Requires=docker.service" in unit
+    assert "Type=oneshot" in unit
+    assert "ExecStart=/usr/local/sbin/sentica-firewall.sh" in unit
+    assert "WantedBy=multi-user.target" in unit
+    deploy = " ".join(_text("docs/DEPLOY.md").split())
+    assert "After=docker.service" in deploy
+    assert "iptables-persistent" in deploy
+
+
+def test_ci_collects_the_firewall_topology_test() -> None:
+    """The main CI job runs the test that applies the firewall."""
+    workflow = _text(".github/workflows/unittest.yml")
+    matched = re.search(r"uv run pytest -x --ignore=([^\n]+)", workflow)
+    assert matched is not None
+    ignored = matched.group(1)
+    assert "test_m1_stack.py" in ignored
+    assert "test_egress_proxy.py" not in ignored
 
 
 def test_dockerignore_excludes_bytecode() -> None:

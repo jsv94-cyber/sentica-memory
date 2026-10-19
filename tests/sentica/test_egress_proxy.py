@@ -6,6 +6,7 @@ import ipaddress
 import os
 import random
 import re
+import secrets
 import socket
 import subprocess
 import tempfile
@@ -20,8 +21,21 @@ _CLIENT = (
     + "@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641"
 )
 _SQUID = (
-    "ubuntu/squid:6.6-24.04_edge"
-    + "@sha256:8a3baed477e2c282ab8aa5edad442f69873246964f225c5c2ae8364b6610963c"
+    "ubuntu/squid:6.6-24.04_beta"
+    + "@sha256:6a097f68bae708cedbabd6188d68c7e2e7a38cedd05a176e1cc0ba29e3bbe029"
+)
+_EDGE_SQUID = "sha256:8a3baed477e2c282ab8aa5edad442f69873246964f225c5c2ae8364b6610963c"
+_POSTGRES = (
+    "pgvector/pgvector:pg15"
+    + "@sha256:47af0b65960b14f1c6945aa4ccae37836c632e9a6fe0eea9160936e616e5b2e9"
+)
+_PGBOUNCER = (
+    "edoburu/pgbouncer:v1.24.1-p1"
+    + "@sha256:3db3d7223e93af52b4116f642951a1a5fa44702a88c2a59cf7562cac19320c9e"
+)
+_BUSYBOX = (
+    "busybox:1.36"
+    + "@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662"
 )
 _PROVIDER_HOSTS = (
     "api.openai.com",
@@ -117,6 +131,16 @@ def test_proxy_image_and_base_images_are_pinned() -> None:
     assert digest in compose
     assert digest in deploy
     assert _SQUID in compose.replace("\n", "")
+    assert _SQUID in deploy
+    assert _POSTGRES in deploy
+    assert _PGBOUNCER in deploy
+    assert "ubuntu/squid:6.6-24.04_edge" not in compose
+    assert "ubuntu/squid:6.6-24.04_edge" not in deploy
+    assert _EDGE_SQUID not in compose
+    assert _EDGE_SQUID not in deploy
+    prose = " ".join(deploy.split())
+    assert "Canonical has not published a `_stable` tag" in prose
+    assert "May 2029" in deploy
     assert "25.04" not in compose
     assert "ports:" not in compose
 
@@ -439,12 +463,128 @@ def _bash_open(env: dict[str, str], container: str, host: str, port: int) -> str
     return "FAIL " + str(completed.returncode)
 
 
+def _chain_name() -> str:
+    return "SNT" + str(os.getpid())[-6:]
+
+
+def _host_iptables(env: dict[str, str], *args: str) -> subprocess.CompletedProcess[str]:
+    """Run iptables in the host namespaces. The chain is removed afterwards."""
+    return _run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--privileged",
+            "--pid=host",
+            "--network",
+            "host",
+            _BUSYBOX,
+            "nsenter",
+            "-t",
+            "1",
+            "-m",
+            "-n",
+            "--",
+            "iptables",
+            *args,
+        ],
+        env,
+        check=False,
+    )
+
+
+def _clear_chain(env: dict[str, str], chain: str) -> None:
+    _host_iptables(env, "-D", "DOCKER-USER", "-j", chain)
+    _host_iptables(env, "-F", chain)
+    _host_iptables(env, "-X", chain)
+
+
+def _install_chain(env: dict[str, str], chain: str, wan: str, drops: list[str]) -> None:
+    """The guide's rule shape, for this test's addresses only."""
+    _clear_chain(env, chain)
+    created = _host_iptables(env, "-N", chain)
+    assert created.returncode == 0, created.stderr
+    rules = [
+        [
+            "-A",
+            chain,
+            "-m",
+            "conntrack",
+            "--ctstate",
+            "ESTABLISHED,RELATED",
+            "-j",
+            "RETURN",
+        ],
+        [
+            "-A",
+            chain,
+            "-s",
+            wan + "/32",
+            "-d",
+            "1.1.1.1/32",
+            "-p",
+            "udp",
+            "--dport",
+            "53",
+            "-j",
+            "RETURN",
+        ],
+        [
+            "-A",
+            chain,
+            "-s",
+            wan + "/32",
+            "-d",
+            "1.1.1.1/32",
+            "-p",
+            "tcp",
+            "--dport",
+            "53",
+            "-j",
+            "RETURN",
+        ],
+        [
+            "-A",
+            chain,
+            "-s",
+            wan + "/32",
+            "-p",
+            "tcp",
+            "--dport",
+            "443",
+            "-j",
+            "RETURN",
+        ],
+    ]
+    for source in drops:
+        rules.append(["-A", chain, "-s", source + "/32", "-j", "DROP"])
+    for rule in rules:
+        applied = _host_iptables(env, *rule)
+        assert applied.returncode == 0, applied.stderr
+    present = _host_iptables(env, "-C", "DOCKER-USER", "-j", chain)
+    if present.returncode != 0:
+        inserted = _host_iptables(env, "-I", "DOCKER-USER", "1", "-j", chain)
+        assert inserted.returncode == 0, inserted.stderr
+
+
+def _packet_count(text: str, source: str, target: str, extra: str = "") -> int:
+    for line in text.splitlines():
+        if source not in line or extra not in line:
+            continue
+        parts = line.split()
+        if target not in parts or not parts or not parts[0].isdigit():
+            continue
+        return int(parts[0])
+    return -1
+
+
 def test_topology_blocks_the_proxy_and_postgres() -> None:
     """Gateway reaches a provider. Other roles cannot open the proxy or Postgres.
 
-    The certificate proxy is the container that reaches Postgres. Networks
-    are throwaway bridges on a free subnet. The test does not change the
-    host iptables and does not publish a host port.
+    The certificate proxy is the container that reaches Postgres, on its own
+    internal bridge. The gateway is not on that bridge. A throwaway chain
+    with the guide's rule shape drops routed packets from the instance
+    addresses. The test removes that chain and does not publish a host port.
     """
     env = os.environ.copy()
     block = _free_slash24(env)
@@ -452,22 +592,28 @@ def test_topology_blocks_the_proxy_and_postgres() -> None:
     egress = _carve(block, 1)
     wan = _carve(block, 2)
     db = _carve(block, 3)
+    clients = _carve(block, 4)
     api_ip = _host(inst, 2)
     deriver_ip = _host(inst, 3)
     migrate_ip = _host(inst, 4)
-    cert_ip = _host(inst, 5)
-    gateway_inst = _host(inst, 6)
+    gateway_inst = _host(inst, 5)
+    api_clients = _host(clients, 2)
+    deriver_clients = _host(clients, 3)
+    migrate_clients = _host(clients, 4)
+    cert_ip = _host(clients, 5)
     gateway_egress = _host(egress, 2)
     proxy_ip = _host(egress, 3)
     wan_ip = _host(wan, 2)
     postgres_ip = _host(db, 2)
     cert_db = _host(db, 3)
-    project = "sentica-r4topo-0fe5"
+    project = "sentica-r5topo-0fe5"
+    chain = _chain_name()
     names = {
         "inst": project + "-inst",
         "egress": project + "-egress",
         "wan": project + "-wan",
         "db": project + "-db",
+        "clients": project + "-clients",
     }
     roles = {
         "pg": project + "-pg",
@@ -491,6 +637,20 @@ def test_topology_blocks_the_proxy_and_postgres() -> None:
         "threading.Thread(target=serve, args=(5432, b'pg\\n'), daemon=True).start()\n"
         "time.sleep(3600)\n"
     )
+    listen_proxy = (
+        "import socket, threading, time\n"
+        "def serve():\n"
+        "    s = socket.socket()\n"
+        "    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n"
+        "    s.bind(('0.0.0.0', 6432))\n"
+        "    s.listen(8)\n"
+        "    while True:\n"
+        "        c, _addr = s.accept()\n"
+        "        c.sendall(b'px\\n')\n"
+        "        c.close()\n"
+        "threading.Thread(target=serve, daemon=True).start()\n"
+        "time.sleep(3600)\n"
+    )
     with tempfile.TemporaryDirectory(prefix=project + "-") as tmp:
         conf = Path(tmp) / "squid.conf"
         conf.write_text(_rewritten_config(gateway_egress, proxy_ip), encoding="utf-8")
@@ -506,6 +666,7 @@ def test_topology_blocks_the_proxy_and_postgres() -> None:
             _remove_network(env, name)
         try:
             _create_network(env, names["inst"], inst, internal=False)
+            _create_network(env, names["clients"], clients, internal=True)
             _create_network(env, names["egress"], egress, internal=True)
             _create_network(env, names["wan"], wan, internal=False)
             _create_network(env, names["db"], db, internal=True)
@@ -536,8 +697,11 @@ def test_topology_blocks_the_proxy_and_postgres() -> None:
                 ("api", api_ip, names["inst"]),
                 ("deriver", deriver_ip, names["inst"]),
                 ("migrate", migrate_ip, names["inst"]),
-                ("cert", cert_ip, names["inst"]),
+                ("cert", cert_ip, names["clients"]),
             ):
+                command = ["sleep", "3600"]
+                if role == "cert":
+                    command = ["python", "-c", listen_proxy]
                 launched = _run(
                     [
                         "docker",
@@ -550,8 +714,7 @@ def test_topology_blocks_the_proxy_and_postgres() -> None:
                         "--ip",
                         ip,
                         _CLIENT,
-                        "sleep",
-                        "3600",
+                        *command,
                     ],
                     env,
                     check=False,
@@ -585,6 +748,43 @@ def test_topology_blocks_the_proxy_and_postgres() -> None:
                 check=False,
             )
             assert joined_cert.returncode == 0, joined_cert.stderr
+            for container, address in (
+                (roles["api"], api_clients),
+                (roles["deriver"], deriver_clients),
+                (roles["migrate"], migrate_clients),
+            ):
+                joined = _run(
+                    [
+                        "docker",
+                        "network",
+                        "connect",
+                        "--ip",
+                        address,
+                        names["clients"],
+                        container,
+                    ],
+                    env,
+                    check=False,
+                )
+                assert joined.returncode == 0, joined.stderr
+            drops = [
+                api_ip,
+                deriver_ip,
+                migrate_ip,
+                gateway_inst,
+                api_clients,
+                deriver_clients,
+                migrate_clients,
+                cert_ip,
+                gateway_egress,
+                proxy_ip,
+                wan_ip,
+                postgres_ip,
+                cert_db,
+            ]
+            _install_chain(env, chain, wan_ip, drops)
+            zeroed = _host_iptables(env, "-Z", chain)
+            assert zeroed.returncode == 0, zeroed.stderr
             allowed = ""
             deadline = time.monotonic() + 30
             while time.monotonic() < deadline:
@@ -613,6 +813,7 @@ def test_topology_blocks_the_proxy_and_postgres() -> None:
                 checks.append((role, roles[role], wan_ip, 8443))
             for role in ("api", "deriver", "migrate", "gw"):
                 checks.append((role + "-pg", roles[role], postgres_ip, 5432))
+            checks.append(("gw-cert", roles["gw"], cert_ip, 6432))
 
             def _probe(item: tuple[str, str, str, int]) -> tuple[str, str]:
                 label, container, host, port = item
@@ -621,19 +822,316 @@ def test_topology_blocks_the_proxy_and_postgres() -> None:
             with ThreadPoolExecutor(max_workers=8) as pool:
                 blocked = dict(pool.map(_probe, checks))
             cert_pg = _container_open(env, roles["cert"], postgres_ip, 5432)
+            api_proxy = _container_open(env, roles["api"], cert_ip, 6432)
+            zeroed_again = _host_iptables(env, "-Z", chain)
+            assert zeroed_again.returncode == 0, zeroed_again.stderr
+            api_out = _container_open(env, roles["api"], "1.1.1.1", 443)
             proxy_pg = "no-squid"
+            wan_out = "no-squid"
             if squid_id:
                 proxy_pg = _bash_open(env, squid_id, postgres_ip, 5432)
+                wan_out = _bash_open(env, squid_id, "1.1.1.1", 443)
+            listed = _host_iptables(env, "-L", chain, "-n", "-v", "-x")
             logs = _compose(env, project, "logs")
             detail = logs.stdout + logs.stderr
             assert allowed.startswith("HTTP/1.1 200"), detail
             for label, result in blocked.items():
-                assert result.startswith("FAIL TimeoutError"), label + " " + result
+                blocked_ok = result.startswith(
+                    "FAIL TimeoutError"
+                ) or result.startswith("FAIL OSError")
+                assert blocked_ok, label + " " + result
             assert cert_pg.startswith("OPEN"), cert_pg
+            assert api_proxy.startswith("OPEN"), api_proxy
             assert proxy_pg == "FAIL 124", proxy_pg
+            assert api_out.startswith("FAIL"), api_out
+            assert listed.returncode == 0, listed.stderr
+            table = listed.stdout
+            assert _packet_count(table, api_ip, "DROP") > 0, table
+            assert _packet_count(table, wan_ip, "RETURN", "dpt:443") > 0, (
+                wan_out + table
+            )
         finally:
+            _clear_chain(env, chain)
             for name in roles.values():
                 _run(["docker", "rm", "-f", name], env, check=False)
             _compose(env, project, "down", "--remove-orphans")
             for name in names.values():
                 _remove_network(env, name)
+
+
+def _psql(
+    env: dict[str, str],
+    network: str,
+    source: str,
+    host: str,
+    password_file: str,
+    mode: str,
+) -> subprocess.CompletedProcess[str]:
+    if mode == "file":
+        prelude = 'export PGPASSWORD="$(cat /run/secrets/password)"\n'
+    elif mode == "wrong":
+        prelude = "export PGPASSWORD=wrong\n"
+    else:
+        prelude = "unset PGPASSWORD\n"
+    script = (
+        prelude
+        + 'psql "host='
+        + host
+        + " port=5432 user=sentica dbname=sentica"
+        + " sslmode=disable connect_timeout=3\" -c 'select 1'\n"
+    )
+    return _run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            network,
+            "--ip",
+            source,
+            "--user",
+            "999:999",
+            "--entrypoint",
+            "bash",
+            "-v",
+            password_file + ":/run/secrets/password:ro",
+            _POSTGRES,
+            "-c",
+            script,
+        ],
+        env,
+        check=False,
+    )
+
+
+def _secret_absent(blob: str, secret: str) -> bool:
+    return secret not in blob
+
+
+def test_deploy_postgres_accepts_only_the_password() -> None:
+    """A read-only Postgres with no published port stays up and checks the password.
+
+    The hba is the shipped file with the throwaway client address in place of
+    the certificate proxy. A second address is rejected. The password is not
+    in the logs or in docker inspect.
+    """
+    env = os.environ.copy()
+    block = _free_slash24(env)
+    subnet = _carve(block, 0)
+    pg_ip = _host(subnet, 2)
+    client_ip = _host(subnet, 3)
+    other_ip = _host(subnet, 4)
+    project = "sentica-r5pg-" + secrets.token_hex(3)
+    network = project + "-net"
+    name = project + "-pg"
+    volume = project + "-data"
+    password = secrets.token_hex(24)
+    with tempfile.TemporaryDirectory(prefix=project + "-") as tmp:
+        secret = Path(tmp) / "password"
+        secret.write_text(password + "\n", encoding="utf-8")
+        hba_path = Path(tmp) / "pg_hba.conf"
+        hba_path.write_text(
+            _text("docker/sentica/instance-pg_hba.conf").replace(
+                "10.8.0.67", client_ip
+            ),
+            encoding="utf-8",
+        )
+        hba_path.chmod(0o644)
+        ident_path = Path(tmp) / "pg_ident.conf"
+        ident_path.write_text(
+            _text("docker/sentica/instance-pg_ident.conf"),
+            encoding="utf-8",
+        )
+        ident_path.chmod(0o644)
+        _run(["docker", "rm", "-f", name], env, check=False)
+        _run(["docker", "volume", "rm", "-f", volume], env, check=False)
+        _remove_network(env, network)
+        try:
+            created = _run(["docker", "volume", "create", volume], env, check=False)
+            assert created.returncode == 0, created.stderr
+            chowned = _run(
+                [
+                    "docker",
+                    "run",
+                    "--rm",
+                    "--user",
+                    "root",
+                    "--entrypoint",
+                    "chown",
+                    "-v",
+                    volume + ":/var/lib/postgresql/data",
+                    _POSTGRES,
+                    "999:999",
+                    "/var/lib/postgresql/data",
+                ],
+                env,
+                check=False,
+            )
+            assert chowned.returncode == 0, chowned.stderr
+            owned = _run(
+                [
+                    "docker",
+                    "run",
+                    "--rm",
+                    "--user",
+                    "root",
+                    "--entrypoint",
+                    "chown",
+                    "-v",
+                    str(secret) + ":/password",
+                    _POSTGRES,
+                    "999:999",
+                    "/password",
+                ],
+                env,
+                check=False,
+            )
+            assert owned.returncode == 0, owned.stderr
+            mode = _run(
+                [
+                    "docker",
+                    "run",
+                    "--rm",
+                    "--user",
+                    "root",
+                    "--entrypoint",
+                    "chmod",
+                    "-v",
+                    str(secret) + ":/password",
+                    _POSTGRES,
+                    "400",
+                    "/password",
+                ],
+                env,
+                check=False,
+            )
+            assert mode.returncode == 0, mode.stderr
+            _create_network(env, network, subnet, internal=True)
+            started = _run(
+                [
+                    "docker",
+                    "run",
+                    "-d",
+                    "--name",
+                    name,
+                    "--user",
+                    "999:999",
+                    "--read-only",
+                    "--cap-drop",
+                    "ALL",
+                    "--security-opt",
+                    "no-new-privileges:true",
+                    "--tmpfs",
+                    "/tmp:rw,noexec,nosuid,size=64m,uid=999,gid=999",
+                    "--tmpfs",
+                    "/var/run/postgresql:rw,noexec,nosuid,size=16m,uid=999,gid=999",
+                    "-v",
+                    volume + ":/var/lib/postgresql/data",
+                    "-v",
+                    str(secret) + ":/run/secrets/password:ro",
+                    "-v",
+                    str(hba_path) + ":/etc/sentica/pg_hba.conf:ro",
+                    "-v",
+                    str(ident_path) + ":/etc/sentica/pg_ident.conf:ro",
+                    "-e",
+                    "POSTGRES_PASSWORD_FILE=/run/secrets/password",
+                    "-e",
+                    "POSTGRES_USER=sentica",
+                    "-e",
+                    "POSTGRES_DB=sentica",
+                    "-e",
+                    "PGDATA=/var/lib/postgresql/data",
+                    "--network",
+                    network,
+                    "--ip",
+                    pg_ip,
+                    _POSTGRES,
+                    "-c",
+                    "hba_file=/etc/sentica/pg_hba.conf",
+                    "-c",
+                    "ident_file=/etc/sentica/pg_ident.conf",
+                ],
+                env,
+                check=False,
+            )
+            assert started.returncode == 0, started.stderr
+            ready = False
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                probe = _run(
+                    [
+                        "docker",
+                        "exec",
+                        "-u",
+                        "999:999",
+                        name,
+                        "pg_isready",
+                        "-q",
+                        "-U",
+                        "sentica",
+                    ],
+                    env,
+                    check=False,
+                )
+                if probe.returncode == 0:
+                    ready = True
+                    break
+                time.sleep(0.5)
+            if not ready:
+                logs = _run(["docker", "logs", name], env, check=False)
+                state = _run(
+                    [
+                        "docker",
+                        "inspect",
+                        "-f",
+                        "{{.State.Status}} {{.State.ExitCode}}",
+                        name,
+                    ],
+                    env,
+                    check=False,
+                )
+                detail = (
+                    logs.stdout + logs.stderr + state.stdout + state.stderr
+                ).replace(password, "[redacted]")
+                assert ready, detail
+            accepted = _psql(env, network, client_ip, pg_ip, str(secret), "file")
+            missing = _psql(env, network, client_ip, pg_ip, str(secret), "none")
+            wrong = _psql(env, network, client_ip, pg_ip, str(secret), "wrong")
+            stranger = _psql(env, network, other_ip, pg_ip, str(secret), "file")
+            logs = _run(["docker", "logs", name], env, check=False)
+            inspected = _run(["docker", "inspect", name], env, check=False)
+            state = _run(
+                [
+                    "docker",
+                    "inspect",
+                    "-f",
+                    "{{.State.Running}} {{.State.ExitCode}}",
+                    name,
+                ],
+                env,
+                check=False,
+            )
+            ports = _run(
+                [
+                    "docker",
+                    "inspect",
+                    "-f",
+                    "{{json .HostConfig.PortBindings}}",
+                    name,
+                ],
+                env,
+                check=False,
+            )
+            blob = logs.stdout + logs.stderr + inspected.stdout
+            assert accepted.returncode == 0, accepted.stderr
+            assert missing.returncode != 0
+            assert wrong.returncode != 0
+            assert stranger.returncode != 0
+            assert _secret_absent(blob, password)
+            assert state.stdout.strip() == "true 0"
+            assert ports.stdout.strip() in {"null", "{}", "[]"}
+            assert "POSTGRES_HOST_AUTH_METHOD" not in inspected.stdout
+        finally:
+            _run(["docker", "rm", "-f", name], env, check=False)
+            _run(["docker", "volume", "rm", "-f", volume], env, check=False)
+            _remove_network(env, network)
