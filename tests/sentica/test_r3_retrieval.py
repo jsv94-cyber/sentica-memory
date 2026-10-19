@@ -261,26 +261,61 @@ def _select_has_offset(statement: Any) -> bool:
     return getattr(statement, "_offset_clause", None) is not None
 
 
+def _explain_sync(sync_session: Any, stmt: Select[tuple[models.Document]]) -> str:
+    """EXPLAIN on the sync connection that already holds the probe settings."""
+    connection = sync_session.connection()
+    compiled = stmt.compile(dialect=connection.dialect)
+    explained_sql = compiled.string.replace(
+        " <=> %(",
+        " <=> CAST(%(",
+        1,
+    ).replace(
+        ")s \n",
+        ")s AS vector)\n",
+        1,
+    )
+    explained = connection.exec_driver_sql(
+        "EXPLAIN " + explained_sql,
+        compiled.params,
+    )
+    return "\n".join(str(row[0]) for row in explained.all())
+
+
 async def _probe_plans_during(
     db_session: AsyncSession,
     call: Callable[[], Awaitable[list[models.Document]]],
 ) -> list[str]:
-    """Explain each offset probe while the neighbor scan holds its settings."""
+    """Explain each offset probe through ``_execute_internal``.
+
+    ``Session.scalar`` and ``Session.execute`` both call that method. The
+    old probe used ``scalar``, so a hook on ``execute`` never saw it and
+    failed because the plan list was empty.
+    """
     plans: list[str] = []
-    original: Any = db_session.execute
+    sync_session = db_session.sync_session
+    original: Any = sync_session._execute_internal  # pyright: ignore[reportPrivateUsage]
+    busy = False
 
-    async def _watching(statement: Any, *args: Any, **kwargs: Any) -> Any:
-        if isinstance(statement, Select) and _select_has_offset(statement):
-            plans.append(
-                await _plan(db_session, cast(Select[tuple[models.Document]], statement))
-            )
-        return await original(statement, *args, **kwargs)
+    def _watching(statement: Any, *args: Any, **kwargs: Any) -> Any:
+        nonlocal busy
+        if not busy and isinstance(statement, Select) and _select_has_offset(statement):
+            busy = True
+            try:
+                plans.append(
+                    _explain_sync(
+                        sync_session,
+                        cast(Select[tuple[models.Document]], statement),
+                    )
+                )
+            finally:
+                busy = False
+        return original(statement, *args, **kwargs)
 
-    db_session.execute = _watching  # type: ignore[method-assign]
+    sync_session._execute_internal = _watching  # type: ignore[method-assign]  # pyright: ignore[reportPrivateUsage]
     try:
         await call()
     finally:
-        db_session.execute = original  # type: ignore[method-assign]
+        sync_session._execute_internal = original  # type: ignore[method-assign]  # pyright: ignore[reportPrivateUsage]
     return plans
 
 

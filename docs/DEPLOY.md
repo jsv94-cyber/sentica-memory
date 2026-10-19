@@ -11,12 +11,12 @@ seccomp profile stays on. Do not disable seccomp.
 ## API
 
 Create the instance network once. The API, deriver, migrate, certificate
-proxy, and model gateway containers join it. `10.8.0.4` is the host
-address the broker uses. It is not an address on this bridge. The subnet
-is `10.8.0.16/28` (`10.8.0.16` through `10.8.0.31`). The bridge gateway is
-`10.8.0.17`. The containers use `10.8.0.18` through `10.8.0.22`.
-`10.8.0.23` through `10.8.0.30` are spare. Each container below has a
-fixed `--ip` in that range.
+proxy, model gateway, and egress proxy containers join it. `10.8.0.4` is
+the host address the broker uses. It is not an address on this bridge.
+The subnet is `10.8.0.16/28` (`10.8.0.16` through `10.8.0.31`). The
+bridge gateway is `10.8.0.17`. The containers use `10.8.0.18` through
+`10.8.0.23`. `10.8.0.24` through `10.8.0.30` are spare. Each container
+below has a fixed `--ip` in that range.
 
 ```bash
 docker network create \
@@ -109,10 +109,15 @@ docker run --rm \
 ## Certificate proxy
 
 The proxy listens on `10.8.0.21:6432` for the API, the deriver, and
-migrate. It is not published on the host. Postgres is on the internal
-`db` network, not on `10.8.0.4` and not on this bridge. A `RETURN` for
-that Postgres address has to be inserted before the proxy `DROP` below.
-Do not return the public internet.
+migrate. It is not published on the host. Postgres listens on
+`10.8.0.6:5432` on the internal `db` network. That address is not on the
+host and not on `10.8.0.16/28`. Rule 8 of `SENTICA` returns that flow
+before the certificate proxy is dropped:
+
+`iptables -A SENTICA -s 10.8.0.21/32 -d 10.8.0.6/32 -p tcp --dport 5432 -j RETURN`
+
+Do not return the public internet. A destination other than `10.8.0.6`
+stays under the certificate proxy `DROP`.
 
 ```bash
 docker run --rm \
@@ -147,6 +152,54 @@ docker run --rm \
   --ip 10.8.0.22 \
   --env-file /run/sentica/gateway.env \
   sentica-gateway:0.1.0
+```
+
+`docker/sentica/gateway.env` is installed as `/run/sentica/gateway.env`.
+It sets `HTTPS_PROXY` to `http://10.8.0.23:8443` and `NO_PROXY` to the
+instance addresses, so provider calls leave through the egress proxy.
+The API, deriver, migrate, and certificate proxy env files do not set
+`HTTP_PROXY`, `HTTPS_PROXY`, or `ALL_PROXY`.
+
+## Egress proxy
+
+The egress proxy listens on `10.8.0.23:8443`. It is a container on the
+instance bridge. It is not published on the host, and it is not the
+broker at `10.8.0.4`. The image is pinned by digest. The config is
+`docker/sentica/egress-proxy.conf`. `CONNECT` is allowed only to port
+443 on the three provider hostnames below. Plain HTTP is denied. Every
+other destination is denied. A new connection is accepted only from the
+gateway at `10.8.0.22`.
+
+The egress proxy allowlist is:
+
+```
+api.openai.com
+api.anthropic.com
+generativelanguage.googleapis.com
+```
+
+A hostname that is not on that list is refused. runsc does not use
+Docker's embedded DNS at `127.0.0.11`. The proxy resolves provider names
+through `1.1.1.1`. The same service is `docker/sentica/egress-proxy.yml`.
+
+```bash
+docker run --rm \
+  --name sentica-memory-egress \
+  --user 13:13 \
+  --read-only \
+  --cap-drop ALL \
+  --security-opt no-new-privileges:true \
+  --runtime runsc \
+  --network sentica-instance \
+  --ip 10.8.0.23 \
+  --dns 1.1.1.1 \
+  --tmpfs /var/spool/squid:rw,noexec,nosuid,size=16m,uid=13,gid=13 \
+  --tmpfs /var/log/squid:rw,noexec,nosuid,size=16m,uid=13,gid=13 \
+  --tmpfs /var/run/squid:rw,noexec,nosuid,size=4m,uid=13,gid=13 \
+  -v /run/sentica/egress-proxy.conf:/etc/squid/squid.conf:ro \
+  --entrypoint /usr/sbin/squid \
+  ubuntu/squid:6.13-25.04_beta@sha256:3de2e64f0ca6efdac3e98557607dc0f23050037f3885016d5d5bfcf9950501b8 \
+  -f /etc/squid/squid.conf -NYC
 ```
 
 ## Key files
@@ -184,7 +237,8 @@ docker build \
 
 A plain `docker build .` uses those defaults. The runtime image reuses gid
 100 when the base image already has it (`users` on
-`python:3.13-slim-bookworm`) instead of failing `addgroup`.
+`python:3.13-slim-bookworm`) instead of failing `addgroup`. Both stages
+pin that image by digest.
 
 The local two-instance proof is `docker-compose.sentica.yml`. It sets
 `read_only`, `cap_drop: ALL`, and `no-new-privileges` on the API, deriver,
@@ -262,45 +316,53 @@ structural.
   is inserted, and the rule keeps that address, so provider hosts are not
   iptables destinations.
 
-  The egress proxy listens on `10.8.0.5:8443`. That address is on the host.
-  It is not on the instance bridge, and it is not the broker at `10.8.0.4`.
-  The egress proxy allowlist is:
-
-```
-api.openai.com
-api.anthropic.com
-generativelanguage.googleapis.com
-```
-
-  A hostname that is not on that list is refused.
-
   On the `10.8.0.16/28` instance network the API container is `10.8.0.18`,
   the deriver is `10.8.0.19`, migrate is `10.8.0.20`, the certificate
-  proxy is `10.8.0.21:6432`, and the model gateway is `10.8.0.22:443`.
-  Those are the `--ip` values on the run commands above. `DOCKER-USER` is
-  the host firewall for traffic that leaves those containers. Docker creates
-  that chain with a RETURN that matches every packet. `-A` appends after
-  that RETURN, so the new rule never runs. Insert each rule with `-I` at
-  the position below. The positions keep this order and stay in front of
-  the default RETURN. Established replies return. The API, the deriver,
-  and migrate may open the proxy. The API and the deriver may open the
-  gateway. The gateway may open the egress proxy on port 8443. Every
-  container address is then dropped, so an address Docker would otherwise
-  assign cannot leave the host.
+  proxy is `10.8.0.21:6432`, the model gateway is `10.8.0.22:443`, and
+  the egress proxy is `10.8.0.23:8443`. Those are the `--ip` values on
+  the run commands above. `DOCKER-USER` is the host chain for packets
+  that cross `FORWARD`. Docker 29 creates that chain empty. It does not
+  add a RETURN. A packet that matches no rule returns to `FORWARD`, and
+  Docker accepts the forwarded traffic. Packets addressed to an address
+  on the host take `INPUT`. `DOCKER-USER` does not see them, so a proxy
+  listening on the host is open to every container.
+
+  The egress proxy is a container on this bridge, so traffic from the
+  gateway to it is forwarded and these rules apply. The proxy process
+  also accepts a new connection only from `10.8.0.22`.
+
+  The rules live in `SENTICA`. The block creates that chain, flushes it,
+  and appends every rule. It inserts the jump from `DOCKER-USER` only
+  when `iptables -C` says the jump is absent. Running the block again
+  rebuilds the same rules. Established replies return. The API, the
+  deriver, and migrate may open the certificate proxy. The API and the
+  deriver may open the gateway. The gateway may open the egress proxy on
+  port 8443. The certificate proxy may open Postgres at `10.8.0.6:5432`.
+  The egress proxy may resolve names at `1.1.1.1` and may open TCP 443.
+  Every container address is then dropped, so an address Docker would
+  otherwise assign cannot leave the host.
 
 ```bash
-iptables -I DOCKER-USER 1 -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
-iptables -I DOCKER-USER 2 -s 10.8.0.18/32 -d 10.8.0.21/32 -p tcp --dport 6432 -j RETURN
-iptables -I DOCKER-USER 3 -s 10.8.0.19/32 -d 10.8.0.21/32 -p tcp --dport 6432 -j RETURN
-iptables -I DOCKER-USER 4 -s 10.8.0.20/32 -d 10.8.0.21/32 -p tcp --dport 6432 -j RETURN
-iptables -I DOCKER-USER 5 -s 10.8.0.18/32 -d 10.8.0.22/32 -p tcp --dport 443 -j RETURN
-iptables -I DOCKER-USER 6 -s 10.8.0.19/32 -d 10.8.0.22/32 -p tcp --dport 443 -j RETURN
-iptables -I DOCKER-USER 7 -s 10.8.0.22/32 -d 10.8.0.5/32 -p tcp --dport 8443 -j RETURN
-iptables -I DOCKER-USER 8 -s 10.8.0.18/32 -j DROP
-iptables -I DOCKER-USER 9 -s 10.8.0.19/32 -j DROP
-iptables -I DOCKER-USER 10 -s 10.8.0.20/32 -j DROP
-iptables -I DOCKER-USER 11 -s 10.8.0.21/32 -j DROP
-iptables -I DOCKER-USER 12 -s 10.8.0.22/32 -j DROP
+iptables -N SENTICA 2>/dev/null || true
+iptables -F SENTICA
+iptables -A SENTICA -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+iptables -A SENTICA -s 10.8.0.18/32 -d 10.8.0.21/32 -p tcp --dport 6432 -j RETURN
+iptables -A SENTICA -s 10.8.0.19/32 -d 10.8.0.21/32 -p tcp --dport 6432 -j RETURN
+iptables -A SENTICA -s 10.8.0.20/32 -d 10.8.0.21/32 -p tcp --dport 6432 -j RETURN
+iptables -A SENTICA -s 10.8.0.18/32 -d 10.8.0.22/32 -p tcp --dport 443 -j RETURN
+iptables -A SENTICA -s 10.8.0.19/32 -d 10.8.0.22/32 -p tcp --dport 443 -j RETURN
+iptables -A SENTICA -s 10.8.0.22/32 -d 10.8.0.23/32 -p tcp --dport 8443 -j RETURN
+iptables -A SENTICA -s 10.8.0.21/32 -d 10.8.0.6/32 -p tcp --dport 5432 -j RETURN
+iptables -A SENTICA -s 10.8.0.23/32 -d 1.1.1.1/32 -p udp --dport 53 -j RETURN
+iptables -A SENTICA -s 10.8.0.23/32 -d 1.1.1.1/32 -p tcp --dport 53 -j RETURN
+iptables -A SENTICA -s 10.8.0.23/32 -p tcp --dport 443 -j RETURN
+iptables -A SENTICA -s 10.8.0.18/32 -j DROP
+iptables -A SENTICA -s 10.8.0.19/32 -j DROP
+iptables -A SENTICA -s 10.8.0.20/32 -j DROP
+iptables -A SENTICA -s 10.8.0.21/32 -j DROP
+iptables -A SENTICA -s 10.8.0.22/32 -j DROP
+iptables -A SENTICA -s 10.8.0.23/32 -j DROP
+iptables -C DOCKER-USER -j SENTICA 2>/dev/null || iptables -I DOCKER-USER 1 -j SENTICA
 ```
 
 Redis runs as the `redis` user. The entry script starts as root only long

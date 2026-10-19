@@ -2,7 +2,7 @@
 
 # https://pythonspeed.com/articles/base-image-python-docker-images/
 # https://testdriven.io/blog/docker-best-practices/
-FROM python:3.13-slim-bookworm AS builder
+FROM python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641 AS builder
 
 COPY --from=ghcr.io/astral-sh/uv:0.9.24 /uv /bin/uv
 
@@ -34,7 +34,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         exit 2; \
     fi
 
-FROM python:3.13-slim-bookworm AS runtime
+FROM python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641 AS runtime
 
 WORKDIR /app
 

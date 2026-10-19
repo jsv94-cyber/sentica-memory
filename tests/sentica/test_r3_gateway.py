@@ -294,6 +294,34 @@ def test_chat_hold_counts_tool_parameter_names() -> None:
     assert hold - plain >= count_gateway_tokens([parameter], model)
 
 
+def test_chat_hold_counts_assistant_tool_call_arguments() -> None:
+    """Arguments on an assistant tool call count toward the hold."""
+    from typing import Any
+
+    from src.sentica.gateway import _chat_hold  # pyright: ignore[reportPrivateUsage]
+    from src.sentica.tokenizer import count_gateway_tokens
+
+    model = "gpt-4o-mini"
+    argument = '{"seat":"window-seat-preference-7"}'
+    with_calls: list[dict[str, Any]] = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "book", "arguments": argument},
+                }
+            ],
+        }
+    ]
+    without: list[dict[str, Any]] = [{"role": "assistant", "content": None}]
+    hold = _chat_hold(with_calls, 1, model, None)
+    plain = _chat_hold(without, 1, model, None)
+    assert hold - plain >= count_gateway_tokens([argument], model)
+
+
 async def test_a_failed_chat_releases_its_hold(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

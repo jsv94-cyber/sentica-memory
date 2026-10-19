@@ -769,15 +769,16 @@ def _chat_hold(
 ) -> int:
     """Upper bound for one chat call: prompt tokens plus the completion cap.
 
-    The prompt count includes string content, text inside list content, and
-    the tool schemas sent with the call, including object keys such as
-    parameter names.
+    The prompt count includes string content, text inside list content, the
+    tool schemas sent with the call, including object keys such as parameter
+    names, and the arguments on assistant tool calls.
     """
     from src.sentica.tokenizer import count_gateway_tokens
 
     texts: list[str] = []
     for message in messages:
         texts.extend(_strings(message.get("content")))
+        texts.extend(_strings(message.get("tool_calls")))
     texts.extend(_strings(tools))
     prompt = count_gateway_tokens(texts, model)
     hold = prompt + max(max_tokens, 0)

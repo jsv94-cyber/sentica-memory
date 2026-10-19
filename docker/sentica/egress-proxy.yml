@@ -1,0 +1,31 @@
+# Egress proxy service. docs/DEPLOY.md starts the same image and config
+# on sentica-instance. This file joins an external bridge of that subnet
+# so a proof can supply its own network name.
+
+services:
+  egress:
+    image: ubuntu/squid:6.13-25.04_beta@sha256:3de2e64f0ca6efdac3e98557607dc0f23050037f3885016d5d5bfcf9950501b8
+    read_only: true
+    user: "13:13"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    dns:
+      - 1.1.1.1
+    entrypoint: ["/usr/sbin/squid"]
+    command: ["-f", "/etc/squid/squid.conf", "-NYC"]
+    volumes:
+      - ./egress-proxy.conf:/etc/squid/squid.conf:ro
+    tmpfs:
+      - /var/spool/squid:rw,noexec,nosuid,size=16m,uid=13,gid=13
+      - /var/log/squid:rw,noexec,nosuid,size=16m,uid=13,gid=13
+      - /var/run/squid:rw,noexec,nosuid,size=4m,uid=13,gid=13
+    networks:
+      instance:
+        ipv4_address: 10.8.0.23
+
+networks:
+  instance:
+    name: ${SENTICA_EGRESS_NETWORK:-sentica-instance}
+    external: true
