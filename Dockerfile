@@ -31,14 +31,44 @@ COPY --chmod=644 uv.lock pyproject.toml /app/
 #   docker build --build-arg INSTALL_LANCEDB=true .
 ARG INSTALL_LANCEDB=false
 RUN --mount=type=cache,target=/root/.cache/uv \
-    if [ "$INSTALL_LANCEDB" = "true" ]; then \
+    umask 0022 \
+    && if [ "$INSTALL_LANCEDB" = "true" ]; then \
         uv sync --frozen --no-install-project --no-group dev --extra lancedb; \
     elif [ "$INSTALL_LANCEDB" = "false" ]; then \
         uv sync --frozen --no-install-project --no-group dev; \
     else \
         echo "INSTALL_LANCEDB must be 'true' or 'false'" >&2; \
         exit 2; \
-    fi
+    fi \
+    && find /app/.venv -type d -exec chmod 755 {} + \
+    && find /app/.venv -type f ! -perm /111 -exec chmod 644 {} + \
+    && find /app/.venv -type f -perm /111 -exec chmod 755 {} + \
+    && mkdir /tmp/venv-sorted \
+    && LC_ALL=C tar --sort=name --mtime="@${SOURCE_DATE_EPOCH}" -cf - -C /app .venv \
+        | tar -C /tmp/venv-sorted -xf - \
+    && rm -rf /app/.venv \
+    && mv /tmp/venv-sorted/.venv /app/.venv
+
+# Host checkout times survive into a COPY layer. BuildKit only clamps a
+# timestamp that is newer than SOURCE_DATE_EPOCH, so a file written before
+# that commit would otherwise change the layer. Stamp them here, then copy
+# the stamped tree into the runtime image.
+FROM python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641 AS sources
+
+ARG SOURCE_DATE_EPOCH=1760832000
+WORKDIR /out
+COPY --chmod=755 src/ /out/src/
+COPY --chmod=755 migrations/ /out/migrations/
+COPY --chmod=755 scripts/ /out/scripts/
+COPY --chmod=755 docker/ /out/docker/
+COPY --chmod=644 alembic.ini /out/alembic.ini
+COPY --chmod=644 pyproject.toml /out/pyproject.toml
+COPY --chmod=644 config.toml* /out/
+RUN find /out -exec touch -d "@${SOURCE_DATE_EPOCH}" {} + \
+    && find /out -type d -exec chmod 755 {} + \
+    && find /out -type f -exec chmod 644 {} + \
+    && chmod 755 /out/docker/entrypoint.sh /out/docker/migrate-entrypoint.sh \
+        /out/docker/sentica/postgres-entry.sh /out/docker/sentica/20-passwords.sh
 
 FROM python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641 AS runtime
 
@@ -67,8 +97,13 @@ RUN if [ "$SENTICA_UID" != "0" ]; then \
                 --disabled-password --gecos "" --no-create-home app; \
         fi; \
     fi \
-    && mkdir -p /app/lancedb_data \
-    && chown "${SENTICA_UID}:${SENTICA_GID}" /app /app/lancedb_data
+    && mkdir -p -m 755 /app/lancedb_data \
+    && chmod 755 /app /app/lancedb_data \
+    && chown "${SENTICA_UID}:${SENTICA_GID}" /app /app/lancedb_data \
+    && if [ -f /etc/shadow ]; then \
+        day="$((SOURCE_DATE_EPOCH / 86400))"; \
+        sed -i "s/^app:!:[0-9][0-9]*:/app:!:${day}:/" /etc/shadow; \
+    fi
 
 COPY --from=builder --chown=${SENTICA_UID}:${SENTICA_GID} /app/.venv /app/.venv
 
@@ -76,17 +111,18 @@ COPY --from=builder --chown=${SENTICA_UID}:${SENTICA_GID} /app/.venv /app/.venv
 ENV PATH="/app/.venv/bin:$PATH"
 ENV HOME=/app
 
-# --chmod fixes the mode so the host umask cannot change the layer.
-COPY --chown=${SENTICA_UID}:${SENTICA_GID} --chmod=755 src/ /app/src/
-COPY --chown=${SENTICA_UID}:${SENTICA_GID} --chmod=755 migrations/ /app/migrations/
-COPY --chown=${SENTICA_UID}:${SENTICA_GID} --chmod=755 scripts/ /app/scripts/
-COPY --chown=${SENTICA_UID}:${SENTICA_GID} --chmod=755 docker/ /app/docker/
-COPY --chown=${SENTICA_UID}:${SENTICA_GID} --chmod=644 alembic.ini /app/alembic.ini
+# Stamped in the sources stage, so the host clock and umask cannot change
+# these layers.
+COPY --from=sources --chown=${SENTICA_UID}:${SENTICA_GID} /out/src/ /app/src/
+COPY --from=sources --chown=${SENTICA_UID}:${SENTICA_GID} /out/migrations/ /app/migrations/
+COPY --from=sources --chown=${SENTICA_UID}:${SENTICA_GID} /out/scripts/ /app/scripts/
+COPY --from=sources --chown=${SENTICA_UID}:${SENTICA_GID} /out/docker/ /app/docker/
+COPY --from=sources --chown=${SENTICA_UID}:${SENTICA_GID} /out/alembic.ini /app/alembic.ini
 # src/_version.py reads the service version from here at runtime, so this
 # is a runtime input as well as a build input.
-COPY --chown=${SENTICA_UID}:${SENTICA_GID} --chmod=644 pyproject.toml /app/pyproject.toml
+COPY --from=sources --chown=${SENTICA_UID}:${SENTICA_GID} /out/pyproject.toml /app/pyproject.toml
 # Copy config files - this will copy config.toml if it exists, and config.toml.example
-COPY --chown=${SENTICA_UID}:${SENTICA_GID} --chmod=644 config.toml* /app/
+COPY --from=sources --chown=${SENTICA_UID}:${SENTICA_GID} /out/config.toml* /app/
 
 # The default image is a production image. A test-stack build can opt out.
 # The eval harness and its seeded fixture text are not part of the image.
