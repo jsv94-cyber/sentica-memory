@@ -329,6 +329,7 @@ jobs:
           docker buildx create --name repro --driver docker-container --driver-opt image=moby/buildkit@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea --use
           docker buildx build --build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" --provenance=false --sbom=false --no-cache --metadata-file image-metadata.json -o type=docker,dest=image.tar,rewrite-timestamp=true .
           python3 - <<'PY'
+          import hashlib
           import json
           import pathlib
           import re
@@ -381,6 +382,45 @@ jobs:
                       print("diff", diff_id)
                   for layer in manifest["layers"]:
                       print("layer", layer["digest"], layer["size"])
+                  largest = max(manifest["layers"], key=lambda item: item["size"])
+                  layer_digest = largest["digest"].split(":", 1)[1]
+                  content = hashlib.sha256()
+                  meta = hashlib.sha256()
+                  pyc = hashlib.sha256()
+                  nonpyc = hashlib.sha256()
+                  rows = []
+                  with tarfile.open(tar_path) as outer:
+                      inner = tarfile.open(
+                          fileobj=outer.extractfile(f"blobs/sha256/{layer_digest}"),
+                          mode="r|gz",
+                      )
+                      while True:
+                          member = inner.next()
+                          if member is None:
+                              break
+                          data = b""
+                          if member.isfile():
+                              extracted = inner.extractfile(member)
+                              data = b"" if extracted is None else extracted.read()
+                          rows.append((member, data))
+                  for member, data in sorted(rows, key=lambda item: item[0].name):
+                      digest = hashlib.sha256(data).digest()
+                      line = member.name.encode() + b"\0" + digest + b"\n"
+                      content.update(line)
+                      bucket = pyc if member.name.endswith(".pyc") else nonpyc
+                      bucket.update(line)
+                      meta.update(
+                          (
+                              f"{member.name}\0{member.mode}\0{member.uid}\0"
+                              f"{member.gid}\0{member.size}\0{member.mtime}\0"
+                              f"{member.type!r}\0{member.uname}\0{member.gname}\n"
+                          ).encode()
+                      )
+                  print("venv-members", len(rows))
+                  print("venv-content", content.hexdigest())
+                  print("venv-meta", meta.hexdigest())
+                  print("venv-pyc", pyc.hexdigest())
+                  print("venv-nonpyc", nonpyc.hexdigest())
 
           if first != second or first != recorded:
               print("first image")
