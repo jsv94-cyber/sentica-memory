@@ -206,16 +206,18 @@ a volume owned by uid 999, not a tmpfs. The password file is mode 400,
 owned by uid 999, and mounted read-only. The command does not set
 `POSTGRES_PASSWORD` or `POSTGRES_HOST_AUTH_METHOD`. `pg_hba.conf` accepts
 TCP only from `10.8.0.67/32` with `scram-sha-256` and rejects every other
-address. The Unix socket accepts the image user `postgres` (uid 999) as
-the database role `sentica`. The image entrypoint's setup client connects
-on that socket and does not send a password, so the map is in
-`pg_ident.conf`. The image is `pgvector/pgvector:pg15`,
+address. The Unix socket uses a peer map so the image user `postgres`
+(uid 999) is the database role `sentica`. The image entrypoint exports
+`PGPASSWORD` for its own setup client; the map is the local rule this
+server uses. TCP from `10.8.0.67/32` still requires `scram-sha-256`.
+The image is `pgvector/pgvector:pg15`,
 the same major as the local proof, pinned by the manifest-list digest
 published for that tag.
 
 ```bash
+install -d -o root -g root -m 755 /run/sentica
 install -d -o 999 -g 999 -m 700 /var/lib/sentica/postgres
-install -o 999 -g 999 -m 400 /run/sentica/postgres.password
+install -o 999 -g 999 -m 400 /dev/null /run/sentica/postgres.password
 
 docker run --rm \
   --name sentica-memory-postgres \
@@ -234,6 +236,7 @@ docker run --rm \
   -e POSTGRES_USER=sentica \
   -e POSTGRES_DB=sentica \
   -e PGDATA=/var/lib/postgresql/data \
+  -e POSTGRES_INITDB_ARGS="--auth-local=peer --auth-host=scram-sha-256" \
   --network sentica-db \
   --ip 10.8.0.66 \
   pgvector/pgvector:pg15@sha256:47af0b65960b14f1c6945aa4ccae37836c632e9a6fe0eea9160936e616e5b2e9 \
@@ -243,8 +246,11 @@ docker run --rm \
 
 Copy `docker/sentica/instance-pg_hba.conf` to `/run/sentica/pg_hba.conf`
 and `docker/sentica/instance-pg_ident.conf` to `/run/sentica/pg_ident.conf`.
-Write the password into `/run/sentica/postgres.password` as one line.
-The file is not an environment variable and it is not in the image.
+`install` creates an empty password file. Write the password into
+`/run/sentica/postgres.password` as one line after that. The file is not
+an environment variable and it is not in the image. `POSTGRES_INITDB_ARGS`
+makes the data directory's own `pg_hba.conf` use `peer` and
+`scram-sha-256`. The server reads the shipped file, not that copy.
 
 ## Model gateway
 
@@ -282,13 +288,14 @@ certificate proxy env files do not set `HTTP_PROXY`, `HTTPS_PROXY`, or
 
 The egress proxy listens on `10.8.0.35:8443` on `sentica-egress`. It is
 not on `sentica-instance`, it is not published on the host, and it is
-not the broker at `10.8.0.4`. The image is Ubuntu 24.04 LTS. Canonical
-has not published a `_stable` tag for `ubuntu/squid`. `6.6-24.04_beta`
-is the promoted channel for that LTS release, supported until May 2029.
-The pinned manifest list is Squid 6.13 from the 24.04 security pocket.
-The `_edge` tag is a different image and is not that channel. The digest
-is pinned so a later move of the tag does not change the image. The
-config is `docker/sentica/egress-proxy.conf`. `CONNECT` is
+not the broker at `10.8.0.4`. The image is pinned by digest. The tag
+`6.6-24.04_edge` names the channel the digest was taken from; a later
+move of that tag does not change the image. This digest carries Squid
+`6.14-0ubuntu0.24.04.2` and OpenSSL `3.0.13-0ubuntu3.9`. The
+`6.6-24.04_beta` manifest is older: Squid `6.13-0ubuntu0.24.04.3`,
+OpenSSL `3.0.13-0ubuntu3.6`, and older glibc, GnuTLS, and libxml2.
+`docker/sentica/egress-proxy.conf` does not enable ICP and does not
+terminate TLS. The config is `docker/sentica/egress-proxy.conf`. `CONNECT` is
 allowed only to port 443 on the three provider hostnames below. Plain
 HTTP is denied. Every other destination is denied. `dstdom_regex -n`
 matches an IP-literal `CONNECT` as an address, so a reverse name cannot
@@ -327,7 +334,7 @@ docker run --rm \
   --tmpfs /var/run/squid:rw,noexec,nosuid,size=4m,uid=13,gid=13 \
   -v /run/sentica/egress-proxy.conf:/etc/squid/squid.conf:ro \
   --entrypoint /usr/sbin/squid \
-  ubuntu/squid:6.6-24.04_beta@sha256:6a097f68bae708cedbabd6188d68c7e2e7a38cedd05a176e1cc0ba29e3bbe029 \
+  ubuntu/squid:6.6-24.04_edge@sha256:8a3baed477e2c282ab8aa5edad442f69873246964f225c5c2ae8364b6610963c \
   -f /etc/squid/squid.conf -NYC
 
 docker network connect \
@@ -485,35 +492,43 @@ structural.
   host is open to every container.
 
   The rules below apply to routed packets. They do not separate
-  containers that share a bridge. The block creates `SENTICA`, flushes
-  it, and appends every rule. It inserts the jump from `DOCKER-USER`
-  only when `iptables -C` says the jump is absent. Running the block
-  again rebuilds the same rules. Established replies return. The egress
-  proxy's `sentica-wan` address may resolve names at `1.1.1.1` and may
-  open TCP 443. Every container address is then dropped, so a routed
-  packet from an address Docker assigned cannot leave the host.
+  containers that share a bridge. The block builds `SENTICA_NEW` and
+  appends every rule, then inserts the jump from `DOCKER-USER`. It
+  removes the previous `SENTICA` chain only after that jump is in place,
+  and renames `SENTICA_NEW` to `SENTICA`. A restart never forwards
+  without drops. Running the block again leaves the same rules.
+  Established replies return. The egress proxy's `sentica-wan` address
+  may resolve names at `1.1.1.1` and may open TCP 443. Every container
+  address is then dropped, so a routed packet from an address Docker
+  assigned cannot leave the host.
 
 ```bash
-iptables -N SENTICA 2>/dev/null || true
-iptables -F SENTICA
-iptables -A SENTICA -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
-iptables -A SENTICA -s 10.8.0.50/32 -d 1.1.1.1/32 -p udp --dport 53 -j RETURN
-iptables -A SENTICA -s 10.8.0.50/32 -d 1.1.1.1/32 -p tcp --dport 53 -j RETURN
-iptables -A SENTICA -s 10.8.0.50/32 -p tcp --dport 443 -j RETURN
-iptables -A SENTICA -s 10.8.0.18/32 -j DROP
-iptables -A SENTICA -s 10.8.0.19/32 -j DROP
-iptables -A SENTICA -s 10.8.0.20/32 -j DROP
-iptables -A SENTICA -s 10.8.0.22/32 -j DROP
-iptables -A SENTICA -s 10.8.0.82/32 -j DROP
-iptables -A SENTICA -s 10.8.0.83/32 -j DROP
-iptables -A SENTICA -s 10.8.0.84/32 -j DROP
-iptables -A SENTICA -s 10.8.0.85/32 -j DROP
-iptables -A SENTICA -s 10.8.0.34/32 -j DROP
-iptables -A SENTICA -s 10.8.0.35/32 -j DROP
-iptables -A SENTICA -s 10.8.0.50/32 -j DROP
-iptables -A SENTICA -s 10.8.0.66/32 -j DROP
-iptables -A SENTICA -s 10.8.0.67/32 -j DROP
-iptables -C DOCKER-USER -j SENTICA 2>/dev/null || iptables -I DOCKER-USER 1 -j SENTICA
+iptables -D DOCKER-USER -j SENTICA_NEW 2>/dev/null || true
+iptables -F SENTICA_NEW 2>/dev/null || true
+iptables -X SENTICA_NEW 2>/dev/null || true
+iptables -N SENTICA_NEW
+iptables -A SENTICA_NEW -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+iptables -A SENTICA_NEW -s 10.8.0.50/32 -d 1.1.1.1/32 -p udp --dport 53 -j RETURN
+iptables -A SENTICA_NEW -s 10.8.0.50/32 -d 1.1.1.1/32 -p tcp --dport 53 -j RETURN
+iptables -A SENTICA_NEW -s 10.8.0.50/32 -p tcp --dport 443 -j RETURN
+iptables -A SENTICA_NEW -s 10.8.0.18/32 -j DROP
+iptables -A SENTICA_NEW -s 10.8.0.19/32 -j DROP
+iptables -A SENTICA_NEW -s 10.8.0.20/32 -j DROP
+iptables -A SENTICA_NEW -s 10.8.0.22/32 -j DROP
+iptables -A SENTICA_NEW -s 10.8.0.82/32 -j DROP
+iptables -A SENTICA_NEW -s 10.8.0.83/32 -j DROP
+iptables -A SENTICA_NEW -s 10.8.0.84/32 -j DROP
+iptables -A SENTICA_NEW -s 10.8.0.85/32 -j DROP
+iptables -A SENTICA_NEW -s 10.8.0.34/32 -j DROP
+iptables -A SENTICA_NEW -s 10.8.0.35/32 -j DROP
+iptables -A SENTICA_NEW -s 10.8.0.50/32 -j DROP
+iptables -A SENTICA_NEW -s 10.8.0.66/32 -j DROP
+iptables -A SENTICA_NEW -s 10.8.0.67/32 -j DROP
+iptables -I DOCKER-USER 1 -j SENTICA_NEW
+iptables -D DOCKER-USER -j SENTICA 2>/dev/null || true
+iptables -F SENTICA 2>/dev/null || true
+iptables -X SENTICA 2>/dev/null || true
+iptables -E SENTICA_NEW SENTICA
 ```
 
 `sentica-instance` stays routable because the broker publish cannot come
@@ -526,8 +541,9 @@ daemon starts, and it creates the chain empty. `iptables-persistent`
 restores rules before that chain exists, so the jump does not come back.
 `docker/sentica/sentica-firewall.sh` is this block.
 `docker/sentica/sentica-firewall.service` runs it `After=docker.service`.
-Enable the unit. A second start flushes `SENTICA` and inserts the jump
-only when `iptables -C` says it is absent.
+Enable the unit. A second start builds a new chain and swaps the jump.
+The live chain is removed only after that jump is in place, so a restart
+never forwards without drops.
 
 ```bash
 install -o root -g root -m 755 \

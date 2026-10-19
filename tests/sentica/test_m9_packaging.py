@@ -5,6 +5,9 @@ from __future__ import annotations
 import importlib.util
 import ipaddress
 import re
+import shlex
+import stat
+import subprocess
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, NamedTuple, cast
@@ -255,13 +258,21 @@ class _Tables:
     def __init__(self) -> None:
         self.docker_user: list[_FirewallRule] = []
         self.sentica: list[_FirewallRule] | None = None
+        self.extra: dict[str, list[_FirewallRule]] = {}
 
     def named(self, chain: str) -> list[_FirewallRule] | None:
         if chain == "DOCKER-USER":
             return self.docker_user
         if chain == "SENTICA":
             return self.sentica
-        return None
+        return self.extra.get(chain)
+
+    def chains(self) -> list[list[_FirewallRule]]:
+        found = [self.docker_user]
+        if self.sentica is not None:
+            found.append(self.sentica)
+        found.extend(self.extra.values())
+        return found
 
 
 def _token_after(tokens: list[str], flag: str) -> str | None:
@@ -296,7 +307,7 @@ def _iptables_parts(command: str) -> list[str]:
 
 
 def _chain_op(tokens: list[str]) -> tuple[str, str, list[str]] | None:
-    for op in ("-A", "-I", "-C", "-F", "-N"):
+    for op in ("-A", "-I", "-C", "-D", "-F", "-X", "-E", "-N"):
         if op not in tokens:
             continue
         index = tokens.index(op)
@@ -341,8 +352,17 @@ def _parse_iptables(
     if op == "-I" and rest and rest[0].isdigit():
         position = int(rest[0])
         rest = rest[1:]
-    if op in {"-N", "-F"}:
+    if op in {"-N", "-F", "-X"}:
         return op, chain, position, None
+    if op == "-E":
+        if not rest:
+            return None
+        return (
+            op,
+            chain,
+            None,
+            _FirewallRule(None, None, False, None, None, False, rest[0]),
+        )
     return op, chain, position, _rule_from_rest(rest)
 
 
@@ -353,10 +373,55 @@ def _apply_iptables(tables: _Tables, command: str) -> bool:
         return command == "true"
     op, chain, position, rule = parsed
     if op == "-N":
-        if chain == "SENTICA" and tables.sentica is None:
+        if tables.named(chain) is not None:
+            return False
+        if chain == "SENTICA":
             tables.sentica = []
             return True
-        return False
+        if chain == "DOCKER-USER":
+            return False
+        tables.extra[chain] = []
+        return True
+    if op == "-X":
+        if chain == "DOCKER-USER":
+            return False
+        current = tables.named(chain)
+        referenced = any(
+            item.target == chain for rules in tables.chains() for item in rules
+        )
+        if current is None or current or referenced:
+            return False
+        if chain == "SENTICA":
+            tables.sentica = None
+        else:
+            del tables.extra[chain]
+        return True
+    if op == "-E":
+        if rule is None or tables.named(chain) is None:
+            return False
+        new_name = rule.target
+        if (
+            new_name == chain
+            or chain == "DOCKER-USER"
+            or new_name == "DOCKER-USER"
+            or tables.named(new_name) is not None
+        ):
+            return False
+        moved = tables.named(chain)
+        assert moved is not None
+        if chain == "SENTICA":
+            tables.sentica = None
+        else:
+            del tables.extra[chain]
+        if new_name == "SENTICA":
+            tables.sentica = moved
+        else:
+            tables.extra[new_name] = moved
+        for rules in tables.chains():
+            for index, item in enumerate(rules):
+                if item.target == chain:
+                    rules[index] = item._replace(target=new_name)
+        return True
     current = tables.named(chain)
     if current is None:
         return False
@@ -367,6 +432,12 @@ def _apply_iptables(tables: _Tables, command: str) -> bool:
         return False
     if op == "-C":
         return rule in current
+    if op == "-D":
+        try:
+            current.remove(rule)
+        except ValueError:
+            return False
+        return True
     if op == "-A":
         current.append(rule)
         return True
@@ -403,6 +474,7 @@ def _clone_tables(tables: _Tables) -> _Tables:
     clone.docker_user = list(tables.docker_user)
     if tables.sentica is not None:
         clone.sentica = list(tables.sentica)
+    clone.extra = {name: list(rules) for name, rules in tables.extra.items()}
     return clone
 
 
@@ -414,7 +486,11 @@ def idempotent_gaps(commands: list[str]) -> list[str]:
     """
     once = _apply_tables(commands)
     twice = _apply_tables(commands, _clone_tables(once))
-    if once.docker_user != twice.docker_user or once.sentica != twice.sentica:
+    if (
+        once.docker_user != twice.docker_user
+        or once.sentica != twice.sentica
+        or once.extra != twice.extra
+    ):
         return ["firewall rules are not idempotent"]
     return []
 
@@ -1090,9 +1166,11 @@ def test_deploy_firewall_covers_every_container_ip() -> None:
     assert certificate_bridge_gaps(deploy) == []
     assert idempotent_gaps(commands) == []
     sentica = [
-        command for command in commands if command.startswith("iptables -A SENTICA ")
+        command
+        for command in commands
+        if command.startswith("iptables -A SENTICA_NEW ")
     ]
-    routed = "iptables -A SENTICA -s 10.8.0.85/32 -j DROP"
+    routed = "iptables -A SENTICA_NEW -s 10.8.0.85/32 -j DROP"
     assert sentica[11] == routed
     assert not any("--dport 5432" in command for command in sentica)
     assert not any("10.8.0.23" in command for command in sentica)
@@ -1308,6 +1386,57 @@ _PGBOUNCER_IMAGE = (
 )
 
 
+def _hba_rules(text: str) -> list[str]:
+    rules: list[str] = []
+    for raw in text.splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if line:
+            rules.append(line)
+    return rules
+
+
+def _postgres_run(deploy: str) -> str:
+    for command in _bash_commands(deploy):
+        if (
+            command.startswith("docker run ")
+            and "--name sentica-memory-postgres" in command
+        ):
+            return command
+    return ""
+
+
+def postgres_hardening_gaps(command: str) -> list[str]:
+    """Flags on the Postgres ``docker run``, not on the other containers."""
+    gaps: list[str] = []
+    if not command.startswith("docker run "):
+        gaps.append("postgres command is missing")
+        return gaps
+    if "--read-only" not in command.split():
+        gaps.append("postgres command is not read-only")
+    if "--cap-drop ALL" not in command:
+        gaps.append("postgres command keeps capabilities")
+    if "--auth-local=trust" in command or "--auth-host=trust" in command:
+        gaps.append("postgres initdb uses trust")
+    if "--auth-local=peer --auth-host=scram-sha-256" not in command:
+        gaps.append("postgres initdb auth is not peer and scram")
+    return gaps
+
+
+_HBA_RULES = [
+    "local all sentica peer map=sentica",
+    "host all all 10.8.0.67/32 scram-sha-256",
+    "host all all 0.0.0.0/0 reject",
+    "host all all ::/0 reject",
+]
+_BUSYBOX = (
+    "busybox:1.36"
+    + "@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662"
+)
+_TOPOLOGY_NODEID = (
+    "tests/sentica/test_egress_proxy.py::test_topology_blocks_the_proxy_and_postgres"
+)
+
+
 def test_deploy_postgres_pins_a_digest_and_rejects_trust() -> None:
     """The Postgres command stays hardened and does not use trust auth."""
     deploy = " ".join(_text("docs/DEPLOY.md").split())
@@ -1320,16 +1449,23 @@ def test_deploy_postgres_pins_a_digest_and_rejects_trust() -> None:
     assert "/var/lib/sentica/postgres:/var/lib/postgresql/data" in deploy
     assert "--user 999:999" in deploy
     assert "ident_file=/etc/sentica/pg_ident.conf" in deploy
+    command = _postgres_run(_text("docs/DEPLOY.md"))
+    assert postgres_hardening_gaps(command) == []
+    assert postgres_hardening_gaps(command.replace(" --read-only", "", 1)) != []
+    assert postgres_hardening_gaps(command.replace(" --cap-drop ALL", "", 1)) != []
     hba = _text("docker/sentica/instance-pg_hba.conf")
-    lowered = hba.lower()
-    assert "trust" not in lowered
-    assert "local all sentica peer map=sentica" in lowered
-    assert "host all all 10.8.0.67/32 scram-sha-256" in lowered
-    assert "host all all 0.0.0.0/0 reject" in lowered
-    assert "host all all ::/0 reject" in lowered
+    assert "trust" not in hba.lower()
+    assert _hba_rules(hba) == _HBA_RULES
+    weaker = "host all all 0.0.0.0/0 md5\n" + hba
+    assert _hba_rules(weaker) != _HBA_RULES
     ident = _text("docker/sentica/instance-pg_ident.conf").lower()
     assert "trust" not in ident
     assert "sentica postgres sentica" in ident
+    assert "does not send a password" not in ident
+
+
+def _firewall_rule_index(guide: list[str], prefix: str) -> int:
+    return next(index for index, line in enumerate(guide) if line.startswith(prefix))
 
 
 def test_firewall_script_matches_the_guide() -> None:
@@ -1345,9 +1481,14 @@ def test_firewall_script_matches_the_guide() -> None:
         if line.strip().startswith("iptables ")
     ]
     assert script_lines == guide
-    assert guide[0].startswith("iptables -N SENTICA")
-    assert "iptables -F SENTICA" in guide
-    assert guide[-1].startswith("iptables -C DOCKER-USER -j SENTICA")
+    created = _firewall_rule_index(guide, "iptables -N SENTICA_NEW")
+    filled = _firewall_rule_index(guide, "iptables -A SENTICA_NEW ")
+    inserted = _firewall_rule_index(guide, "iptables -I DOCKER-USER 1 -j SENTICA_NEW")
+    flushed = _firewall_rule_index(guide, "iptables -F SENTICA ")
+    renamed = _firewall_rule_index(guide, "iptables -E SENTICA_NEW SENTICA")
+    assert created < filled < inserted < flushed < renamed
+    for line in guide[:inserted]:
+        assert line.split()[1:3] != ["-F", "SENTICA"]
     unit = _text("docker/sentica/sentica-firewall.service")
     assert "After=docker.service" in unit
     assert "Requires=docker.service" in unit
@@ -1357,16 +1498,105 @@ def test_firewall_script_matches_the_guide() -> None:
     deploy = " ".join(_text("docs/DEPLOY.md").split())
     assert "After=docker.service" in deploy
     assert "iptables-persistent" in deploy
+    assert "never forwards without drops" in deploy
+
+
+def _keyword_selects(expression: str, nodeid: str) -> bool:
+    from _pytest.mark.expression import Expression
+
+    compiled = Expression.compile(expression)
+    folded = nodeid.lower()
+    return compiled.evaluate(lambda name: name.lower() in folded)
+
+
+def firewall_ci_gaps(command: str) -> list[str]:
+    """The main pytest command must collect the topology test."""
+    gaps: list[str] = []
+    if "test_egress_proxy.py" in command:
+        gaps.append("firewall topology test is ignored")
+    tokens = shlex.split(command)
+    if "-k" in tokens:
+        expression = tokens[tokens.index("-k") + 1]
+        if not _keyword_selects(expression, _TOPOLOGY_NODEID):
+            gaps.append("firewall topology test is excluded by -k")
+    return gaps
 
 
 def test_ci_collects_the_firewall_topology_test() -> None:
     """The main CI job runs the test that applies the firewall."""
     workflow = _text(".github/workflows/unittest.yml")
-    matched = re.search(r"uv run pytest -x --ignore=([^\n]+)", workflow)
-    assert matched is not None
-    ignored = matched.group(1)
-    assert "test_m1_stack.py" in ignored
-    assert "test_egress_proxy.py" not in ignored
+    commands = re.findall(r"uv run pytest[^\n]*", workflow)
+    main = [
+        command
+        for command in commands
+        if "--ignore=tests/sentica/test_m1_stack.py" in command
+    ]
+    assert main == ["uv run pytest -x --ignore=tests/sentica/test_m1_stack.py"]
+    assert firewall_ci_gaps(main[0]) == []
+    excluded = main[0] + " -k 'not topology'"
+    assert firewall_ci_gaps(excluded) != []
+    assert any("excluded by -k" in item for item in firewall_ci_gaps(excluded))
+
+
+def test_deploy_password_file_steps_create_the_file(tmp_path: Path) -> None:
+    """The guide's install creates the password file before anything writes it."""
+    deploy = _text("docs/DEPLOY.md")
+    blocks = re.findall(r"```bash\n(.*?)```", deploy, re.DOTALL)
+    fence = next(block for block in blocks if "sentica-memory-postgres" in block)
+    installs = [
+        command
+        for command in _bash_commands("```bash\n" + fence + "```")
+        if command.startswith("install ")
+    ]
+    password = next(command for command in installs if "postgres.password" in command)
+    assert password.split()[-2:] == ["/dev/null", "/run/sentica/postgres.password"]
+    assert any(command.startswith("install -d ") for command in installs)
+    root = tmp_path / "scratch"
+    root.mkdir()
+    lines = ["set -eu"]
+    for command in installs:
+        lines.append(
+            command.replace("/run/sentica", "/work/run").replace(
+                "/var/lib/sentica", "/work/lib"
+            )
+        )
+    lines.append("stat -c '%u %g %a %s' /work/run/postgres.password")
+    lines.append("printf '%s\\n' one-line > /work/run/postgres.password")
+    lines.append("stat -c '%u %g %a' /work/run/postgres.password")
+    lines.append("cat /work/run/postgres.password")
+    completed = subprocess.run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--user",
+            "root",
+            "-v",
+            str(root) + ":/work",
+            "--entrypoint",
+            "sh",
+            _BUSYBOX,
+            "-c",
+            "\n".join(lines),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    empty, written, content = completed.stdout.splitlines()
+    assert empty == "999 999 400 0"
+    assert written == "999 999 400"
+    assert content == "one-line"
+    host_file = root / "run" / "postgres.password"
+    host_stat = host_file.stat()
+    assert host_stat.st_uid == 999
+    assert host_stat.st_gid == 999
+    assert stat.S_IMODE(host_stat.st_mode) == 0o400
+    data = root / "lib" / "postgres"
+    assert data.is_dir()
+    assert data.stat().st_uid == 999
+    assert stat.S_IMODE(data.stat().st_mode) == 0o700
 
 
 def test_dockerignore_excludes_bytecode() -> None:

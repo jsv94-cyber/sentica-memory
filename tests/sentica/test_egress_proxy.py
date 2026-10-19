@@ -21,10 +21,10 @@ _CLIENT = (
     + "@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641"
 )
 _SQUID = (
-    "ubuntu/squid:6.6-24.04_beta"
-    + "@sha256:6a097f68bae708cedbabd6188d68c7e2e7a38cedd05a176e1cc0ba29e3bbe029"
+    "ubuntu/squid:6.6-24.04_edge"
+    + "@sha256:8a3baed477e2c282ab8aa5edad442f69873246964f225c5c2ae8364b6610963c"
 )
-_EDGE_SQUID = "sha256:8a3baed477e2c282ab8aa5edad442f69873246964f225c5c2ae8364b6610963c"
+_OLDER_SQUID = "sha256:6a097f68bae708cedbabd6188d68c7e2e7a38cedd05a176e1cc0ba29e3bbe029"
 _POSTGRES = (
     "pgvector/pgvector:pg15"
     + "@sha256:47af0b65960b14f1c6945aa4ccae37836c632e9a6fe0eea9160936e616e5b2e9"
@@ -134,13 +134,19 @@ def test_proxy_image_and_base_images_are_pinned() -> None:
     assert _SQUID in deploy
     assert _POSTGRES in deploy
     assert _PGBOUNCER in deploy
-    assert "ubuntu/squid:6.6-24.04_edge" not in compose
-    assert "ubuntu/squid:6.6-24.04_edge" not in deploy
-    assert _EDGE_SQUID not in compose
-    assert _EDGE_SQUID not in deploy
+    assert "ubuntu/squid:6.6-24.04_beta" not in compose
+    assert "ubuntu/squid:6.6-24.04_beta" not in deploy
+    assert _OLDER_SQUID not in compose
+    assert _OLDER_SQUID not in deploy
     prose = " ".join(deploy.split())
-    assert "Canonical has not published a `_stable` tag" in prose
-    assert "May 2029" in deploy
+    assert "pinned by digest" in prose
+    assert "6.14-0ubuntu0.24.04.2" in prose
+    assert "3.0.13-0ubuntu3.9" in prose
+    assert "does not enable ICP" in prose
+    assert "does not terminate TLS" in prose
+    config = _text("docker/sentica/egress-proxy.conf")
+    assert "icp_port" not in config
+    assert "https_port" not in config
     assert "25.04" not in compose
     assert "ports:" not in compose
 
@@ -494,77 +500,51 @@ def _host_iptables(env: dict[str, str], *args: str) -> subprocess.CompletedProce
 
 
 def _clear_chain(env: dict[str, str], chain: str) -> None:
-    _host_iptables(env, "-D", "DOCKER-USER", "-j", chain)
-    _host_iptables(env, "-F", chain)
-    _host_iptables(env, "-X", chain)
+    for name in (chain, chain + "_NEW"):
+        _host_iptables(env, "-D", "DOCKER-USER", "-j", name)
+        _host_iptables(env, "-F", name)
+        _host_iptables(env, "-X", name)
 
 
-def _install_chain(env: dict[str, str], chain: str, wan: str, drops: list[str]) -> None:
-    """The guide's rule shape, for this test's addresses only."""
-    _clear_chain(env, chain)
-    created = _host_iptables(env, "-N", chain)
-    assert created.returncode == 0, created.stderr
-    rules = [
-        [
-            "-A",
-            chain,
-            "-m",
-            "conntrack",
-            "--ctstate",
-            "ESTABLISHED,RELATED",
-            "-j",
-            "RETURN",
-        ],
-        [
-            "-A",
-            chain,
-            "-s",
-            wan + "/32",
-            "-d",
-            "1.1.1.1/32",
-            "-p",
-            "udp",
-            "--dport",
-            "53",
-            "-j",
-            "RETURN",
-        ],
-        [
-            "-A",
-            chain,
-            "-s",
-            wan + "/32",
-            "-d",
-            "1.1.1.1/32",
-            "-p",
-            "tcp",
-            "--dport",
-            "53",
-            "-j",
-            "RETURN",
-        ],
-        [
-            "-A",
-            chain,
-            "-s",
-            wan + "/32",
-            "-p",
-            "tcp",
-            "--dport",
-            "443",
-            "-j",
-            "RETURN",
-        ],
-    ]
-    for source in drops:
-        rules.append(["-A", chain, "-s", source + "/32", "-j", "DROP"])
-    for rule in rules:
-        applied = _host_iptables(env, *rule)
-        assert applied.returncode == 0, applied.stderr
-    present = _host_iptables(env, "-C", "DOCKER-USER", "-j", chain)
-    if present.returncode != 0:
-        inserted = _host_iptables(env, "-I", "DOCKER-USER", "1", "-j", chain)
-        assert inserted.returncode == 0, inserted.stderr
+def _apply_firewall_script(
+    env: dict[str, str], chain: str, replacements: list[tuple[str, str]]
+) -> None:
+    """Run the shipped script with this test's addresses and chain name."""
+    text = _text("docker/sentica/sentica-firewall.sh")
+    for source, dest in replacements:
+        text = text.replace(source + "/32", dest + "/32")
+    text = text.replace("SENTICA", chain)
+    with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as handle:
+        handle.write(text)
+        path = handle.name
+    os.chmod(path, 0o755)
+    try:
+        completed = _run(
+            [
+                "docker",
+                "run",
+                "--rm",
+                "--privileged",
+                "--pid=host",
+                "--network",
+                "host",
+                "-v",
+                path + ":/script:ro",
+                "-v",
+                "/tmp:/host-tmp",
+                _BUSYBOX,
+                "sh",
+                "-c",
+                "name=snt-fw-$$.sh; cp /script /host-tmp/$name; "
+                "nsenter -t 1 -m -n -- sh /tmp/$name; rc=$?; "
+                "rm -f /host-tmp/$name; exit $rc",
+            ],
+            env,
+            check=False,
+        )
+    finally:
+        os.unlink(path)
+    assert completed.returncode == 0, completed.stderr
 
 
 def _packet_count(text: str, source: str, target: str, extra: str = "") -> int:
@@ -767,22 +747,25 @@ def test_topology_blocks_the_proxy_and_postgres() -> None:
                     check=False,
                 )
                 assert joined.returncode == 0, joined.stderr
-            drops = [
-                api_ip,
-                deriver_ip,
-                migrate_ip,
-                gateway_inst,
-                api_clients,
-                deriver_clients,
-                migrate_clients,
-                cert_ip,
-                gateway_egress,
-                proxy_ip,
-                wan_ip,
-                postgres_ip,
-                cert_db,
-            ]
-            _install_chain(env, chain, wan_ip, drops)
+            _apply_firewall_script(
+                env,
+                chain,
+                [
+                    ("10.8.0.18", api_ip),
+                    ("10.8.0.19", deriver_ip),
+                    ("10.8.0.20", migrate_ip),
+                    ("10.8.0.22", gateway_inst),
+                    ("10.8.0.82", api_clients),
+                    ("10.8.0.83", deriver_clients),
+                    ("10.8.0.84", migrate_clients),
+                    ("10.8.0.85", cert_ip),
+                    ("10.8.0.34", gateway_egress),
+                    ("10.8.0.35", proxy_ip),
+                    ("10.8.0.50", wan_ip),
+                    ("10.8.0.66", postgres_ip),
+                    ("10.8.0.67", cert_db),
+                ],
+            )
             zeroed = _host_iptables(env, "-Z", chain)
             assert zeroed.returncode == 0, zeroed.stderr
             allowed = ""
@@ -866,6 +849,7 @@ def _psql(
     host: str,
     password_file: str,
     mode: str,
+    query: str = "select 1",
 ) -> subprocess.CompletedProcess[str]:
     if mode == "file":
         prelude = 'export PGPASSWORD="$(cat /run/secrets/password)"\n'
@@ -878,7 +862,10 @@ def _psql(
         + 'psql "host='
         + host
         + " port=5432 user=sentica dbname=sentica"
-        + " sslmode=disable connect_timeout=3\" -c 'select 1'\n"
+        + ' sslmode=disable connect_timeout=3" -c '
+        + "'"
+        + query
+        + "'\n"
     )
     return _run(
         [
@@ -1041,6 +1028,8 @@ def test_deploy_postgres_accepts_only_the_password() -> None:
                     "POSTGRES_DB=sentica",
                     "-e",
                     "PGDATA=/var/lib/postgresql/data",
+                    "-e",
+                    "POSTGRES_INITDB_ARGS=--auth-local=peer --auth-host=scram-sha-256",
                     "--network",
                     network,
                     "--ip",
@@ -1095,6 +1084,15 @@ def test_deploy_postgres_accepts_only_the_password() -> None:
                 ).replace(password, "[redacted]")
                 assert ready, detail
             accepted = _psql(env, network, client_ip, pg_ip, str(secret), "file")
+            shown = _psql(
+                env,
+                network,
+                client_ip,
+                pg_ip,
+                str(secret),
+                "file",
+                "SHOW hba_file",
+            )
             missing = _psql(env, network, client_ip, pg_ip, str(secret), "none")
             wrong = _psql(env, network, client_ip, pg_ip, str(secret), "wrong")
             stranger = _psql(env, network, other_ip, pg_ip, str(secret), "file")
@@ -1124,6 +1122,8 @@ def test_deploy_postgres_accepts_only_the_password() -> None:
             )
             blob = logs.stdout + logs.stderr + inspected.stdout
             assert accepted.returncode == 0, accepted.stderr
+            assert shown.returncode == 0, shown.stderr
+            assert "/etc/sentica/pg_hba.conf" in shown.stdout
             assert missing.returncode != 0
             assert wrong.returncode != 0
             assert stranger.returncode != 0
@@ -1131,6 +1131,11 @@ def test_deploy_postgres_accepts_only_the_password() -> None:
             assert state.stdout.strip() == "true 0"
             assert ports.stdout.strip() in {"null", "{}", "[]"}
             assert "POSTGRES_HOST_AUTH_METHOD" not in inspected.stdout
+            assert (
+                "POSTGRES_INITDB_ARGS=--auth-local=peer --auth-host=scram-sha-256"
+                in inspected.stdout
+            )
+            assert "--auth-host=trust" not in inspected.stdout
         finally:
             _run(["docker", "rm", "-f", name], env, check=False)
             _run(["docker", "volume", "rm", "-f", volume], env, check=False)
