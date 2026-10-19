@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import re
+import subprocess
+import sys
 from pathlib import Path
 from typing import cast
 
@@ -68,6 +71,7 @@ def test_release_notes_pin_the_base_images() -> None:
     assert _BUILDKIT in notes
     assert _BUILD in notes
     workflow = _text(".github/workflows/unittest.yml")
+    checker = _text("tests/sentica/check_image_digest.py")
     assert "--driver docker-container" in workflow
     assert "rewrite-timestamp=true" in workflow
     assert "--provenance=false" in workflow
@@ -76,11 +80,80 @@ def test_release_notes_pin_the_base_images() -> None:
     assert "github.event.pull_request.head.sha" in workflow
     assert _BUILDKIT in workflow
     assert workflow.count(_BUILD) == 2
-    assert "containerimage.digest" in workflow
-    assert "image digest drift" in workflow
+    assert "docs/image-digest.txt" in workflow
+    assert "tests/sentica/check_image_digest.py" in workflow
+    assert "containerimage.digest" in checker
+    assert 'raise SystemExit("image digest drift")' in checker
+    assert "docs/RELEASE-v0.2.0-sentica.md" not in checker
     image = "sha256:522b48cbd15d6ee59b99f0df376fc1e4cdaffd635e8aba66fd45114c6c35ae6d"
+    current = "sha256:84187e5ddf7131b30e20bc073d388b0ab07fc4b6f50030e1ebe03c71bc81ad7d"
     assert image in notes
+    assert current not in notes
     assert re.search(r"sha256:[0-9a-f]{64}", notes)
+    digest_file = _text("docs/image-digest.txt")
+    assert current in digest_file
+    assert "docs/RELEASE-v0.2.0-sentica.md" in digest_file
+    releases = _text("docs/RELEASES.md")
+    assert "## Unreleased" in releases
+    assert "v0.2.0-sentica" in releases
+    assert current in releases
+
+
+def _metadata(digest: str) -> str:
+    return json.dumps({"containerimage.digest": digest})
+
+
+def _run_digest_check(
+    tmp_path: Path, expected: str, first: str, second: str
+) -> subprocess.CompletedProcess[str]:
+    expected_path = tmp_path / "image-digest.txt"
+    expected_path.write_text(
+        "# Tagged versions record their digest in docs/RELEASE-v0.2.0-sentica.md.\n"
+        + expected
+        + "\n",
+        encoding="utf-8",
+    )
+    first_path = tmp_path / "a.json"
+    second_path = tmp_path / "b.json"
+    first_path.write_text(_metadata(first), encoding="utf-8")
+    second_path.write_text(_metadata(second), encoding="utf-8")
+    return subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "tests" / "sentica" / "check_image_digest.py"),
+            str(expected_path),
+            str(first_path),
+            str(second_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_image_digest_check_fails_when_the_file_disagrees(tmp_path: Path) -> None:
+    """Two identical exports still fail when the tracked digest differs."""
+    built = "sha256:" + ("ab" * 32)
+    recorded = "sha256:" + ("cd" * 32)
+    result = _run_digest_check(tmp_path, recorded, built, built)
+    assert result.returncode != 0
+    assert "image digest drift" in result.stderr
+
+
+def test_image_digest_check_fails_when_the_builds_differ(tmp_path: Path) -> None:
+    """Reproducibility fails closed even if one export matches the file."""
+    expected = "sha256:" + ("ab" * 32)
+    other = "sha256:" + ("cd" * 32)
+    result = _run_digest_check(tmp_path, expected, expected, other)
+    assert result.returncode != 0
+    assert "image digest drift" in result.stderr
+
+
+def test_image_digest_check_accepts_two_matching_builds(tmp_path: Path) -> None:
+    digest = "sha256:" + ("ab" * 32)
+    result = _run_digest_check(tmp_path, digest, digest, digest)
+    assert result.returncode == 0
+    assert result.stderr == ""
 
 
 async def test_missing_conclusion_trust_is_refused_in_production(

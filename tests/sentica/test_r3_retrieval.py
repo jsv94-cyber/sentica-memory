@@ -257,6 +257,68 @@ async def _plans_during(
     return rows, plans[0]
 
 
+def _select_has_offset(statement: Any) -> bool:
+    return getattr(statement, "_offset_clause", None) is not None
+
+
+def _explain_sync(sync_session: Any, stmt: Select[tuple[models.Document]]) -> str:
+    """EXPLAIN on the sync connection that already holds the probe settings."""
+    connection = sync_session.connection()
+    compiled = stmt.compile(dialect=connection.dialect)
+    explained_sql = compiled.string.replace(
+        " <=> %(",
+        " <=> CAST(%(",
+        1,
+    ).replace(
+        ")s \n",
+        ")s AS vector)\n",
+        1,
+    )
+    explained = connection.exec_driver_sql(
+        "EXPLAIN " + explained_sql,
+        compiled.params,
+    )
+    return "\n".join(str(row[0]) for row in explained.all())
+
+
+async def _probe_plans_during(
+    db_session: AsyncSession,
+    call: Callable[[], Awaitable[list[models.Document]]],
+) -> list[str]:
+    """Explain each offset probe through ``_execute_internal``.
+
+    ``Session.scalar`` and ``Session.execute`` both call that method. The
+    old probe used ``scalar``, so a hook on ``execute`` never saw it and
+    failed because the plan list was empty.
+    """
+    plans: list[str] = []
+    sync_session = db_session.sync_session
+    original: Any = sync_session._execute_internal  # pyright: ignore[reportPrivateUsage]
+    busy = False
+
+    def _watching(statement: Any, *args: Any, **kwargs: Any) -> Any:
+        nonlocal busy
+        if not busy and isinstance(statement, Select) and _select_has_offset(statement):
+            busy = True
+            try:
+                plans.append(
+                    _explain_sync(
+                        sync_session,
+                        cast(Select[tuple[models.Document]], statement),
+                    )
+                )
+            finally:
+                busy = False
+        return original(statement, *args, **kwargs)
+
+    sync_session._execute_internal = _watching  # type: ignore[method-assign]  # pyright: ignore[reportPrivateUsage]
+    try:
+        await call()
+    finally:
+        sync_session._execute_internal = original  # type: ignore[method-assign]  # pyright: ignore[reportPrivateUsage]
+    return plans
+
+
 async def _plan(db_session: AsyncSession, stmt: Select[tuple[models.Document]]) -> str:
     """EXPLAIN a neighbor statement, casting the distance bind to vector."""
     connection = await db_session.connection()
@@ -609,3 +671,70 @@ async def test_aborted_neighbor_scan_keeps_its_original_error(
     with pytest.raises(Exception, match="division by zero") as caught:
         await execute_neighbors(db_session, stmt, embedding, 1)
     assert "current transaction is aborted" not in str(caught.value).lower()
+
+
+async def test_exact_probe_uses_the_workspace_index_at_10k_rows(
+    db_session: AsyncSession,
+) -> None:
+    """The short-page probe uses the workspace btree at 10k rows.
+
+    Ten thousand documents share one observer. Ten of them are in the
+    queried workspace, so a full page is short and the probe runs. A
+    sequential probe reads every document in the instance. The probe has
+    no ORDER BY, so the plan cannot be an HNSW scan.
+    """
+    dimensions = settings.EMBEDDING.VECTOR_DIMENSIONS
+    target = models.Workspace(name="probe-ws-target")
+    other = models.Workspace(name="probe-ws-other")
+    db_session.add_all([target, other])
+    await db_session.commit()
+    for workspace in (target, other):
+        db_session.add(models.Peer(name="p0", workspace_name=workspace.name))
+    await db_session.commit()
+    for workspace in (target, other):
+        db_session.add(
+            models.Collection(
+                workspace_name=workspace.name,
+                observer="p0",
+                observed="p0",
+            )
+        )
+    await db_session.commit()
+    vector = "[" + ",".join(["0"] * (dimensions - 1) + ["1"]) + "]"
+    await db_session.execute(
+        text(
+            "INSERT INTO documents (id, content, observer, observed, "
+            + "workspace_name, embedding, stale, level, internal_metadata) "
+            + "SELECT substr(md5('probe' || g::text), 1, 21), 'row ' || g, "
+            + ":observer, :observed, "
+            + "CASE WHEN g <= 10 THEN :target ELSE :other END, "
+            + "CAST(:vector AS vector), false, 'explicit', '{}'::jsonb "
+            + "FROM generate_series(1, 10000) AS g"
+        ),
+        {
+            "observer": "p0",
+            "observed": "p0",
+            "target": target.name,
+            "other": other.name,
+            "vector": vector,
+        },
+    )
+    await db_session.execute(text("ANALYZE documents"))
+    await db_session.commit()
+    await db_session.rollback()
+    embedding = [0.0] * (dimensions - 1) + [1.0]
+    scoped = select(models.Document).where(
+        models.Document.workspace_name == target.name,
+        models.Document.observer == "p0",
+        models.Document.observed == "p0",
+    )
+    plans = await _probe_plans_during(
+        db_session,
+        lambda: execute_neighbors(db_session, scoped, embedding, 10),
+    )
+    assert plans, "the exact probe did not run"
+    for plan in plans:
+        folded = plan.lower()
+        assert "ix_documents_workspace_name" in plan
+        assert "seq scan" not in folded
+        assert "hnsw" not in folded

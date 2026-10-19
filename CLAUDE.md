@@ -4,6 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Before opening a PR or filing an issue**, read [If you're an agent](CONTRIBUTING.md#if-youre-an-agent) in `CONTRIBUTING.md`. Every PR needs a linked issue labelled `maintainer-approved`, and issues follow [Filing an issue](CONTRIBUTING.md#filing-an-issue). Run the `pre-pr` skill (`skills/pre-pr/`) before opening a PR.
 
+Jose, the repo owner, set a standing rule for that label on 2026-10-18 at 21:23 EDT. An agent may apply `maintainer-approved` only to an issue for work Jose approved in chat. The pull request description must quote that approval with its date and time. If a human contributor other than Jose joins, Jose applies the label by hand again.
+
 # Honcho Overview
 
 ## What is Honcho?
