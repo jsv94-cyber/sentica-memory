@@ -19,14 +19,16 @@ on the request. Production refuses a missing label, as ingest does.
 ## Image
 
 The image manifest digest below is `containerimage.digest` from this
-export. `SOURCE_DATE_EPOCH` is the head commit timestamp. A pull
-request job checks out that commit. The default checkout is a merge
-commit, and its timestamp is a different epoch. CI runs the export
-twice, each time from a new BuildKit builder, and fails unless both
-digests equal the recorded value.
+export. `SOURCE_DATE_EPOCH` is the timestamp of the commit that last
+changed the Dockerfile. A later commit that only records the digest
+does not move it. CI checks out the pull request head with full
+history, because the default checkout is a merge commit with a
+different timestamp. CI runs the export twice, each time from a new
+BuildKit builder, and fails unless both digests equal the recorded
+value.
 
 ```
-SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)
+SOURCE_DATE_EPOCH=$(git log -1 --format=%ct -- Dockerfile)
 docker buildx create --name repro --driver docker-container --driver-opt image=moby/buildkit@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea --use
 docker buildx build --build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" --provenance=false --sbom=false --no-cache --metadata-file image-metadata.json -o type=docker,dest=image.tar,rewrite-timestamp=true .
 ```

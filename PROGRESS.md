@@ -464,10 +464,10 @@ Built:
   BuildKit by digest. `docs/RELEASE-v0.2.0-sentica.md` records the
   built digest and the export command.
 - CI job `build-default-image` checks out the head commit, sets
-  `SOURCE_DATE_EPOCH` from that commit, builds twice from a new
-  builder, and fails unless both digests equal the recorded value.
-  The default pull request checkout is a merge commit, and its
-  timestamp is a different epoch.
+  `SOURCE_DATE_EPOCH` from the commit that last changed the
+  Dockerfile, builds twice from a new builder, and fails unless both
+  digests equal the recorded value. The default pull request checkout
+  is a merge commit, and its timestamp is a different epoch.
 - The footprint table in `docs/INTEGRATION.md` is a throwaway stack on
   this host. Jose's Redis on port 6379 was not used.
 

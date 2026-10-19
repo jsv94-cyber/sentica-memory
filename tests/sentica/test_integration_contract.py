@@ -64,14 +64,15 @@ def test_release_notes_pin_the_base_images() -> None:
     assert "rewrite-timestamp" in notes
     assert "docker-container" in notes
     assert "IMAGE_DIGEST_PENDING" not in notes
-    assert "git show -s --format=%ct HEAD" in notes
+    assert "git log -1 --format=%ct -- Dockerfile" in notes
     assert _BUILDKIT in notes
     assert _BUILD in notes
     workflow = _text(".github/workflows/unittest.yml")
     assert "--driver docker-container" in workflow
     assert "rewrite-timestamp=true" in workflow
     assert "--provenance=false" in workflow
-    assert "git show -s --format=%ct HEAD" in workflow
+    assert "git log -1 --format=%ct -- Dockerfile" in workflow
+    assert "fetch-depth: 0" in workflow
     assert "github.event.pull_request.head.sha" in workflow
     assert _BUILDKIT in workflow
     assert workflow.count(_BUILD) == 2
