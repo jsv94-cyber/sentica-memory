@@ -99,7 +99,7 @@ release v3.3.0 (`608aec8a928da13c540262ed980c569448fb53ab`).
 | `src/crud/document.py` | Production refuses a missing conclusion `source_trust`. The label that was sent is stored. | M-INT |
 | `docs/INTEGRATION.md` | Broker contract: routes, tokens, placement, footprint, failure modes. | M-INT |
 | `docs/RELEASE-v0.2.0-sentica.md` | Release notes for `v0.2.0-sentica`. | M-INT |
-| `Dockerfile` | Base image and uv are pinned by digest. Copied files are stamped to `SOURCE_DATE_EPOCH`, and the virtualenv layer is packed in sorted order. | M-INT |
+| `Dockerfile` | Base image and uv are pinned by digest. Copied files are stamped to `SOURCE_DATE_EPOCH`, bytecode is compiled with one worker, and the virtualenv layer is packed in sorted order. | M-INT |
 | `tests/sentica/test_integration_contract.py` | The written contract and the production trust refusal. | M-INT |
 | `tests/sentica/test_m1_stack.py` | Signed-token exercise of every contract route. | M-INT |
 | `tests/sentica/test_m6_retrieval.py` | search_memory returns the keyword hit and its workspace. | M-INT |

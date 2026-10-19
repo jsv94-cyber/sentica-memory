@@ -45,14 +45,16 @@ downloaded by URL during the build and checked against their SHA-256.
 Copied files are stamped to that timestamp in their own stage, and the
 virtualenv is packed with `tar --sort=name`, because BuildKit only
 clamps a timestamp newer than the epoch and a virtualenv layer
-otherwise follows filesystem order. Modes are normalized with
+otherwise follows filesystem order. Bytecode is compiled with one
+worker. A parallel compile does not produce the same files on every
+run. Modes are normalized with
 `COPY --chmod` and `chmod` in the same step that creates the files.
 The `app` entry in `/etc/shadow` uses the epoch's day, not the build
 day.
 
 The image manifest digest is:
 
-`sha256:e076ae4f82c8bf19ec7bd0a0e9a8ae811c49fe8df66f6efd5af7804995d86804`
+`sha256:522b48cbd15d6ee59b99f0df376fc1e4cdaffd635e8aba66fd45114c6c35ae6d`
 
 ## Footprint
 

@@ -461,8 +461,9 @@ Built:
 - A conclusion created by the broker stores the request's
   `source_trust`. Production refuses a missing label, as ingest does.
 - The default image pins `python:3.13-slim-bookworm`, `uv`, and
-  BuildKit by digest. Copied files are stamped to `SOURCE_DATE_EPOCH`
-  and the virtualenv is packed in sorted order, so a checkout time or
+  BuildKit by digest. Copied files are stamped to `SOURCE_DATE_EPOCH`,
+  bytecode is compiled with one worker, and the virtualenv is packed
+  in sorted order, so a checkout time, a parallel compile, or
   filesystem order cannot change the digest.
   `docs/RELEASE-v0.2.0-sentica.md` records the built digest and the
   export command.
