@@ -516,14 +516,21 @@ def docker_user_order_gaps(deploy: str) -> list[str]:
     Docker 29 creates ``DOCKER-USER`` empty. A packet that matches nothing
     returns to ``FORWARD``, which Docker accepts. ``-I`` without a position
     inserts at the head and reverses an allow-then-drop list. A missing
-    container name is a gap.
+    container name is a gap. Two containers on one bridge are not forwarded,
+    so an allow between them is the bridge rather than an iptables rule.
     """
     commands = _bash_commands(deploy)
     tables = _apply_tables(commands)
     gaps: list[str] = []
     public = ipaddress.IPv4Address("1.2.3.4")
     ips = _named_container_ips(commands)
+    topology = _topology(commands)
+    seen: set[tuple[str, ipaddress.IPv4Address]] = set()
     for name, address in ips.items():
+        seen.add((name, address))
+    for attachment in topology.attachments:
+        seen.add((attachment.container, attachment.address))
+    for name, address in seen:
         port = 80 if name == "sentica-memory-egress" else 443
         if _forward_verdict(tables, address, public, port) != "DROP":
             gaps.append(str(address) + " is not dropped")
@@ -535,6 +542,9 @@ def docker_user_order_gaps(deploy: str) -> list[str]:
         if dest is None:
             gaps.append(dest_name + " has no container address")
         if source is None or dest is None:
+            continue
+        shared = topology.networks_of(source_name) & topology.networks_of(dest_name)
+        if shared:
             continue
         if _forward_verdict(tables, source, dest, port) != "RETURN":
             gaps.append(source_name + " to " + dest_name + " is not allowed")
@@ -586,31 +596,257 @@ def _host_addresses(deploy: str, commands: list[str]) -> set[ipaddress.IPv4Addre
     return found
 
 
+class _Network(NamedTuple):
+    name: str
+    subnet: ipaddress.IPv4Network
+    gateway: ipaddress.IPv4Address | None
+    internal: bool
+
+
+class _Attachment(NamedTuple):
+    container: str
+    network: str
+    address: ipaddress.IPv4Address
+
+
+class _Topology:
+    """Bridges and the container addresses attached to them."""
+
+    def __init__(self) -> None:
+        self.networks: dict[str, _Network] = {}
+        self.attachments: list[_Attachment] = []
+
+    def networks_of(self, container: str) -> set[str]:
+        return {
+            item.network for item in self.attachments if item.container == container
+        }
+
+    def networks_of_address(self, address: ipaddress.IPv4Address) -> set[str]:
+        return {item.network for item in self.attachments if item.address == address}
+
+    def addresses_of(self, container: str) -> list[ipaddress.IPv4Address]:
+        found: list[ipaddress.IPv4Address] = []
+        for item in self.attachments:
+            if item.container == container and item.address not in found:
+                found.append(item.address)
+        return found
+
+    def containers_on(self, network: str) -> set[str]:
+        return {item.container for item in self.attachments if item.network == network}
+
+
+def _ipv4_address(raw: str | None) -> ipaddress.IPv4Address | None:
+    if raw is None:
+        return None
+    try:
+        parsed = ipaddress.ip_address(raw)
+    except ValueError:
+        return None
+    if not isinstance(parsed, ipaddress.IPv4Address):
+        return None
+    return parsed
+
+
+def _parse_network_create(command: str) -> _Network | None:
+    if not command.startswith("docker network create "):
+        return None
+    tokens = command.split()
+    name = tokens[-1]
+    if name.startswith("-"):
+        return None
+    raw = _flag(command, "--subnet")
+    if raw is None:
+        return None
+    try:
+        subnet = ipaddress.ip_network(raw, strict=False)
+    except ValueError:
+        return None
+    if not isinstance(subnet, ipaddress.IPv4Network):
+        return None
+    return _Network(
+        name,
+        subnet,
+        _ipv4_address(_flag(command, "--gateway")),
+        "--internal" in tokens,
+    )
+
+
+def _parse_run_attachment(command: str) -> _Attachment | None:
+    if not command.startswith("docker run "):
+        return None
+    name = _flag(command, "--name")
+    network = _flag(command, "--network")
+    address = _ipv4_address(_flag(command, "--ip"))
+    if name is None or network is None or address is None:
+        return None
+    return _Attachment(name, network, address)
+
+
+def _parse_connect(command: str) -> _Attachment | None:
+    if not command.startswith("docker network connect "):
+        return None
+    raw_ip: str | None = None
+    positional: list[str] = []
+    rest = command.split()[3:]
+    index = 0
+    while index < len(rest):
+        token = rest[index]
+        if token == "--ip" and index + 1 < len(rest):
+            raw_ip = rest[index + 1]
+            index += 2
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        positional.append(token)
+        index += 1
+    address = _ipv4_address(raw_ip)
+    if address is None or len(positional) < 2:
+        return None
+    return _Attachment(positional[1], positional[0], address)
+
+
+def _topology(commands: list[str]) -> _Topology:
+    state = _Topology()
+    for command in commands:
+        created = _parse_network_create(command)
+        if created is not None:
+            state.networks[created.name] = created
+            continue
+        attached = _parse_run_attachment(command)
+        if attached is None:
+            attached = _parse_connect(command)
+        if attached is not None:
+            state.attachments.append(attached)
+    return state
+
+
 def _packet_path(
+    src: ipaddress.IPv4Address,
     dest: ipaddress.IPv4Address,
-    container_ips: set[ipaddress.IPv4Address],
+    topology: _Topology,
     host_addrs: set[ipaddress.IPv4Address],
 ) -> str:
-    """Container-to-container and routed egress use ``FORWARD``.
+    """Same-bridge traffic is switched and does not enter ``FORWARD``.
 
-    A destination on the host is delivered locally, so it uses ``INPUT``
-    and ``DOCKER-USER`` never sees it.
+    Docker 29 does not load br_netfilter, so ``DOCKER-USER`` never sees
+    two containers on one bridge. A destination on the host uses ``INPUT``.
+    A destination on a different bridge is isolated. Any other destination
+    is routed and uses ``FORWARD``.
     """
-    if dest in container_ips:
-        return "FORWARD"
     if dest in host_addrs:
         return "INPUT"
+    src_nets = topology.networks_of_address(src)
+    dest_nets = topology.networks_of_address(dest)
+    if src_nets and dest_nets and (src_nets & dest_nets):
+        return "BRIDGE"
+    if dest_nets:
+        return "UNREACHABLE"
     return "FORWARD"
 
 
+_PROXY_BLOCKED = (
+    "sentica-memory-api",
+    "sentica-memory-deriver",
+    "sentica-memory-migrate",
+    "sentica-memory-proxy",
+)
+
+_DB_BLOCKED = (
+    "sentica-memory-api",
+    "sentica-memory-deriver",
+    "sentica-memory-migrate",
+    "sentica-memory-gateway",
+    "sentica-memory-egress",
+)
+
+
+def _container_path(
+    topology: _Topology,
+    container: str,
+    dest: ipaddress.IPv4Address,
+    host_addrs: set[ipaddress.IPv4Address],
+) -> str:
+    """How ``container`` can reach ``dest``, from any of its addresses."""
+    addresses = topology.addresses_of(container)
+    if not addresses:
+        return "FORWARD"
+    paths = [_packet_path(src, dest, topology, host_addrs) for src in addresses]
+    if "BRIDGE" in paths:
+        return "BRIDGE"
+    if "FORWARD" in paths:
+        return "FORWARD"
+    if "INPUT" in paths:
+        return "INPUT"
+    return "UNREACHABLE"
+
+
+def _egress_topology_gaps(
+    topology: _Topology,
+    listen: ipaddress.IPv4Address,
+    host_addrs: set[ipaddress.IPv4Address],
+) -> list[str]:
+    """Who can open the proxy, from the bridges rather than iptables."""
+    gaps: list[str] = []
+    proxy_name = "sentica-memory-egress"
+    destinations = topology.addresses_of(proxy_name)
+    if listen not in destinations:
+        destinations = [listen, *destinations]
+    for name in _PROXY_BLOCKED:
+        path = "UNREACHABLE"
+        for dest in destinations:
+            candidate = _container_path(topology, name, dest, host_addrs)
+            if candidate == "BRIDGE":
+                path = "BRIDGE"
+                break
+            if candidate == "FORWARD":
+                path = "FORWARD"
+        if path == "BRIDGE":
+            gaps.append(
+                name
+                + " can open the egress proxy because same-bridge traffic"
+                + " is not forwarded"
+            )
+        elif path == "FORWARD":
+            gaps.append(name + " can route to the egress proxy")
+    gateway_path = _container_path(
+        topology, "sentica-memory-gateway", listen, host_addrs
+    )
+    if gateway_path != "BRIDGE":
+        gaps.append("gateway does not share a bridge with the egress proxy")
+    listen_nets = topology.networks_of_address(listen)
+    if not listen_nets:
+        gaps.append("egress proxy listen address is not on a bridge")
+        return gaps
+    for net_name in sorted(listen_nets):
+        net = topology.networks.get(net_name)
+        if net is None or not net.internal:
+            gaps.append("egress bridge is not internal")
+        members = topology.containers_on(net_name)
+        if members != {"sentica-memory-gateway", proxy_name}:
+            gaps.append("egress bridge is not limited to the gateway and the proxy")
+    wan = [
+        name
+        for name in topology.networks_of(proxy_name)
+        if name in topology.networks and not topology.networks[name].internal
+    ]
+    if not wan:
+        gaps.append("egress proxy has no path to the internet")
+    for name in wan:
+        if topology.containers_on(name) != {proxy_name}:
+            gaps.append(name + " is not limited to the egress proxy")
+    return gaps
+
+
 def provider_egress_gaps(deploy: str) -> list[str]:
-    """Hostname iptables destinations, and a proxy the firewall cannot see.
+    """Hostname iptables destinations, and a proxy other containers can open.
 
     ``iptables -d`` with a hostname resolves that name when the rule is
     inserted and keeps the address. Provider names belong on the egress
     proxy allowlist, which is checked on each connection. A proxy address
-    on the host is reached through ``INPUT``, so a ``DOCKER-USER`` allow
-    does not enforce which container may open it.
+    on the host is reached through ``INPUT``. A proxy on the same bridge
+    as another container is switched, so a ``DOCKER-USER`` rule does not
+    decide who may open it.
     """
     gaps: list[str] = []
     commands = _bash_commands(deploy)
@@ -635,7 +871,6 @@ def provider_egress_gaps(deploy: str) -> list[str]:
         gaps.append("egress proxy address is not documented")
         return gaps
     proxy = ipaddress.ip_address(matched.group(1))
-    port = int(matched.group(2))
     if not isinstance(proxy, ipaddress.IPv4Address):
         gaps.append("egress proxy address is not IPv4")
         return gaps
@@ -647,8 +882,9 @@ def provider_egress_gaps(deploy: str) -> list[str]:
     if egress is None:
         gaps.append("sentica-memory-egress has no --ip")
     host_addrs = _host_addresses(deploy, commands)
-    path = _packet_path(proxy, set(ips.values()), host_addrs)
-    if path == "INPUT":
+    topology = _topology(commands)
+    src = gateway if gateway is not None else proxy
+    if _packet_path(src, proxy, topology, host_addrs) == "INPUT":
         gaps.append(
             "egress proxy is on the host, so traffic uses INPUT and "
             + "DOCKER-USER does not apply"
@@ -659,14 +895,38 @@ def provider_egress_gaps(deploy: str) -> list[str]:
     if proxy != egress:
         gaps.append("egress proxy listen address is not the container address")
         return gaps
-    tables = _apply_tables(commands)
-    if _forward_verdict(tables, gateway, proxy, port) != "RETURN":
-        gaps.append("gateway to the egress proxy is not allowed")
-    for name, address in ips.items():
-        if name in {"sentica-memory-gateway", "sentica-memory-egress"}:
-            continue
-        if _forward_verdict(tables, address, proxy, port) != "DROP":
-            gaps.append(name + " can open the egress proxy")
+    gaps.extend(_egress_topology_gaps(topology, proxy, host_addrs))
+    return gaps
+
+
+def database_path_gaps(deploy: str) -> list[str]:
+    """The certificate proxy reaches Postgres on a shared internal bridge.
+
+    An iptables RETURN for port 5432 does not attach the proxy to that
+    bridge. Docker 29 would not apply it to same-bridge packets either.
+    """
+    commands = _bash_commands(deploy)
+    topology = _topology(commands)
+    gaps: list[str] = []
+    shared = topology.networks_of("sentica-memory-proxy") & topology.networks_of(
+        "sentica-memory-postgres"
+    )
+    if not shared:
+        gaps.append("certificate proxy does not share the database bridge")
+    for name in sorted(shared):
+        net = topology.networks.get(name)
+        if net is None or not net.internal:
+            gaps.append("database bridge is not internal")
+        members = topology.containers_on(name)
+        if members != {"sentica-memory-proxy", "sentica-memory-postgres"}:
+            gaps.append(name + " is not limited to the certificate proxy and postgres")
+    db_nets = topology.networks_of("sentica-memory-postgres")
+    for name in _DB_BLOCKED:
+        if topology.networks_of(name) & db_nets:
+            gaps.append(name + " shares the database bridge")
+    for command in commands:
+        if "--dport 5432" in command and "RETURN" in command:
+            gaps.append("postgres allow is an iptables rule on a bridged flow")
     return gaps
 
 
@@ -749,6 +1009,23 @@ def firewall_gaps(deploy: str) -> list[str]:
             gaps.append(raw_ip + " is outside the bridge subnet")
         if not any(address in network for network in drops):
             gaps.append(raw_ip + " is not covered by a DROP rule")
+    for attachment in _topology(commands).attachments:
+        if attachment.address in assigned:
+            continue
+        assigned.append(attachment.address)
+        net = None
+        for subnet, _gateway in subnets:
+            if attachment.address in subnet and (
+                net is None or subnet.prefixlen >= net.prefixlen
+            ):
+                net = subnet
+        created = _topology(commands).networks.get(attachment.network)
+        if created is not None and attachment.address not in created.subnet:
+            gaps.append(str(attachment.address) + " is outside " + attachment.network)
+        elif net is None:
+            gaps.append(str(attachment.address) + " is outside the bridge subnet")
+        if not any(attachment.address in network for network in drops):
+            gaps.append(str(attachment.address) + " is not covered by a DROP rule")
     for subnet, gateway in subnets:
         spare = _spare_address_gap(subnet, gateway, assigned)
         if spare is not None:
@@ -764,24 +1041,53 @@ def test_deploy_firewall_covers_every_container_ip() -> None:
 
     A substring check for ``-j DROP`` still passed when Docker assigned an
     address the rules do not name, and when the bridge included ``10.8.0.4``.
-    Docker 29 creates ``DOCKER-USER`` empty, so a packet that matches no
-    rule is forwarded. A proxy on a host address uses ``INPUT`` and those
-    rules never see it.
+    Docker 29 creates ``DOCKER-USER`` empty, so a routed packet that matches
+    no rule is forwarded. A proxy on a host address uses ``INPUT``. Two
+    containers on one bridge are switched, so a ``DROP`` between them does
+    not apply.
     """
     deploy = _text("docs/DEPLOY.md")
     commands = _bash_commands(deploy)
     assert firewall_gaps(deploy) == []
     assert docker_user_order_gaps(deploy) == []
     assert provider_egress_gaps(deploy) == []
+    assert database_path_gaps(deploy) == []
     assert idempotent_gaps(commands) == []
     sentica = [
         command for command in commands if command.startswith("iptables -A SENTICA ")
     ]
-    postgres = (
-        "iptables -A SENTICA -s 10.8.0.21/32 -d 10.8.0.6/32 "
-        + "-p tcp --dport 5432 -j RETURN"
+    routed = "iptables -A SENTICA -s 10.8.0.21/32 -j DROP"
+    assert sentica[7] == routed
+    assert not any("--dport 5432" in command for command in sentica)
+    assert not any("10.8.0.23" in command for command in sentica)
+    topology = _topology(commands)
+    assert (
+        _packet_path(
+            ipaddress.IPv4Address("10.8.0.34"),
+            ipaddress.IPv4Address("10.8.0.35"),
+            topology,
+            set(),
+        )
+        == "BRIDGE"
     )
-    assert sentica[7] == postgres
+    assert (
+        _packet_path(
+            ipaddress.IPv4Address("10.8.0.18"),
+            ipaddress.IPv4Address("10.8.0.35"),
+            topology,
+            set(),
+        )
+        == "UNREACHABLE"
+    )
+    assert (
+        _packet_path(
+            ipaddress.IPv4Address("10.8.0.18"),
+            ipaddress.IPv4Address("10.8.0.22"),
+            topology,
+            set(),
+        )
+        == "BRIDGE"
+    )
     hostname_rule = """```bash
 iptables -I DOCKER-USER 1 -s 10.8.0.14/32 -p tcp -d api.openai.com --dport 443 -j RETURN
 ```
@@ -841,6 +1147,40 @@ iptables -I DOCKER-USER 2 -s 10.8.0.22/32 -j DROP
 ```
 """
     assert any("INPUT" in item for item in provider_egress_gaps(old_host_proxy))
+    same_bridge = """The egress proxy listens on `10.8.0.23:8443`.
+```
+api.openai.com
+api.anthropic.com
+generativelanguage.googleapis.com
+```
+```bash
+docker network create --driver bridge --subnet 10.8.0.16/28 --gateway 10.8.0.17 sentica-instance
+docker run --name sentica-memory-api --network sentica-instance --ip 10.8.0.18 img
+docker run --name sentica-memory-deriver --network sentica-instance --ip 10.8.0.19 img
+docker run --name sentica-memory-migrate --network sentica-instance --ip 10.8.0.20 img
+docker run --name sentica-memory-proxy --network sentica-instance --ip 10.8.0.21 img
+docker run --name sentica-memory-gateway --network sentica-instance --ip 10.8.0.22 img
+docker run --name sentica-memory-egress --network sentica-instance --ip 10.8.0.23 img
+```
+```bash
+iptables -A SENTICA -s 10.8.0.22/32 -d 10.8.0.23/32 -p tcp --dport 8443 -j RETURN
+iptables -A SENTICA -s 10.8.0.18/32 -j DROP
+iptables -A SENTICA -s 10.8.0.19/32 -j DROP
+iptables -A SENTICA -s 10.8.0.20/32 -j DROP
+iptables -A SENTICA -s 10.8.0.21/32 -j DROP
+iptables -A SENTICA -s 10.8.0.22/32 -j DROP
+iptables -A SENTICA -s 10.8.0.23/32 -j DROP
+```
+"""
+    assert any("is not forwarded" in item for item in provider_egress_gaps(same_bridge))
+    ruled_only = """```bash
+docker network create --internal --subnet 10.8.0.64/28 --gateway 10.8.0.65 sentica-db
+docker run --name sentica-memory-proxy --network sentica-instance --ip 10.8.0.21 img
+docker network connect --ip 10.8.0.66 sentica-db sentica-memory-postgres
+iptables -A SENTICA -s 10.8.0.21/32 -d 10.8.0.6/32 -p tcp --dport 5432 -j RETURN
+```
+"""
+    assert any("database bridge" in item for item in database_path_gaps(ruled_only))
     repeated_insert = """```bash
 iptables -I DOCKER-USER 1 -s 10.8.0.10/32 -j DROP
 iptables -I DOCKER-USER 2 -s 10.8.0.11/32 -j DROP

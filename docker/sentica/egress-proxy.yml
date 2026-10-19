@@ -1,10 +1,11 @@
-# Egress proxy service. docs/DEPLOY.md starts the same image and config
-# on sentica-instance. This file joins an external bridge of that subnet
-# so a proof can supply its own network name.
+# Egress proxy service. docs/DEPLOY.md starts the same image and config.
+# sentica-egress is the internal bridge shared with the gateway.
+# sentica-wan is the proxy's path to the internet. A proof can supply its
+# own network names and addresses.
 
 services:
   egress:
-    image: ubuntu/squid:6.13-25.04_beta@sha256:3de2e64f0ca6efdac3e98557607dc0f23050037f3885016d5d5bfcf9950501b8
+    image: ubuntu/squid:6.6-24.04_edge@sha256:8a3baed477e2c282ab8aa5edad442f69873246964f225c5c2ae8364b6610963c
     read_only: true
     user: "13:13"
     cap_drop:
@@ -16,16 +17,21 @@ services:
     entrypoint: ["/usr/sbin/squid"]
     command: ["-f", "/etc/squid/squid.conf", "-NYC"]
     volumes:
-      - ./egress-proxy.conf:/etc/squid/squid.conf:ro
+      - ${SENTICA_EGRESS_CONF:-./egress-proxy.conf}:/etc/squid/squid.conf:ro
     tmpfs:
       - /var/spool/squid:rw,noexec,nosuid,size=16m,uid=13,gid=13
       - /var/log/squid:rw,noexec,nosuid,size=16m,uid=13,gid=13
       - /var/run/squid:rw,noexec,nosuid,size=4m,uid=13,gid=13
     networks:
-      instance:
-        ipv4_address: 10.8.0.23
+      egress:
+        ipv4_address: ${SENTICA_EGRESS_IP:-10.8.0.35}
+      wan:
+        ipv4_address: ${SENTICA_EGRESS_WAN_IP:-10.8.0.50}
 
 networks:
-  instance:
-    name: ${SENTICA_EGRESS_NETWORK:-sentica-instance}
+  egress:
+    name: ${SENTICA_EGRESS_NETWORK:-sentica-egress}
+    external: true
+  wan:
+    name: ${SENTICA_EGRESS_WAN_NETWORK:-sentica-wan}
     external: true
