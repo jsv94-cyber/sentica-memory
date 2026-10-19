@@ -461,8 +461,11 @@ Built:
 - A conclusion created by the broker stores the request's
   `source_trust`. Production refuses a missing label, as ingest does.
 - The default image pins `python:3.13-slim-bookworm`, `uv`, and
-  BuildKit by digest. `docs/RELEASE-v0.2.0-sentica.md` records the
-  built digest and the export command.
+  BuildKit by digest. Copied files are stamped to `SOURCE_DATE_EPOCH`
+  and the virtualenv is packed in sorted order, so a checkout time or
+  filesystem order cannot change the digest.
+  `docs/RELEASE-v0.2.0-sentica.md` records the built digest and the
+  export command.
 - CI job `build-default-image` checks out the head commit, sets
   `SOURCE_DATE_EPOCH` from the commit that last changed the
   Dockerfile, builds twice from a new builder, and fails unless both

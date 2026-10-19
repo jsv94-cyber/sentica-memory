@@ -42,11 +42,17 @@ The Dockerfile still has a default `SOURCE_DATE_EPOCH` of `1760832000`
 for a build that does not pass the argument. The recorded digest uses
 the commit timestamp from the command above. Tiktoken encodings are
 downloaded by URL during the build and checked against their SHA-256.
-Copied files use `COPY --chmod`, so the host umask cannot change a layer.
+Copied files are stamped to that timestamp in their own stage, and the
+virtualenv is packed with `tar --sort=name`, because BuildKit only
+clamps a timestamp newer than the epoch and a virtualenv layer
+otherwise follows filesystem order. Modes are normalized with
+`COPY --chmod` and `chmod` in the same step that creates the files.
+The `app` entry in `/etc/shadow` uses the epoch's day, not the build
+day.
 
 The image manifest digest is:
 
-`sha256:8f604726eddf4315f8f1ae19cb4ae10155b417cdbc09a7ca9e1994ea8ccd557f`
+`sha256:e076ae4f82c8bf19ec7bd0a0e9a8ae811c49fe8df66f6efd5af7804995d86804`
 
 ## Footprint
 

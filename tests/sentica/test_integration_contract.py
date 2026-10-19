@@ -78,7 +78,7 @@ def test_release_notes_pin_the_base_images() -> None:
     assert workflow.count(_BUILD) == 2
     assert "containerimage.digest" in workflow
     assert "image digest drift" in workflow
-    image = "sha256:8f604726eddf4315f8f1ae19cb4ae10155b417cdbc09a7ca9e1994ea8ccd557f"
+    image = "sha256:e076ae4f82c8bf19ec7bd0a0e9a8ae811c49fe8df66f6efd5af7804995d86804"
     assert image in notes
     assert re.search(r"sha256:[0-9a-f]{64}", notes)
 
