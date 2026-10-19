@@ -151,7 +151,8 @@ Create: `POST /v3/workspaces/{workspace_id}/conclusions`
 in this workspace. For the broker they are the same subject peer.
 `session_id` is optional and must already exist when set.
 `subject_ref` is optional. `source_trust` uses the same four values as
-ingest. A missing value is stored as `owner`. At most 100 conclusions.
+ingest. Production refuses a missing label, as ingest does. At most
+100 conclusions.
 A conclusion the safety filter drops is omitted from the response. An
 empty kept set returns `201` and `[]`.
 
@@ -209,8 +210,10 @@ vector route. Sentica uses search_memory for hybrid retrieval.
 
 `query` is required. Whitespace only is HTTP 422. `subject_ref`,
 `since`, and `workspaces` are optional. `top_k` defaults to 10 and is
-at most 50. Every name in `workspaces` must be in the token. The path
-workspace is always included. Each workspace is queried on its own.
+at most 50, and it applies per workspace. Every name in `workspaces`
+must be in the token. A name outside the token is refused before the
+query is embedded. The path workspace is always included. Each
+workspace is queried on its own.
 
 Response `200`, an array of conclusion objects in the shape above.
 Keyword matches and vector neighbors within cosine distance 0.65 are
@@ -473,6 +476,6 @@ every conclusion. A conclusion stores the `source_trust` that was sent.
    iptables rules need addresses. The `10.8.0.8/29` plan has no spare
    address. Both are deploy follow-ups, not part of this contract's
    request shapes.
-7. A conclusion with no `source_trust` is stored as `owner`, including
-   in production. The runtime-role proof creates one without the field.
-   Ingest still refuses a missing label.
+7. Production refuses a conclusion with no `source_trust`, as ingest
+   does. The runtime-role proof sends the label on every conclusion
+   body.

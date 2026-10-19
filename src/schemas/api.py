@@ -764,7 +764,7 @@ class MemorySearchRequest(BaseModel):
         default=10,
         ge=1,
         le=50,
-        description="How many conclusions to return.",
+        description="How many conclusions to return from each workspace.",
     )
     workspaces: list[str] | None = Field(
         default=None,
@@ -796,7 +796,10 @@ class BriefRequest(BaseModel):
         default=10,
         ge=1,
         le=50,
-        description="How many conclusions to consider before the token budget.",
+        description=(
+            "How many conclusions to consider from each workspace "
+            + "before the token budget."
+        ),
     )
     workspaces: list[str] | None = Field(
         default=None,

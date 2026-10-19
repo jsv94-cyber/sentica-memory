@@ -1233,12 +1233,13 @@ async def delete_document_by_id(
 
 
 def conclusion_trust(value: str | None) -> str:
-    """The label to store. A missing label is owner.
+    """The label to store. Production refuses a missing label."""
+    from src.exceptions import ValidationException
+    from src.sentica.runtime import production_enabled
 
-    Messages refuse a missing label in production. Conclusions do not.
-    The runtime-role proof creates a conclusion without the field.
-    """
     if value is None:
+        if production_enabled():
+            raise ValidationException("source_trust is required")
         return "owner"
     return value
 
@@ -1326,7 +1327,7 @@ async def create_observations(
             db, workspace_name, observer=observer, observed=observed
         )
 
-    # Resolve the label before any embedding call.
+    # Refuse a missing label before any embedding call.
     for obs in observations:
         conclusion_trust(obs.source_trust)
 

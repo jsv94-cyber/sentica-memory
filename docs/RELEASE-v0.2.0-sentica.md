@@ -14,31 +14,35 @@ degrade when memory is down. Writes stay in the broker's durable queue.
 `POST /v3/workspaces/{workspace_id}/peers/{peer_id}/search_memory` is
 the hybrid search the brief already used. Conclusion responses include
 `workspace_id`. A broker-created conclusion stores the `source_trust`
-on the request. A missing label is stored as `owner`. Ingest still
-refuses a missing label in production.
+on the request. Production refuses a missing label, as ingest does.
 
 ## Image
 
-The default image is `docker build .`. Base images are pinned:
+The image manifest digest below is `containerimage.digest` from this
+export. `SOURCE_DATE_EPOCH` is the commit timestamp. CI runs the export
+twice, each time from a new BuildKit builder, and fails unless both
+digests equal the recorded value.
+
+```
+SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)
+docker buildx create --name repro --driver docker-container --driver-opt image=moby/buildkit@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea --use
+docker buildx build --build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" --provenance=false --sbom=false --no-cache --metadata-file image-metadata.json -o type=docker,dest=image.tar,rewrite-timestamp=true .
+```
+
+Base images are pinned:
 
 - `python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641`
 - `ghcr.io/astral-sh/uv:0.9.24@sha256:816fdce3387ed2142e37d2e56e1b1b97ccc1ea87731ba199dc8a25c04e4997c5`
 
-`SOURCE_DATE_EPOCH` defaults to `1760832000` in the Dockerfile. Layer
-clocks follow that epoch when the export rewrites timestamps. The
-command is:
+The Dockerfile still has a default `SOURCE_DATE_EPOCH` of `1760832000`
+for a build that does not pass the argument. The recorded digest uses
+the commit timestamp from the command above. Tiktoken encodings are
+downloaded by URL during the build and checked against their SHA-256.
+Copied files use `COPY --chmod`, so the host umask cannot change a layer.
 
-```
-docker build --provenance=false --sbom=false -o type=docker,dest=image.tar,rewrite-timestamp=true .
-```
+The image manifest digest is:
 
-That export needs a Buildx driver other than the default `docker`
-driver. The hosted runner refuses it. CI creates a `docker-container`
-builder, then runs `docker buildx build` with the same flags. A second
-build with `--no-cache` wrote the same manifest and the same layer
-blobs. The image manifest digest is:
-
-`sha256:35a6bf1f11b39428d31a9e06b81dc0279ab7ce1d5180879690e28fc59db7f055`
+`sha256:8f604726eddf4315f8f1ae19cb4ae10155b417cdbc09a7ca9e1994ea8ccd557f`
 
 ## Footprint
 

@@ -459,14 +459,13 @@ Built:
   in that response, and in the conclusion routes, carries
   `workspace_id`.
 - A conclusion created by the broker stores the request's
-  `source_trust`. A missing label is stored as `owner`. The
-  runtime-role proof creates a conclusion without the field. Ingest
-  still refuses a missing label in production.
-- The default image pins `python:3.13-slim-bookworm` and `uv` by
-  digest. `docs/RELEASE-v0.2.0-sentica.md` records the built digest.
-- CI job `build-default-image` creates a docker-container builder
-  before the tar export. The runner's default driver refused that
-  exporter.
+  `source_trust`. Production refuses a missing label, as ingest does.
+- The default image pins `python:3.13-slim-bookworm`, `uv`, and
+  BuildKit by digest. `docs/RELEASE-v0.2.0-sentica.md` records the
+  built digest and the export command.
+- CI job `build-default-image` sets `SOURCE_DATE_EPOCH` from the
+  commit, builds twice from a new builder, and fails unless both
+  digests equal the recorded value.
 - The footprint table in `docs/INTEGRATION.md` is a throwaway stack on
   this host. Jose's Redis on port 6379 was not used.
 
@@ -476,8 +475,9 @@ Decisions:
   partition the token allows. Adding those columns, the Restricted
   upgrade classifier, and idempotency keys is listed for Jose in
   `docs/INTEGRATION.md`.
-- The runtime-role pin stays 94. No `tests/sentica/test_m2_*` file,
-  `tests/sentica/rls_job.py`, or the `test-m2-rls` job changed.
+- The runtime-role pin stays 94. `tests/sentica/test_m2_data.py`
+  adds `source_trust` on the conclusion bodies the proof creates.
+  `tests/sentica/rls_job.py` and the `test-m2-rls` job are unchanged.
 
 Test counts, on this host, against throwaway Postgres on port 5441 and Redis on port 6391:
 

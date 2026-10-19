@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from time import perf_counter
 from typing import Any, cast
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -520,3 +521,60 @@ async def test_search_memory_returns_the_keyword_hit_with_its_workspace(
     ).one()
     await db_session.refresh(stored)
     assert stored.retrieved_count == 1
+
+
+async def test_search_memory_refuses_a_workspace_before_embedding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.exceptions import AuthenticationException
+    from src.routers.peers import search_peer_memory
+    from src.security import JWTParams
+
+    monkeypatch.setattr("src.sentica.runtime.production_enabled", lambda: True)
+    calls: list[str] = []
+
+    async def embed(query: str) -> list[float]:
+        calls.append(query)
+        return _vector(0)
+
+    monkeypatch.setattr("src.routers.peers.embedding_client.embed", embed)
+    with pytest.raises(AuthenticationException, match="outside the token"):
+        await search_peer_memory(
+            workspace_id="general",
+            peer_id="p1",
+            body=schemas.MemorySearchRequest(
+                query="window seat",
+                workspaces=["other"],
+            ),
+            jwt_params=JWTParams(w="general", workspaces=["general"]),
+        )
+    assert calls == []
+
+
+async def test_brief_refuses_a_workspace_before_embedding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.exceptions import AuthenticationException
+    from src.routers.peers import get_peer_brief
+    from src.security import JWTParams
+
+    monkeypatch.setattr("src.sentica.runtime.production_enabled", lambda: True)
+    calls: list[str] = []
+
+    async def embed(query: str) -> list[float]:
+        calls.append(query)
+        return _vector(0)
+
+    monkeypatch.setattr("src.routers.peers.embedding_client.embed", embed)
+    with pytest.raises(AuthenticationException, match="outside the token"):
+        await get_peer_brief(
+            workspace_id="general",
+            peer_id="p1",
+            body=schemas.BriefRequest(
+                token_budget=400,
+                query="window seat",
+                workspaces=["other"],
+            ),
+            jwt_params=JWTParams(w="general", workspaces=["general"]),
+        )
+    assert calls == []

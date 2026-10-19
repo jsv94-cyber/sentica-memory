@@ -5172,7 +5172,7 @@
             "maximum": 50.0,
             "minimum": 1.0,
             "title": "Top K",
-            "description": "How many conclusions to consider before the token budget.",
+            "description": "How many conclusions to consider from each workspace before the token budget.",
             "default": 10
           },
           "workspaces": {
@@ -6397,7 +6397,7 @@
             "maximum": 50.0,
             "minimum": 1.0,
             "title": "Top K",
-            "description": "How many conclusions to return.",
+            "description": "How many conclusions to return from each workspace.",
             "default": 10
           },
           "workspaces": {

@@ -23,8 +23,9 @@ ENV UV_LINK_MODE=copy
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
-# Copy only requirements to cache them in docker layer
-COPY uv.lock pyproject.toml /app/
+# Copy only requirements to cache them in docker layer.
+# --chmod fixes the mode so the host umask cannot change the layer.
+COPY --chmod=644 uv.lock pyproject.toml /app/
 
 # Optionall include lancedb with:
 #   docker build --build-arg INSTALL_LANCEDB=true .
@@ -75,16 +76,17 @@ COPY --from=builder --chown=${SENTICA_UID}:${SENTICA_GID} /app/.venv /app/.venv
 ENV PATH="/app/.venv/bin:$PATH"
 ENV HOME=/app
 
-COPY --chown=${SENTICA_UID}:${SENTICA_GID} src/ /app/src/
-COPY --chown=${SENTICA_UID}:${SENTICA_GID} migrations/ /app/migrations/
-COPY --chown=${SENTICA_UID}:${SENTICA_GID} scripts/ /app/scripts/
-COPY --chown=${SENTICA_UID}:${SENTICA_GID} docker/ /app/docker/
-COPY --chown=${SENTICA_UID}:${SENTICA_GID} alembic.ini /app/alembic.ini
+# --chmod fixes the mode so the host umask cannot change the layer.
+COPY --chown=${SENTICA_UID}:${SENTICA_GID} --chmod=755 src/ /app/src/
+COPY --chown=${SENTICA_UID}:${SENTICA_GID} --chmod=755 migrations/ /app/migrations/
+COPY --chown=${SENTICA_UID}:${SENTICA_GID} --chmod=755 scripts/ /app/scripts/
+COPY --chown=${SENTICA_UID}:${SENTICA_GID} --chmod=755 docker/ /app/docker/
+COPY --chown=${SENTICA_UID}:${SENTICA_GID} --chmod=644 alembic.ini /app/alembic.ini
 # src/_version.py reads the service version from here at runtime, so this
 # is a runtime input as well as a build input.
-COPY --chown=${SENTICA_UID}:${SENTICA_GID} pyproject.toml /app/pyproject.toml
+COPY --chown=${SENTICA_UID}:${SENTICA_GID} --chmod=644 pyproject.toml /app/pyproject.toml
 # Copy config files - this will copy config.toml if it exists, and config.toml.example
-COPY --chown=${SENTICA_UID}:${SENTICA_GID} config.toml* /app/
+COPY --chown=${SENTICA_UID}:${SENTICA_GID} --chmod=644 config.toml* /app/
 
 # The default image is a production image. A test-stack build can opt out.
 # The eval harness and its seeded fixture text are not part of the image.
@@ -98,14 +100,51 @@ RUN rm -f /app/src/sentica/eval_harness.py \
         printf '%s\n' production > /app/.sentica-production-image; \
     fi \
     && chown "${SENTICA_UID}:${SENTICA_GID}" /app/.sentica-production-image 2>/dev/null || true \
+    && find /app/src /app/migrations /app/scripts /app/docker -type d -exec chmod 755 {} + \
+    && find /app/src /app/migrations /app/scripts /app/docker -type f -exec chmod 644 {} + \
     && chmod 755 /app/docker/entrypoint.sh /app/docker/migrate-entrypoint.sh \
-    && chmod 755 /app/docker/sentica/postgres-entry.sh /app/docker/sentica/20-passwords.sh
+        /app/docker/sentica/postgres-entry.sh /app/docker/sentica/20-passwords.sh \
+    && chmod 644 /app/alembic.ini /app/pyproject.toml \
+    && for cfg in /app/config.toml /app/config.toml.example; do \
+        if [ -f "$cfg" ]; then chmod 644 "$cfg"; fi; \
+    done
 
 # The instance networks have no route to the public internet. tiktoken would
-# otherwise download o200k_base the first time the API imports it.
+# otherwise download these encodings the first time the API imports them.
+# The URLs and SHA-256 values are the ones tiktoken checks.
 ENV TIKTOKEN_CACHE_DIR=/app/tiktoken-cache
-RUN mkdir -p /app/tiktoken-cache \
-    && python -c 'import tiktoken; tiktoken.get_encoding("o200k_base"); tiktoken.get_encoding("cl100k_base")' \
+RUN python - <<'PY'
+import hashlib
+import urllib.request
+from pathlib import Path
+
+import tiktoken
+
+files = {
+    "https://openaipublic.blob.core.windows.net/encodings/o200k_base.tiktoken":
+        "446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d",
+    "https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken":
+        "223921b76ee99bde995b7ff738513eef100fb51d18c93597a113bcffe865b2a7",
+}
+cache = Path("/app/tiktoken-cache")
+cache.mkdir(parents=True, exist_ok=True)
+for url, expected in files.items():
+    data = urllib.request.urlopen(url, timeout=60).read()
+    actual = hashlib.sha256(data).hexdigest()
+    if actual != expected:
+        raise SystemExit("tiktoken hash mismatch for " + url)
+    (cache / hashlib.sha1(url.encode()).hexdigest()).write_bytes(data)
+names = sorted(path.name for path in cache.iterdir())
+if len(names) != len(files):
+    raise SystemExit("tiktoken cache file count")
+tiktoken.get_encoding("o200k_base")
+tiktoken.get_encoding("cl100k_base")
+if sorted(path.name for path in cache.iterdir()) != names:
+    raise SystemExit("tiktoken cache changed while loading")
+PY
+RUN chmod 755 /app/tiktoken-cache \
+    && chmod 644 /app/tiktoken-cache/* \
+    && touch -d "@${SOURCE_DATE_EPOCH}" /app/tiktoken-cache /app/tiktoken-cache/* \
     && chown -R "${SENTICA_UID}:${SENTICA_GID}" /app/tiktoken-cache
 
 USER ${SENTICA_UID}:${SENTICA_GID}

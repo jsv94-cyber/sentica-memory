@@ -96,7 +96,7 @@ release v3.3.0 (`608aec8a928da13c540262ed980c569448fb53ab`).
 | `src/sentica/retrieval.py` | `prepare_search` counts the conclusions that search returned. | M-INT |
 | `src/schemas/api.py` | Conclusion responses include `workspace_id`. Create accepts `source_trust`. | M-INT |
 | `src/schemas/__init__.py` | Exports `MemorySearchRequest`. | M-INT |
-| `src/crud/document.py` | A missing conclusion `source_trust` is stored as owner. The label that was sent is stored. | M-INT |
+| `src/crud/document.py` | Production refuses a missing conclusion `source_trust`. The label that was sent is stored. | M-INT |
 | `docs/INTEGRATION.md` | Broker contract: routes, tokens, placement, footprint, failure modes. | M-INT |
 | `docs/RELEASE-v0.2.0-sentica.md` | Release notes for `v0.2.0-sentica`. | M-INT |
 | `Dockerfile` | Base image and uv are pinned by digest. `SOURCE_DATE_EPOCH` has a default. | M-INT |
@@ -104,5 +104,5 @@ release v3.3.0 (`608aec8a928da13c540262ed980c569448fb53ab`).
 | `tests/sentica/test_m1_stack.py` | Signed-token exercise of every contract route. | M-INT |
 | `tests/sentica/test_m6_retrieval.py` | search_memory returns the keyword hit and its workspace. | M-INT |
 | `tests/routes/test_scope_route_policy.py` | A scope in the search_memory peer position is refused. | M-INT |
-| `.github/workflows/unittest.yml` | The default image build rewrites timestamps and turns provenance off. CI uses a docker-container builder because the runner's docker driver refuses the tar export. | M-INT |
+| `.github/workflows/unittest.yml` | The default image build pins BuildKit by digest, sets `SOURCE_DATE_EPOCH` from the commit, and fails unless two clean builds match the recorded digest. | M-INT |
 
