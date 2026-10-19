@@ -7,6 +7,7 @@ import os
 import random
 import re
 import secrets
+import shutil
 import socket
 import subprocess
 import tempfile
@@ -500,8 +501,9 @@ def _host_iptables(env: dict[str, str], *args: str) -> subprocess.CompletedProce
 
 
 def _clear_chain(env: dict[str, str], chain: str) -> None:
-    for name in (chain, chain + "_NEW"):
-        _host_iptables(env, "-D", "DOCKER-USER", "-j", name)
+    for name in (chain, chain + "_NEW", chain + "_KEEP", chain + "_OLD"):
+        while _host_iptables(env, "-D", "DOCKER-USER", "-j", name).returncode == 0:
+            continue
         _host_iptables(env, "-F", name)
         _host_iptables(env, "-X", name)
 
@@ -545,6 +547,272 @@ def _apply_firewall_script(
     finally:
         os.unlink(path)
     assert completed.returncode == 0, completed.stderr
+
+
+_IPTABLES_WRAPPER = """#!/bin/sh
+real=/usr/sbin/iptables
+trace=${SNT_TRACE:?}
+miss=${SNT_MISS:?}
+work=${SNT_WORK:?}
+
+chain_drops() {
+  chain=$1
+  addr=$2
+  file=$work/rules-$chain
+  "$real" -S "$chain" >"$file" 2>/dev/null || return 1
+  while IFS= read -r line; do
+    case $line in
+      "-A $chain -j RETURN"|"-A $chain -j ACCEPT")
+        return 1
+        ;;
+      "-A $chain -s $addr/32 -j DROP")
+        return 0
+        ;;
+      "-A $chain -s $addr/32 -j RETURN"|"-A $chain -s $addr/32 -j ACCEPT")
+        return 1
+        ;;
+      "-A $chain -j "*)
+        target=${line##* }
+        if chain_drops "$target" "$addr"; then
+          return 0
+        fi
+        ;;
+    esac
+  done <"$file"
+  return 1
+}
+
+reaches() {
+  addr=$1
+  file=$work/docker-user
+  "$real" -S DOCKER-USER >"$file" 2>/dev/null || return 1
+  while IFS= read -r line; do
+    case $line in
+      "-A DOCKER-USER -j RETURN"|"-A DOCKER-USER -j ACCEPT")
+        return 1
+        ;;
+      "-A DOCKER-USER -s $addr/32 -j DROP")
+        return 0
+        ;;
+      "-A DOCKER-USER -j "*)
+        target=${line##* }
+        if chain_drops "$target" "$addr"; then
+          return 0
+        fi
+        ;;
+    esac
+  done <"$file"
+  return 1
+}
+
+"$real" "$@"
+rc=$?
+printf '%s %s\\n' "$rc" "$*" >>"$trace"
+if ! reaches 10.8.0.18 || ! reaches 10.8.0.67; then
+  {
+    echo "MISS rc=$rc iptables $*"
+    "$real" -S
+  } >>"$miss"
+  exit 99
+fi
+exit "$rc"
+"""
+
+_FIREWALL_NETNS_RUNNER = """#!/bin/sh
+set -eu
+umask 022
+real=/usr/sbin/iptables
+export PATH="$SNT_BIN:$PATH"
+: >"$SNT_TRACE"
+: >"$SNT_MISS"
+
+"$real" -N DOCKER-USER 2>/dev/null || true
+
+reset_chains() {
+  for name in SENTICA SENTICA_NEW SENTICA_KEEP SENTICA_OLD; do
+    while "$real" -D DOCKER-USER -j "$name" 2>/dev/null; do :; done
+    "$real" -F "$name" 2>/dev/null || true
+    "$real" -X "$name" 2>/dev/null || true
+  done
+  "$real" -F DOCKER-USER
+}
+
+drop_chain() {
+  "$real" -N "$1"
+  "$real" -A "$1" -s 10.8.0.18/32 -j DROP
+  "$real" -A "$1" -s 10.8.0.67/32 -j DROP
+}
+
+run_script() {
+  set +e
+  sh "$SNT_SCRIPT"
+  rc=$?
+  set -e
+  if [ -s "$SNT_MISS" ] || [ "$rc" -ne 0 ]; then
+    echo "script rc=$rc" >&2
+    cat "$SNT_MISS" >&2
+    exit 99
+  fi
+}
+
+reset_chains
+drop_chain SENTICA
+"$real" -A DOCKER-USER -j SENTICA
+"$real" -A DOCKER-USER -j SENTICA
+drop_chain SENTICA_NEW
+"$real" -A DOCKER-USER -j SENTICA_NEW
+run_script
+run_script
+
+reset_chains
+"$real" -N SENTICA
+"$real" -A DOCKER-USER -j SENTICA
+drop_chain SENTICA_NEW
+"$real" -I DOCKER-USER 1 -j SENTICA_NEW
+run_script
+
+reset_chains
+drop_chain SENTICA_NEW
+"$real" -A DOCKER-USER -j SENTICA_NEW
+run_script
+
+echo "checks=$(wc -l < "$SNT_TRACE" | tr -d ' ')"
+deleted_ok=$(grep -c '^0 -D DOCKER-USER -j SENTICA$' "$SNT_TRACE" || true)
+deleted_miss=$(grep -c '^1 -D DOCKER-USER -j SENTICA$' "$SNT_TRACE" || true)
+echo "deleted_ok=$deleted_ok"
+echo "deleted_miss=$deleted_miss"
+echo RULES
+"$real" -S
+"""
+
+
+def test_firewall_swap_keeps_a_drop_after_every_command() -> None:
+    """Duplicate and leftover jumps never leave a step that does not drop.
+
+    The check runs after every iptables command, in a private network
+    namespace, for two runs from a duplicate jump plus a leftover chain.
+    A later run starts from an empty referenced chain, and one starts
+    from SENTICA_NEW alone.
+    """
+    env = os.environ.copy()
+    name = "snt-ns-" + str(os.getpid())
+    work = Path(tempfile.mkdtemp(prefix="snt-fw-"))
+    bindir = work / "bin"
+    bindir.mkdir()
+    wrapper = bindir / "iptables"
+    wrapper.write_text(_IPTABLES_WRAPPER, encoding="utf-8")
+    wrapper.chmod(0o755)
+    script = work / "sentica-firewall.sh"
+    script.write_text(
+        _text("docker/sentica/sentica-firewall.sh"),
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    runner = work / "runner.sh"
+    runner.write_text(_FIREWALL_NETNS_RUNNER, encoding="utf-8")
+    runner.chmod(0o755)
+    started = _run(
+        [
+            "docker",
+            "run",
+            "-d",
+            "--name",
+            name,
+            "--network",
+            "bridge",
+            _BUSYBOX,
+            "sleep",
+            "300",
+        ],
+        env,
+        check=False,
+    )
+    try:
+        assert started.returncode == 0, started.stderr
+        inspected = _run(
+            ["docker", "inspect", "-f", "{{.State.Pid}}", name],
+            env,
+            check=False,
+        )
+        assert inspected.returncode == 0, inspected.stderr
+        pid = inspected.stdout.strip()
+        assert pid not in {"", "0"}
+        completed = _run(
+            [
+                "docker",
+                "run",
+                "--rm",
+                "--privileged",
+                "--pid=host",
+                "-e",
+                "SNT_BIN=" + str(bindir),
+                "-e",
+                "SNT_TRACE=" + str(work / "trace"),
+                "-e",
+                "SNT_MISS=" + str(work / "miss"),
+                "-e",
+                "SNT_WORK=" + str(work),
+                "-e",
+                "SNT_SCRIPT=" + str(script),
+                _BUSYBOX,
+                "nsenter",
+                "-t",
+                "1",
+                "-m",
+                "--",
+                "nsenter",
+                "-t",
+                pid,
+                "-n",
+                "--",
+                "sh",
+                str(runner),
+            ],
+            env,
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stderr + completed.stdout
+        report, rules = completed.stdout.split("RULES", 1)
+        counts = {}
+        for line in report.splitlines():
+            if "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            counts[key] = int(value)
+        assert counts["checks"] >= 80
+        assert counts["deleted_ok"] >= 2
+        assert counts["deleted_miss"] >= 1
+        jumps = [
+            line for line in rules.splitlines() if line.startswith("-A DOCKER-USER -j ")
+        ]
+        assert jumps == ["-A DOCKER-USER -j SENTICA"]
+        assert "-A SENTICA -s 10.8.0.18/32 -j DROP" in rules
+        assert "-A SENTICA -s 10.8.0.67/32 -j DROP" in rules
+        assert "SENTICA_NEW" not in rules
+        assert "SENTICA_KEEP" not in rules
+        assert "SENTICA_OLD" not in rules
+    finally:
+        _run(["docker", "rm", "-f", name], env, check=False)
+        if work.exists():
+            _run(
+                [
+                    "docker",
+                    "run",
+                    "--rm",
+                    "--user",
+                    "root",
+                    "-v",
+                    str(work) + ":/work",
+                    "--entrypoint",
+                    "sh",
+                    _BUSYBOX,
+                    "-c",
+                    "rm -rf /work",
+                ],
+                env,
+                check=False,
+            )
+        shutil.rmtree(work, ignore_errors=True)
 
 
 def _packet_count(text: str, source: str, target: str, extra: str = "") -> int:

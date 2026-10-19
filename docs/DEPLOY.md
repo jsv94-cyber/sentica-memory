@@ -492,20 +492,38 @@ structural.
   host is open to every container.
 
   The rules below apply to routed packets. They do not separate
-  containers that share a bridge. The block builds `SENTICA_NEW` and
-  appends every rule, then inserts the jump from `DOCKER-USER`. It
-  removes the previous `SENTICA` chain only after that jump is in place,
-  and renames `SENTICA_NEW` to `SENTICA`. A restart never forwards
-  without drops. Running the block again leaves the same rules.
+  containers that share a bridge. The block parks a leftover
+  `SENTICA_NEW` by renaming it, so that jump keeps dropping, then builds
+  a replacement and inserts it at the head of `DOCKER-USER`. It deletes
+  every previous `SENTICA` jump, including a duplicate, and flushes the
+  old chain only after `DOCKER-USER` no longer jumps to it. A restart
+  never forwards without drops. Running the block again leaves the same
+  rules.
   Established replies return. The egress proxy's `sentica-wan` address
   may resolve names at `1.1.1.1` and may open TCP 443. Every container
   address is then dropped, so a routed packet from an address Docker
   assigned cannot leave the host.
 
 ```bash
-iptables -D DOCKER-USER -j SENTICA_NEW 2>/dev/null || true
-iptables -F SENTICA_NEW 2>/dev/null || true
-iptables -X SENTICA_NEW 2>/dev/null || true
+if iptables -L SENTICA_KEEP -n >/dev/null 2>&1; then
+  if ! iptables -C DOCKER-USER -j SENTICA_KEEP >/dev/null 2>&1; then
+    iptables -F SENTICA_KEEP
+    iptables -X SENTICA_KEEP
+  fi
+fi
+if iptables -L SENTICA_OLD -n >/dev/null 2>&1; then
+  if ! iptables -C DOCKER-USER -j SENTICA_OLD >/dev/null 2>&1; then
+    iptables -F SENTICA_OLD
+    iptables -X SENTICA_OLD
+  fi
+fi
+if iptables -L SENTICA_NEW -n >/dev/null 2>&1; then
+  if iptables -L SENTICA_KEEP -n >/dev/null 2>&1; then
+    iptables -E SENTICA_NEW SENTICA_OLD
+  else
+    iptables -E SENTICA_NEW SENTICA_KEEP
+  fi
+fi
 iptables -N SENTICA_NEW
 iptables -A SENTICA_NEW -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
 iptables -A SENTICA_NEW -s 10.8.0.50/32 -d 1.1.1.1/32 -p udp --dport 53 -j RETURN
@@ -525,9 +543,15 @@ iptables -A SENTICA_NEW -s 10.8.0.50/32 -j DROP
 iptables -A SENTICA_NEW -s 10.8.0.66/32 -j DROP
 iptables -A SENTICA_NEW -s 10.8.0.67/32 -j DROP
 iptables -I DOCKER-USER 1 -j SENTICA_NEW
-iptables -D DOCKER-USER -j SENTICA 2>/dev/null || true
+while iptables -D DOCKER-USER -j SENTICA 2>/dev/null; do :; done
+while iptables -D DOCKER-USER -j SENTICA_KEEP 2>/dev/null; do :; done
+while iptables -D DOCKER-USER -j SENTICA_OLD 2>/dev/null; do :; done
 iptables -F SENTICA 2>/dev/null || true
 iptables -X SENTICA 2>/dev/null || true
+iptables -F SENTICA_KEEP 2>/dev/null || true
+iptables -X SENTICA_KEEP 2>/dev/null || true
+iptables -F SENTICA_OLD 2>/dev/null || true
+iptables -X SENTICA_OLD 2>/dev/null || true
 iptables -E SENTICA_NEW SENTICA
 ```
 
@@ -542,7 +566,7 @@ restores rules before that chain exists, so the jump does not come back.
 `docker/sentica/sentica-firewall.sh` is this block.
 `docker/sentica/sentica-firewall.service` runs it `After=docker.service`.
 Enable the unit. A second start builds a new chain and swaps the jump.
-The live chain is removed only after that jump is in place, so a restart
+Every old jump is removed before the old chain is flushed, so a restart
 never forwards without drops.
 
 ```bash

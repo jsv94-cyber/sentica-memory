@@ -450,7 +450,22 @@ def _apply_iptables(tables: _Tables, command: str) -> bool:
     return True
 
 
+_WHILE_DELETE = re.compile(
+    r"^while iptables -D (\S+) -j (\S+) 2>/dev/null; do :; done$"
+)
+
+
 def _apply_line(tables: _Tables, command: str) -> None:
+    """Apply one guide line. A while-delete removes every matching jump."""
+    matched = _WHILE_DELETE.fullmatch(command.strip())
+    if matched is not None:
+        chain, target = matched.group(1), matched.group(2)
+        rules = tables.named(chain)
+        jump = _rule_from_rest(["-j", target])
+        if rules is None or jump is None:
+            return
+        rules[:] = [item for item in rules if item != jump]
+        return
     parts = _iptables_parts(command)
     if not parts:
         return
@@ -1468,27 +1483,52 @@ def _firewall_rule_index(guide: list[str], prefix: str) -> int:
     return next(index for index, line in enumerate(guide) if line.startswith(prefix))
 
 
+def _firewall_unit_lines(text: str) -> list[str]:
+    """iptables commands and the while-delete loops around them."""
+    lines: list[str] = []
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if stripped.startswith("iptables ") or stripped.startswith("while iptables "):
+            lines.append(stripped)
+    return lines
+
+
+def _assert_firewall_swap_order(lines: list[str]) -> None:
+    """The old jump is gone before the old chain is flushed."""
+    created = _firewall_rule_index(lines, "iptables -N SENTICA_NEW")
+    filled = _firewall_rule_index(lines, "iptables -A SENTICA_NEW ")
+    inserted = _firewall_rule_index(lines, "iptables -I DOCKER-USER 1 -j SENTICA_NEW")
+    old_jump_removed = next(
+        index
+        for index, line in enumerate(lines)
+        if re.search(r"iptables -D DOCKER-USER -j SENTICA( |$)", line)
+    )
+    flushed = next(
+        index
+        for index, line in enumerate(lines)
+        if line.split()[:3] == ["iptables", "-F", "SENTICA"]
+    )
+    renamed = next(
+        index
+        for index, line in enumerate(lines)
+        if line.split()[:4] == ["iptables", "-E", "SENTICA_NEW", "SENTICA"]
+    )
+    assert created < filled < inserted < old_jump_removed < flushed < renamed
+    for line in lines[:inserted]:
+        assert line.split()[1:3] != ["-F", "SENTICA"]
+
+
 def test_firewall_script_matches_the_guide() -> None:
     """The unit runs the same rules the guide shows, after Docker."""
     guide = [
         command
         for command in _bash_commands(_text("docs/DEPLOY.md"))
-        if command.startswith("iptables ")
+        if command.startswith("iptables ") or command.startswith("while iptables ")
     ]
-    script_lines = [
-        line.strip()
-        for line in _text("docker/sentica/sentica-firewall.sh").splitlines()
-        if line.strip().startswith("iptables ")
-    ]
+    script_lines = _firewall_unit_lines(_text("docker/sentica/sentica-firewall.sh"))
     assert script_lines == guide
-    created = _firewall_rule_index(guide, "iptables -N SENTICA_NEW")
-    filled = _firewall_rule_index(guide, "iptables -A SENTICA_NEW ")
-    inserted = _firewall_rule_index(guide, "iptables -I DOCKER-USER 1 -j SENTICA_NEW")
-    flushed = _firewall_rule_index(guide, "iptables -F SENTICA ")
-    renamed = _firewall_rule_index(guide, "iptables -E SENTICA_NEW SENTICA")
-    assert created < filled < inserted < flushed < renamed
-    for line in guide[:inserted]:
-        assert line.split()[1:3] != ["-F", "SENTICA"]
+    _assert_firewall_swap_order(script_lines)
+    _assert_firewall_swap_order(guide)
     unit = _text("docker/sentica/sentica-firewall.service")
     assert "After=docker.service" in unit
     assert "Requires=docker.service" in unit
@@ -1501,7 +1541,119 @@ def test_firewall_script_matches_the_guide() -> None:
     assert "never forwards without drops" in deploy
 
 
+def _jump(target: str) -> _FirewallRule:
+    parsed = _rule_from_rest(["-j", target])
+    assert parsed is not None
+    return parsed
+
+
+def _source_drop(address: str) -> _FirewallRule:
+    parsed = _rule_from_rest(["-s", address, "-j", "DROP"])
+    assert parsed is not None
+    return parsed
+
+
+def _blanket(rule: _FirewallRule) -> bool:
+    return (
+        rule.source is None
+        and rule.dest is None
+        and rule.dport is None
+        and rule.protocol is None
+        and not rule.established
+        and not rule.hostname
+    )
+
+
+def _reaches_source_drop(tables: _Tables, address: str) -> bool:
+    """True when a fresh packet from this source reaches a DROP.
+
+    An empty chain returns to the caller. An established rule does not
+    match. The walk stops at the first chain that drops the source.
+    """
+    source = ipaddress.ip_address(address)
+
+    def chain_drops(name: str, seen: set[str]) -> bool:
+        if name in seen:
+            return False
+        rules = tables.named(name)
+        if rules is None:
+            return False
+        for rule in rules:
+            if _blanket(rule) and rule.target in {"RETURN", "ACCEPT"}:
+                return False
+            if (
+                rule.target == "DROP"
+                and rule.source is not None
+                and source in rule.source
+            ):
+                return True
+            if (
+                _blanket(rule)
+                and tables.named(rule.target) is not None
+                and chain_drops(rule.target, seen | {name})
+            ):
+                return True
+        return False
+
+    for rule in tables.docker_user:
+        if _blanket(rule) and rule.target in {"RETURN", "ACCEPT"}:
+            return False
+        if rule.target == "DROP" and rule.source is not None and source in rule.source:
+            return True
+        if (
+            _blanket(rule)
+            and tables.named(rule.target) is not None
+            and chain_drops(rule.target, set())
+        ):
+            return True
+    return False
+
+
+def _apply_watching_drops(lines: list[str], tables: _Tables) -> None:
+    for line in lines:
+        _apply_line(tables, line)
+        for address in ("10.8.0.18", "10.8.0.67"):
+            assert _reaches_source_drop(tables, address), line
+
+
+def test_firewall_swap_keeps_drops_for_a_duplicate_jump() -> None:
+    """A duplicate jump and a leftover chain never open a forward window."""
+    lines = _firewall_unit_lines(_text("docker/sentica/sentica-firewall.sh"))
+    clean = _apply_tables(lines)
+    drops = [_source_drop("10.8.0.18/32"), _source_drop("10.8.0.67/32")]
+    duplicate = _Tables()
+    duplicate.sentica = list(drops)
+    duplicate.extra["SENTICA_NEW"] = list(drops)
+    duplicate.docker_user = [
+        _jump("SENTICA"),
+        _jump("SENTICA"),
+        _jump("SENTICA_NEW"),
+    ]
+    _apply_watching_drops(lines, duplicate)
+    _apply_watching_drops(lines, duplicate)
+    assert duplicate.docker_user == clean.docker_user
+    assert duplicate.sentica == clean.sentica
+    assert duplicate.extra == {}
+    parked = _Tables()
+    parked.extra["SENTICA_NEW"] = list(drops)
+    parked.docker_user = [_jump("SENTICA_NEW")]
+    _apply_watching_drops(lines, parked)
+    assert parked.docker_user == clean.docker_user
+    assert parked.sentica == clean.sentica
+    assert parked.extra == {}
+    crashed = _Tables()
+    crashed.sentica = []
+    crashed.extra["SENTICA_NEW"] = list(drops)
+    crashed.docker_user = [_jump("SENTICA_NEW"), _jump("SENTICA")]
+    _apply_watching_drops(lines, crashed)
+    assert crashed.docker_user == clean.docker_user
+    assert crashed.sentica == clean.sentica
+    assert crashed.extra == {}
+
+
 def _keyword_selects(expression: str, nodeid: str) -> bool:
+    # Expression is pytest's private API. This -k check relies on the
+    # pytest pin in uv.lock (9.0.3).
     from _pytest.mark.expression import Expression
 
     compiled = Expression.compile(expression)
@@ -1564,39 +1716,63 @@ def test_deploy_password_file_steps_create_the_file(tmp_path: Path) -> None:
     lines.append("printf '%s\\n' one-line > /work/run/postgres.password")
     lines.append("stat -c '%u %g %a' /work/run/postgres.password")
     lines.append("cat /work/run/postgres.password")
-    completed = subprocess.run(
-        [
-            "docker",
-            "run",
-            "--rm",
-            "--user",
-            "root",
-            "-v",
-            str(root) + ":/work",
-            "--entrypoint",
-            "sh",
-            _BUSYBOX,
-            "-c",
-            "\n".join(lines),
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert completed.returncode == 0, completed.stderr
-    empty, written, content = completed.stdout.splitlines()
-    assert empty == "999 999 400 0"
-    assert written == "999 999 400"
-    assert content == "one-line"
-    host_file = root / "run" / "postgres.password"
-    host_stat = host_file.stat()
-    assert host_stat.st_uid == 999
-    assert host_stat.st_gid == 999
-    assert stat.S_IMODE(host_stat.st_mode) == 0o400
-    data = root / "lib" / "postgres"
-    assert data.is_dir()
-    assert data.stat().st_uid == 999
-    assert stat.S_IMODE(data.stat().st_mode) == 0o700
+    try:
+        completed = subprocess.run(
+            [
+                "docker",
+                "run",
+                "--rm",
+                "--user",
+                "root",
+                "-v",
+                str(root) + ":/work",
+                "--entrypoint",
+                "sh",
+                _BUSYBOX,
+                "-c",
+                "\n".join(lines),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert completed.returncode == 0, completed.stderr
+        empty, written, content = completed.stdout.splitlines()
+        assert empty == "999 999 400 0"
+        assert written == "999 999 400"
+        assert content == "one-line"
+        host_file = root / "run" / "postgres.password"
+        host_stat = host_file.stat()
+        assert host_stat.st_uid == 999
+        assert host_stat.st_gid == 999
+        assert stat.S_IMODE(host_stat.st_mode) == 0o400
+        data = root / "lib" / "postgres"
+        assert data.is_dir()
+        assert data.stat().st_uid == 999
+        assert stat.S_IMODE(data.stat().st_mode) == 0o700
+    finally:
+        removed = subprocess.run(
+            [
+                "docker",
+                "run",
+                "--rm",
+                "--user",
+                "root",
+                "-v",
+                str(root) + ":/work",
+                "--entrypoint",
+                "sh",
+                _BUSYBOX,
+                "-c",
+                "rm -rf /work/run /work/lib",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    assert removed.returncode == 0, removed.stderr
+    assert not (root / "run").exists()
+    assert not (root / "lib").exists()
 
 
 def test_dockerignore_excludes_bytecode() -> None:
