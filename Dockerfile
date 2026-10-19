@@ -11,10 +11,11 @@ COPY --from=ghcr.io/astral-sh/uv:0.9.24@sha256:816fdce3387ed2142e37d2e56e1b1b97c
 
 WORKDIR /app
 
-# Enable bytecode compilation. The epoch keeps compiled files stable.
+# uv's parallel bytecode compiler does not write the same files on every
+# run. Compile with one worker after the install instead.
 ARG SOURCE_DATE_EPOCH=1760832000
 ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
-ENV UV_COMPILE_BYTECODE=1
+ENV UV_COMPILE_BYTECODE=0
 
 # Copy from the cache instead of linking since it's a mounted volume
 ENV UV_LINK_MODE=copy
@@ -40,6 +41,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         echo "INSTALL_LANCEDB must be 'true' or 'false'" >&2; \
         exit 2; \
     fi \
+    && PYTHONDONTWRITEBYTECODE= PYTHONHASHSEED=0 \
+        python -m compileall -q -j 1 -f /app/.venv \
     && find /app/.venv -type d -exec chmod 755 {} + \
     && find /app/.venv -type f ! -perm /111 -exec chmod 644 {} + \
     && find /app/.venv -type f -perm /111 -exec chmod 755 {} + \
