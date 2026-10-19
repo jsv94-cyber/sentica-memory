@@ -309,9 +309,128 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
+        with:
+          # A pull request checkout is a merge commit. Its timestamp is not
+          # the head commit timestamp baked into the recorded digest.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
 
-      - name: Build the default image
-        run: docker build .
+      - name: Build the default image twice from clean
+        run: |
+          set -eu
+          SOURCE_DATE_EPOCH=$(git log -1 --format=%ct -- Dockerfile)
+          docker buildx rm repro >/dev/null 2>&1 || true
+          docker buildx create --name repro --driver docker-container --driver-opt image=moby/buildkit@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea --use
+          docker buildx build --build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" --provenance=false --sbom=false --no-cache --metadata-file image-metadata.json -o type=docker,dest=image.tar,rewrite-timestamp=true .
+          cp image-metadata.json image-metadata-a.json
+          cp image.tar image-a.tar
+          rm -f image.tar
+          docker buildx rm repro
+          docker buildx create --name repro --driver docker-container --driver-opt image=moby/buildkit@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea --use
+          docker buildx build --build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" --provenance=false --sbom=false --no-cache --metadata-file image-metadata.json -o type=docker,dest=image.tar,rewrite-timestamp=true .
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import re
+          import sys
+          import tarfile
+
+          notes = pathlib.Path("docs/RELEASE-v0.2.0-sentica.md").read_text(
+              encoding="utf-8"
+          )
+          match = re.search(
+              r"The image manifest digest is:\s+`(sha256:[0-9a-f]{64})`",
+              notes,
+          )
+          if match is None:
+              sys.exit("release notes have no image manifest digest")
+          recorded = match.group(1)
+          first = json.loads(
+              pathlib.Path("image-metadata-a.json").read_text(encoding="utf-8")
+          )["containerimage.digest"]
+          second = json.loads(
+              pathlib.Path("image-metadata.json").read_text(encoding="utf-8")
+          )["containerimage.digest"]
+          print(first)
+          print(second)
+          print(recorded)
+
+          def report(tar_path: str, manifest_digest: str) -> None:
+              digest = manifest_digest.split(":", 1)[1]
+              with tarfile.open(tar_path) as outer:
+                  manifest = json.load(
+                      outer.extractfile(f"blobs/sha256/{digest}")
+                  )
+                  config_digest = manifest["config"]["digest"].split(":", 1)[1]
+                  config = json.load(
+                      outer.extractfile(f"blobs/sha256/{config_digest}")
+                  )
+                  print(
+                      "config",
+                      manifest["config"]["digest"],
+                      manifest["config"]["size"],
+                  )
+                  print("created", config.get("created"))
+                  for item in config.get("config", {}).get("Env", []):
+                      if item.startswith(("SOURCE_DATE_EPOCH=", "SENTICA_MODE=")):
+                          print("env", item)
+                  for item in config["history"]:
+                      kind = "empty" if item.get("empty_layer") else "layer"
+                      print("hist", kind, item.get("created"))
+                  for diff_id in config["rootfs"]["diff_ids"]:
+                      print("diff", diff_id)
+                  for layer in manifest["layers"]:
+                      print("layer", layer["digest"], layer["size"])
+                  largest = max(manifest["layers"], key=lambda item: item["size"])
+                  layer_digest = largest["digest"].split(":", 1)[1]
+                  content = hashlib.sha256()
+                  meta = hashlib.sha256()
+                  pyc = hashlib.sha256()
+                  nonpyc = hashlib.sha256()
+                  rows = []
+                  with tarfile.open(tar_path) as outer:
+                      inner = tarfile.open(
+                          fileobj=outer.extractfile(f"blobs/sha256/{layer_digest}"),
+                          mode="r|gz",
+                      )
+                      while True:
+                          member = inner.next()
+                          if member is None:
+                              break
+                          data = b""
+                          if member.isfile():
+                              extracted = inner.extractfile(member)
+                              data = b"" if extracted is None else extracted.read()
+                          rows.append((member, data))
+                  for member, data in sorted(rows, key=lambda item: item[0].name):
+                      digest = hashlib.sha256(data).digest()
+                      line = member.name.encode() + b"\0" + digest + b"\n"
+                      content.update(line)
+                      bucket = pyc if member.name.endswith(".pyc") else nonpyc
+                      bucket.update(line)
+                      meta.update(
+                          (
+                              f"{member.name}\0{member.mode}\0{member.uid}\0"
+                              f"{member.gid}\0{member.size}\0{member.mtime}\0"
+                              f"{member.type!r}\0{member.uname}\0{member.gname}\n"
+                          ).encode()
+                      )
+                  print("venv-members", len(rows))
+                  print("venv-content", content.hexdigest())
+                  print("venv-meta", meta.hexdigest())
+                  print("venv-pyc", pyc.hexdigest())
+                  print("venv-nonpyc", nonpyc.hexdigest())
+
+          if first != second or first != recorded:
+              print("first image")
+              report("image-a.tar", first)
+              print("second image")
+              report("image.tar", second)
+              sys.exit("image digest drift")
+          PY
+          docker buildx rm repro
+          rm -f image.tar image-a.tar
 
   # Smoke subset of tests/sentica/test_m1_stack.py under runsc. The full
   # proof stays on the default runtime in test-m1-stack. SENTICA_GVISOR=1

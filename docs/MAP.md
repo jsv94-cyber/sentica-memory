@@ -133,9 +133,11 @@ left out, and stale ones sort after current ones. Hybrid retrieval is
 `src/sentica/retrieval.py:118` `search_conclusions`: keyword search on the
 GIN index at `src/models.py:619`, plus vector neighbors within cosine
 distance 0.65, merged by reciprocal rank. Stale rows sort after current
-ones. `POST /peers/{peer_id}/brief` (`src/routers/peers.py:943`
+ones. `POST /peers/{peer_id}/brief` (`src/routers/peers.py:952`
 `get_peer_brief`) returns the card, those conclusions, the latest summary,
-and open stale flags inside a token budget.
+and open stale flags inside a token budget. `POST /peers/{peer_id}/search_memory`
+(`src/routers/peers.py:1032` `search_peer_memory`) is the same hybrid search
+as its own response, one conclusion list, each row tagged with its workspace.
 
 `src/routers/conclusions.py:22` is `/v3/workspaces/{workspace_id}/conclusions`.
 Creating conclusions calls `src/crud/document.py:1155` `create_observations`.

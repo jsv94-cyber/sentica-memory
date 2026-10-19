@@ -1716,6 +1716,80 @@
         }
       }
     },
+    "/v3/workspaces/{workspace_id}/peers/{peer_id}/search_memory": {
+      "post": {
+        "tags": [
+          "peers"
+        ],
+        "summary": "Search Peer Memory",
+        "description": "Keyword plus vector search inside the token's workspaces.\n\nEach hit carries its workspace id. A workspace outside the token is\nrefused. The query text is not logged.",
+        "operationId": "search_peer_memory_v3_workspaces__workspace_id__peers__peer_id__search_memory_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Workspace Id"
+            }
+          },
+          {
+            "name": "peer_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "Peer the memory is about",
+              "title": "Peer Id"
+            },
+            "description": "Peer the memory is about"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemorySearchRequest",
+                "description": "Query, optional subject and recency filters, and workspace set"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Conclusion"
+                  },
+                  "title": "Response Search Peer Memory V3 Workspaces  Workspace Id  Peers  Peer Id  Search Memory Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v3/workspaces/{workspace_id}/peers/{peer_id}/search": {
       "post": {
         "tags": [
@@ -5098,7 +5172,7 @@
             "maximum": 50.0,
             "minimum": 1.0,
             "title": "Top K",
-            "description": "How many conclusions to consider before the token budget.",
+            "description": "How many conclusions to consider from each workspace before the token budget.",
             "default": 10
           },
           "workspaces": {
@@ -5205,7 +5279,7 @@
               }
             ],
             "title": "Source Trust",
-            "description": "external when every source message was external. Empty when the conclusion is not external-only."
+            "description": "owner, staff, external, or system. Empty when no label was stored."
           },
           "subject_ref": {
             "anyOf": [
@@ -5257,6 +5331,11 @@
             "type": "string",
             "format": "date-time",
             "title": "Created At"
+          },
+          "workspace_id": {
+            "type": "string",
+            "title": "Workspace Id",
+            "description": "Workspace this conclusion was stored in."
           }
         },
         "type": "object",
@@ -5265,7 +5344,8 @@
           "content",
           "observer_id",
           "observed_id",
-          "created_at"
+          "created_at",
+          "workspace_id"
         ],
         "title": "Conclusion",
         "description": "Conclusion response - external view of a document."
@@ -5330,6 +5410,23 @@
             ],
             "title": "Subject Ref",
             "description": "Subject this conclusion is about, such as customer:123."
+          },
+          "source_trust": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "owner",
+                  "staff",
+                  "external",
+                  "system"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Trust"
           }
         },
         "type": "object",
@@ -6261,6 +6358,70 @@
         },
         "type": "object",
         "title": "HTTPValidationError"
+      },
+      "MemorySearchRequest": {
+        "properties": {
+          "query": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Query",
+            "description": "Words or a paraphrase. Keyword and vector results are merged."
+          },
+          "subject_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject Ref",
+            "description": "Only conclusions about this subject, such as customer:123."
+          },
+          "since": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Since",
+            "description": "Only conclusions created at or after this time."
+          },
+          "top_k": {
+            "type": "integer",
+            "maximum": 50.0,
+            "minimum": 1.0,
+            "title": "Top K",
+            "description": "How many conclusions to return from each workspace.",
+            "default": 10
+          },
+          "workspaces": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workspaces",
+            "description": "Workspaces to read. Each one is queried on its own."
+          }
+        },
+        "type": "object",
+        "required": [
+          "query"
+        ],
+        "title": "MemorySearchRequest",
+        "description": "Hybrid conclusion search Sentica's broker runs before it answers."
       },
       "Message": {
         "properties": {

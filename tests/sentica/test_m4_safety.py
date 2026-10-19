@@ -717,6 +717,7 @@ async def test_production_refuses_a_card_write_and_keeps_a_trusted_conclusion(
                     "observer_id": peer.name,
                     "observed_id": peer.name,
                     "session_id": "s1",
+                    "source_trust": "owner",
                 }
             ]
         },

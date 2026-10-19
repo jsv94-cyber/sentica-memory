@@ -112,6 +112,7 @@ def _token(
     admin: bool = False,
     request_id: str = "req-m1",
     workspace: str = "m1-workspace",
+    workspaces: list[str] | None = None,
 ) -> str:
     private = serialization.load_pem_private_key(private_pem, password=None)
     assert isinstance(private, ed25519.Ed25519PrivateKey)
@@ -131,6 +132,8 @@ def _token(
         "aud": "sentica-memory",
         "w": workspace,
     }
+    if workspaces is not None:
+        payload["workspaces"] = workspaces
     if admin:
         payload["ad"] = True
     encoded = jwt.encode(payload, private, algorithm="EdDSA")
@@ -2063,3 +2066,203 @@ def test_publishers_are_single_port_and_non_root(stack: Path) -> None:
             for binding in entries:
                 record = cast(dict[str, object], binding)
                 assert record.get("HostIp") == "127.0.0.1", service
+
+
+def test_integration_contract(stack: Path) -> None:
+    """Every broker route answers a signed token, and a foreign workspace is refused."""
+    key_a = _token_key(stack, "a")
+    workspace = f"contract-{uuid.uuid4().hex[:12]}"
+    other = f"other-{uuid.uuid4().hex[:12]}"
+    fact = "the customer prefers the window seat"
+    headers = {
+        "Authorization": "Bearer "
+        + _token(
+            key_a,
+            issuer="sentica-test-issuer-a",
+            tenant="tenant-a",
+            request_id="contract-read",
+            workspace=workspace,
+            workspaces=[workspace],
+        )
+    }
+    foreign = {
+        "Authorization": "Bearer "
+        + _token(
+            key_a,
+            issuer="sentica-test-issuer-a",
+            tenant="tenant-a",
+            request_id="contract-foreign",
+            workspace=other,
+            workspaces=[other],
+        )
+    }
+    health = httpx.get(f"{API_A}/health", timeout=10)
+    assert health.status_code == 200
+    assert health.json() == {"status": "ok"}
+    ready = httpx.get(f"{API_A}/ready", timeout=10)
+    assert ready.status_code == 200
+    assert ready.json() == {"status": "ok"}
+    missing = httpx.post(
+        f"{API_A}/v3/workspaces/{workspace}/peers/customer-123/search_memory",
+        json={"query": "window"},
+        timeout=20,
+    )
+    assert missing.status_code == 401
+
+    created = httpx.post(
+        f"{API_A}/v3/workspaces",
+        headers=headers,
+        json={"name": workspace},
+        timeout=20,
+    )
+    assert created.status_code in (200, 201), created.text
+    peer = httpx.post(
+        f"{API_A}/v3/workspaces/{workspace}/peers",
+        headers=headers,
+        json={"name": "customer-123"},
+        timeout=20,
+    )
+    assert peer.status_code in (200, 201), peer.text
+    session = httpx.post(
+        f"{API_A}/v3/workspaces/{workspace}/sessions",
+        headers=headers,
+        json={"id": "call-1"},
+        timeout=20,
+    )
+    assert session.status_code in (200, 201), session.text
+    bare = httpx.post(
+        f"{API_A}/v3/workspaces/{workspace}/sessions/call-1/messages",
+        headers=headers,
+        json={"messages": [{"peer_id": "customer-123", "content": fact}]},
+        timeout=20,
+    )
+    assert bare.status_code == 422, bare.text
+    ingested = httpx.post(
+        f"{API_A}/v3/workspaces/{workspace}/sessions/call-1/messages",
+        headers=headers,
+        json={
+            "messages": [
+                {
+                    "peer_id": "customer-123",
+                    "content": fact,
+                    "source_trust": "owner",
+                }
+            ]
+        },
+        timeout=20,
+    )
+    assert ingested.status_code == 201, ingested.text
+    message = cast(list[dict[str, Any]], ingested.json())[0]
+    assert message["workspace_id"] == workspace
+    assert message["peer_id"] == "customer-123"
+    assert message["session_id"] == "call-1"
+    assert message["source_trust"] == "owner"
+    assert isinstance(message["id"], str) and message["id"]
+
+    conclusions = httpx.post(
+        f"{API_A}/v3/workspaces/{workspace}/conclusions",
+        headers=headers,
+        json={
+            "conclusions": [
+                {
+                    "content": fact,
+                    "observer_id": "customer-123",
+                    "observed_id": "customer-123",
+                    "session_id": "call-1",
+                    "subject_ref": "customer:123",
+                    "source_trust": "owner",
+                }
+            ]
+        },
+        timeout=30,
+    )
+    assert conclusions.status_code == 201, conclusions.text
+    stored = cast(list[dict[str, Any]], conclusions.json())
+    assert stored, conclusions.text
+    assert stored[0]["workspace_id"] == workspace
+    assert stored[0]["content"] == fact
+    assert stored[0]["subject_ref"] == "customer:123"
+    assert stored[0]["source_trust"] == "owner"
+    conclusion_id = stored[0]["id"]
+
+    listed = httpx.post(
+        f"{API_A}/v3/workspaces/{workspace}/conclusions/list",
+        headers=headers,
+        json={},
+        timeout=20,
+    )
+    assert listed.status_code == 200, listed.text
+    items = cast(list[dict[str, Any]], listed.json()["items"])
+    assert any(item["id"] == conclusion_id for item in items)
+
+    one = httpx.get(
+        f"{API_A}/v3/workspaces/{workspace}/conclusions/{conclusion_id}",
+        headers=headers,
+        timeout=20,
+    )
+    assert one.status_code == 200, one.text
+    assert one.json()["workspace_id"] == workspace
+
+    found = httpx.post(
+        f"{API_A}/v3/workspaces/{workspace}/peers/customer-123/search_memory",
+        headers=headers,
+        json={"query": "window seat", "subject_ref": "customer:123", "top_k": 5},
+        timeout=30,
+    )
+    assert found.status_code == 200, found.text
+    hits = cast(list[dict[str, Any]], found.json())
+    assert hits[0]["content"] == fact
+    assert hits[0]["workspace_id"] == workspace
+
+    brief = httpx.post(
+        f"{API_A}/v3/workspaces/{workspace}/peers/customer-123/brief",
+        headers=headers,
+        json={"token_budget": 400, "query": "window seat", "top_k": 5},
+        timeout=30,
+    )
+    assert brief.status_code == 200, brief.text
+    package = cast(dict[str, Any], brief.json())
+    assert package["workspace_id"] == workspace
+    assert package["peer_id"] == "customer-123"
+    assert any(
+        row["content"] == fact
+        for row in cast(list[dict[str, Any]], package["conclusions"])
+    )
+
+    blocked = httpx.post(
+        f"{API_A}/v3/workspaces/{workspace}/peers/customer-123/search_memory",
+        headers=foreign,
+        json={"query": "window seat"},
+        timeout=20,
+    )
+    assert blocked.status_code == 401, blocked.text
+    assert fact not in blocked.text
+
+    changed = httpx.post(
+        f"{API_A}/v3/workspaces/{workspace}/subjects/customer:123/changed",
+        headers=headers,
+        timeout=20,
+    )
+    assert changed.status_code == 200, changed.text
+    assert changed.json()["stale_count"] >= 1
+
+    synthesis = httpx.put(
+        f"{API_A}/v3/workspaces/{workspace}/synthesis",
+        headers=headers,
+        json={"enabled": False},
+        timeout=20,
+    )
+    assert synthesis.status_code == 200, synthesis.text
+    assert synthesis.json() == {"enabled": False}
+
+    deleted = httpx.post(
+        f"{API_A}/v3/workspaces/{workspace}/deletions",
+        headers=headers,
+        json={"subject_ref": "customer:123"},
+        timeout=20,
+    )
+    assert deleted.status_code == 201, deleted.text
+    deletion = cast(dict[str, Any], deleted.json())
+    assert deletion["subject_ref"] == "customer:123"
+    assert deletion["document_count"] >= 1
+    assert "content" not in deletion

@@ -399,3 +399,46 @@ async def prepare_brief(
         except Exception:
             logger.warning("brief use note skipped")
     return brief
+
+
+async def prepare_search(
+    workspace_name: str,
+    peer_id: str,
+    *,
+    query: str,
+    subject_ref: str | None = None,
+    since: datetime.datetime | None = None,
+    top_k: int = 10,
+    embedding: list[float] | None = None,
+) -> list[schemas.Conclusion]:
+    """Hybrid search, then count the conclusions that were returned."""
+    from src.crud.peer import reject_scope_observed
+
+    async with tracked_db("peers.search_memory", read_only=True) as db:
+        await reject_scope_observed(
+            db,
+            workspace_name,
+            [peer_id],
+            action="Use the scope option on the read routes instead.",
+        )
+        documents = await search_conclusions(
+            db,
+            workspace_name,
+            query,
+            observer=peer_id,
+            observed=peer_id,
+            subject_ref=subject_ref,
+            since=since,
+            top_k=top_k,
+            embedding=embedding,
+        )
+        hits = [schemas.Conclusion.model_validate(document) for document in documents]
+    ids = [item.id for item in hits]
+    if ids:
+        try:
+            async with tracked_db("peers.search_memory.used") as write_db:
+                await note_retrieved(write_db, ids, workspace_name=workspace_name)
+                await note_used(write_db, ids, workspace_name=workspace_name)
+        except Exception:
+            logger.warning("search use note skipped")
+    return hits
