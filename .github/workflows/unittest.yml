@@ -328,10 +328,14 @@ jobs:
           docker buildx create --name repro --driver docker-container --driver-opt image=moby/buildkit@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea --use
           docker buildx build --build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" --provenance=false --sbom=false --no-cache --metadata-file image-metadata.json -o type=docker,dest=image.tar,rewrite-timestamp=true .
           python3 - <<'PY'
+          import gzip
+          import hashlib
+          import io
           import json
           import pathlib
           import re
           import sys
+          import tarfile
 
           notes = pathlib.Path("docs/RELEASE-v0.2.0-sentica.md").read_text(
               encoding="utf-8"
@@ -352,7 +356,44 @@ jobs:
           print(first)
           print(second)
           print(recorded)
+
+          def report(tar_path: str, manifest_digest: str) -> None:
+              digest = manifest_digest.split(":", 1)[1]
+              with tarfile.open(tar_path) as outer:
+                  manifest = json.load(
+                      outer.extractfile(f"blobs/sha256/{digest}")
+                  )
+                  config_digest = manifest["config"]["digest"].split(":", 1)[1]
+                  config = json.load(
+                      outer.extractfile(f"blobs/sha256/{config_digest}")
+                  )
+                  print("config", manifest["config"]["digest"], manifest["config"]["size"])
+                  print("created", config.get("created"))
+                  for diff_id in config["rootfs"]["diff_ids"]:
+                      print("diff", diff_id)
+                  for layer in manifest["layers"]:
+                      blob = layer["digest"].split(":", 1)[1]
+                      raw = outer.extractfile(f"blobs/sha256/{blob}").read()
+                      payload = gzip.decompress(raw)
+                      fingerprint = hashlib.sha256()
+                      files = tarfile.open(fileobj=io.BytesIO(payload))
+                      for member in files.getmembers():
+                          fingerprint.update(
+                              f"{oct(member.mode)} {member.uid} {member.size} {member.name}\n".encode()
+                          )
+                          if member.isfile():
+                              extracted = files.extractfile(member)
+                              if extracted is not None:
+                                  fingerprint.update(extracted.read())
+                      print(
+                          "layer",
+                          layer["digest"],
+                          layer["size"],
+                          fingerprint.hexdigest(),
+                      )
+
           if first != second or first != recorded:
+              report("image.tar", second)
               sys.exit("image digest drift")
           PY
           docker buildx rm repro
