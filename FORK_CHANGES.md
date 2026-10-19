@@ -104,5 +104,8 @@ release v3.3.0 (`608aec8a928da13c540262ed980c569448fb53ab`).
 | `tests/sentica/test_m1_stack.py` | Signed-token exercise of every contract route. | M-INT |
 | `tests/sentica/test_m6_retrieval.py` | search_memory returns the keyword hit and its workspace. | M-INT |
 | `tests/routes/test_scope_route_policy.py` | A scope in the search_memory peer position is refused. | M-INT |
-| `.github/workflows/unittest.yml` | The default image build pins BuildKit by digest, checks out the head commit, sets `SOURCE_DATE_EPOCH` from that commit, and fails unless two clean builds match the recorded digest. | M-INT |
+| `docs/image-digest.txt` | Current expected image manifest digest. Tagged digests stay in the release notes. | R4 |
+| `docs/RELEASES.md` | Unreleased note for the image digest after `v0.2.0-sentica`. | R4 |
+| `tests/sentica/check_image_digest.py` | Fails unless two clean image exports match `docs/image-digest.txt`. | R4 |
+| `.github/workflows/unittest.yml` | Builds the default image twice from clean builders and fails unless those digests match `docs/image-digest.txt`. | R4 |
 

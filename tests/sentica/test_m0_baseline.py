@@ -109,6 +109,7 @@ def test_new_docs_have_no_em_dash() -> None:
         "docs/DEPLOY.md",
         "docs/UPSTREAM_SYNC.md",
         "docs/RELEASES.md",
+        "docs/image-digest.txt",
         "docs/INTEGRATION.md",
         "docs/RELEASE-v0.2.0-sentica.md",
         ".review/M2-summary.md",

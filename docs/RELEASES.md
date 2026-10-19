@@ -1,5 +1,16 @@
 # Releases
 
+## Unreleased
+
+The default image manifest is no longer the one recorded for
+`v0.2.0-sentica`. `docs/RELEASE-v0.2.0-sentica.md` stays as released.
+This branch's image includes the digest-pinned Python stages and the
+other files that image copies, so its manifest is
+`sha256:84187e5ddf7131b30e20bc073d388b0ab07fc4b6f50030e1ebe03c71bc81ad7d`.
+`docs/image-digest.txt` is the current expected digest. CI builds the
+image twice from clean builders and fails when those two digests differ
+or when they differ from that file.
+
 ## v0.1.0-sentica
 
 First fork release on the v3.3.0 pin
