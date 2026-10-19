@@ -72,6 +72,7 @@ def test_release_notes_pin_the_base_images() -> None:
     assert "rewrite-timestamp=true" in workflow
     assert "--provenance=false" in workflow
     assert "git show -s --format=%ct HEAD" in workflow
+    assert "github.event.pull_request.head.sha" in workflow
     assert _BUILDKIT in workflow
     assert workflow.count(_BUILD) == 2
     assert "containerimage.digest" in workflow

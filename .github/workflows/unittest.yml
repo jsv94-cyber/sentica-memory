@@ -309,6 +309,10 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
+        with:
+          # A pull request checkout is a merge commit. Its timestamp is not
+          # the head commit timestamp baked into the recorded digest.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Build the default image twice from clean
         run: |

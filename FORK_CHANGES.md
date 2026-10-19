@@ -104,5 +104,5 @@ release v3.3.0 (`608aec8a928da13c540262ed980c569448fb53ab`).
 | `tests/sentica/test_m1_stack.py` | Signed-token exercise of every contract route. | M-INT |
 | `tests/sentica/test_m6_retrieval.py` | search_memory returns the keyword hit and its workspace. | M-INT |
 | `tests/routes/test_scope_route_policy.py` | A scope in the search_memory peer position is refused. | M-INT |
-| `.github/workflows/unittest.yml` | The default image build pins BuildKit by digest, sets `SOURCE_DATE_EPOCH` from the commit, and fails unless two clean builds match the recorded digest. | M-INT |
+| `.github/workflows/unittest.yml` | The default image build pins BuildKit by digest, checks out the head commit, sets `SOURCE_DATE_EPOCH` from that commit, and fails unless two clean builds match the recorded digest. | M-INT |
 

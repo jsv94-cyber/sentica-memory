@@ -19,7 +19,9 @@ on the request. Production refuses a missing label, as ingest does.
 ## Image
 
 The image manifest digest below is `containerimage.digest` from this
-export. `SOURCE_DATE_EPOCH` is the commit timestamp. CI runs the export
+export. `SOURCE_DATE_EPOCH` is the head commit timestamp. A pull
+request job checks out that commit. The default checkout is a merge
+commit, and its timestamp is a different epoch. CI runs the export
 twice, each time from a new BuildKit builder, and fails unless both
 digests equal the recorded value.
 
