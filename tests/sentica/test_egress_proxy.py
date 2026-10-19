@@ -97,14 +97,20 @@ def test_egress_proxy_config_is_the_provider_allowlist() -> None:
 
 
 def test_proxy_image_and_base_images_are_pinned() -> None:
-    """Both Dockerfile stages and the proxy image carry a digest."""
+    """Every Python stage and the proxy image carry a digest."""
     dockerfile = _text("Dockerfile")
-    pins = re.findall(
-        r"^FROM python:3.13-slim-bookworm@sha256:[0-9a-f]{64} AS ",
+    stages = re.findall(
+        r"^FROM python:3\.13-slim-bookworm(?:@sha256:[0-9a-f]{64})? AS (\S+)",
         dockerfile,
         re.MULTILINE,
     )
-    assert len(pins) == 2
+    pinned = re.findall(
+        r"^FROM python:3\.13-slim-bookworm@sha256:[0-9a-f]{64} AS (\S+)",
+        dockerfile,
+        re.MULTILINE,
+    )
+    assert stages == ["builder", "sources", "runtime"]
+    assert pinned == stages
     digest = _SQUID.split("@", 1)[1]
     compose = _text("docker/sentica/egress-proxy.yml")
     deploy = _text("docs/DEPLOY.md")
