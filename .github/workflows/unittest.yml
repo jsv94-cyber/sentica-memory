@@ -323,6 +323,7 @@ jobs:
           docker buildx create --name repro --driver docker-container --driver-opt image=moby/buildkit@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea --use
           docker buildx build --build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" --provenance=false --sbom=false --no-cache --metadata-file image-metadata.json -o type=docker,dest=image.tar,rewrite-timestamp=true .
           cp image-metadata.json image-metadata-a.json
+          cp image.tar image-a.tar
           rm -f image.tar
           docker buildx rm repro
           docker buildx create --name repro --driver docker-container --driver-opt image=moby/buildkit@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea --use
@@ -370,17 +371,26 @@ jobs:
                       manifest["config"]["size"],
                   )
                   print("created", config.get("created"))
+                  for item in config.get("config", {}).get("Env", []):
+                      if item.startswith(("SOURCE_DATE_EPOCH=", "SENTICA_MODE=")):
+                          print("env", item)
+                  for item in config["history"]:
+                      kind = "empty" if item.get("empty_layer") else "layer"
+                      print("hist", kind, item.get("created"))
                   for diff_id in config["rootfs"]["diff_ids"]:
                       print("diff", diff_id)
                   for layer in manifest["layers"]:
                       print("layer", layer["digest"], layer["size"])
 
           if first != second or first != recorded:
+              print("first image")
+              report("image-a.tar", first)
+              print("second image")
               report("image.tar", second)
               sys.exit("image digest drift")
           PY
           docker buildx rm repro
-          rm -f image.tar
+          rm -f image.tar image-a.tar
 
   # Smoke subset of tests/sentica/test_m1_stack.py under runsc. The full
   # proof stays on the default runtime in test-m1-stack. SENTICA_GVISOR=1
