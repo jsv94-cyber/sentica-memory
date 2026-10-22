@@ -403,7 +403,11 @@ def _open_script(host: str, port: int) -> str:
         f"    s.connect(({host!r}, {port}))\n"
         "    print('OPEN')\n"
         "except Exception as exc:\n"
-        "    print('FAIL', type(exc).__name__)\n"
+        "    err = getattr(exc, 'errno', None)\n"
+        "    if err is None:\n"
+        "        print('FAIL', type(exc).__name__)\n"
+        "    else:\n"
+        "        print('FAIL', type(exc).__name__, 'errno=' + str(err))\n"
         "finally:\n"
         "    s.close()\n"
     )
@@ -423,6 +427,33 @@ def _container_open(env: dict[str, str], container: str, host: str, port: int) -
         check=False,
     )
     return (completed.stdout or completed.stderr).strip()
+
+
+def _route_table(env: dict[str, str], container: str) -> str:
+    completed = _run(
+        [
+            "docker",
+            "exec",
+            container,
+            "python",
+            "-c",
+            "print(open('/proc/net/route').read(), end='')",
+        ],
+        env,
+        check=False,
+    )
+    text = (completed.stdout or completed.stderr).strip()
+    assert completed.returncode == 0, text
+    return text
+
+
+def _has_default_route(table: str) -> bool:
+    """True when the route table has a 0.0.0.0 destination."""
+    for line in table.splitlines()[1:]:
+        fields = line.split()
+        if len(fields) > 1 and fields[1] == "00000000":
+            return True
+    return False
 
 
 def _exec_proxy_status(
@@ -830,9 +861,12 @@ def test_topology_blocks_the_proxy_and_postgres() -> None:
     """Gateway reaches a provider. Other roles cannot open the proxy or Postgres.
 
     The certificate proxy is the container that reaches Postgres, on its own
-    internal bridge. The gateway is not on that bridge. A throwaway chain
-    with the guide's rule shape drops routed packets from the instance
-    addresses. The test removes that chain and does not publish a host port.
+    internal bridge. The gateway is not on that bridge. A source with a
+    default route must time out. That proxy has no default route, and its
+    failure must be errno 101. Each routed source must move its DROP
+    counter. A throwaway chain with the guide's rule shape drops routed
+    packets from the instance addresses. The test removes that chain and
+    does not publish a host port.
     """
     env = os.environ.copy()
     block = _free_slash24(env)
@@ -1074,6 +1108,11 @@ def test_topology_blocks_the_proxy_and_postgres() -> None:
                 blocked = dict(pool.map(_probe, checks))
             cert_pg = _container_open(env, roles["cert"], postgres_ip, 5432)
             api_proxy = _container_open(env, roles["api"], cert_ip, 6432)
+            counted = _host_iptables(env, "-L", chain, "-n", "-v", "-x")
+            assert counted.returncode == 0, counted.stderr
+            opened = counted.stdout
+            for source in (deriver_ip, migrate_ip, gateway_inst):
+                assert _packet_count(opened, source, "DROP") > 0, source + "\n" + opened
             zeroed_again = _host_iptables(env, "-Z", chain)
             assert zeroed_again.returncode == 0, zeroed_again.stderr
             api_out = _container_open(env, roles["api"], "1.1.1.1", 443)
@@ -1086,11 +1125,26 @@ def test_topology_blocks_the_proxy_and_postgres() -> None:
             logs = _compose(env, project, "logs")
             detail = logs.stdout + logs.stderr
             assert allowed.startswith("HTTP/1.1 200"), detail
+            route_tables = {
+                roles[role]: _route_table(env, roles[role])
+                for role in ("api", "deriver", "migrate", "gw", "cert")
+            }
+            cert_routes = route_tables[roles["cert"]]
+            assert not _has_default_route(cert_routes), (
+                "certificate proxy has a default route\n" + cert_routes
+            )
+            for role in ("api", "deriver", "migrate", "gw"):
+                routed = route_tables[roles[role]]
+                assert _has_default_route(routed), role + "\n" + routed
+            container_by_label: dict[str, str] = {}
+            for label, container, host, _port in checks:
+                container_by_label[label + "->" + host] = container
             for label, result in blocked.items():
-                blocked_ok = result.startswith(
-                    "FAIL TimeoutError"
-                ) or result.startswith("FAIL OSError")
-                assert blocked_ok, label + " " + result
+                container = container_by_label[label]
+                if _has_default_route(route_tables[container]):
+                    assert result == "FAIL TimeoutError", label + " " + result
+                else:
+                    assert result == "FAIL OSError errno=101", label + " " + result
             assert cert_pg.startswith("OPEN"), cert_pg
             assert api_proxy.startswith("OPEN"), api_proxy
             assert proxy_pg == "FAIL 124", proxy_pg
