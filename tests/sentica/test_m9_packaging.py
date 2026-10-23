@@ -5,6 +5,9 @@ from __future__ import annotations
 import importlib.util
 import ipaddress
 import re
+import shlex
+import stat
+import subprocess
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, NamedTuple, cast
@@ -187,6 +190,7 @@ _REQUIRED_CONTAINERS = (
     "sentica-memory-proxy",
     "sentica-memory-gateway",
     "sentica-memory-egress",
+    "sentica-memory-postgres",
 )
 
 
@@ -254,13 +258,21 @@ class _Tables:
     def __init__(self) -> None:
         self.docker_user: list[_FirewallRule] = []
         self.sentica: list[_FirewallRule] | None = None
+        self.extra: dict[str, list[_FirewallRule]] = {}
 
     def named(self, chain: str) -> list[_FirewallRule] | None:
         if chain == "DOCKER-USER":
             return self.docker_user
         if chain == "SENTICA":
             return self.sentica
-        return None
+        return self.extra.get(chain)
+
+    def chains(self) -> list[list[_FirewallRule]]:
+        found = [self.docker_user]
+        if self.sentica is not None:
+            found.append(self.sentica)
+        found.extend(self.extra.values())
+        return found
 
 
 def _token_after(tokens: list[str], flag: str) -> str | None:
@@ -295,7 +307,7 @@ def _iptables_parts(command: str) -> list[str]:
 
 
 def _chain_op(tokens: list[str]) -> tuple[str, str, list[str]] | None:
-    for op in ("-A", "-I", "-C", "-F", "-N"):
+    for op in ("-A", "-I", "-C", "-D", "-F", "-X", "-E", "-N"):
         if op not in tokens:
             continue
         index = tokens.index(op)
@@ -340,8 +352,17 @@ def _parse_iptables(
     if op == "-I" and rest and rest[0].isdigit():
         position = int(rest[0])
         rest = rest[1:]
-    if op in {"-N", "-F"}:
+    if op in {"-N", "-F", "-X"}:
         return op, chain, position, None
+    if op == "-E":
+        if not rest:
+            return None
+        return (
+            op,
+            chain,
+            None,
+            _FirewallRule(None, None, False, None, None, False, rest[0]),
+        )
     return op, chain, position, _rule_from_rest(rest)
 
 
@@ -352,10 +373,55 @@ def _apply_iptables(tables: _Tables, command: str) -> bool:
         return command == "true"
     op, chain, position, rule = parsed
     if op == "-N":
-        if chain == "SENTICA" and tables.sentica is None:
+        if tables.named(chain) is not None:
+            return False
+        if chain == "SENTICA":
             tables.sentica = []
             return True
-        return False
+        if chain == "DOCKER-USER":
+            return False
+        tables.extra[chain] = []
+        return True
+    if op == "-X":
+        if chain == "DOCKER-USER":
+            return False
+        current = tables.named(chain)
+        referenced = any(
+            item.target == chain for rules in tables.chains() for item in rules
+        )
+        if current is None or current or referenced:
+            return False
+        if chain == "SENTICA":
+            tables.sentica = None
+        else:
+            del tables.extra[chain]
+        return True
+    if op == "-E":
+        if rule is None or tables.named(chain) is None:
+            return False
+        new_name = rule.target
+        if (
+            new_name == chain
+            or chain == "DOCKER-USER"
+            or new_name == "DOCKER-USER"
+            or tables.named(new_name) is not None
+        ):
+            return False
+        moved = tables.named(chain)
+        assert moved is not None
+        if chain == "SENTICA":
+            tables.sentica = None
+        else:
+            del tables.extra[chain]
+        if new_name == "SENTICA":
+            tables.sentica = moved
+        else:
+            tables.extra[new_name] = moved
+        for rules in tables.chains():
+            for index, item in enumerate(rules):
+                if item.target == chain:
+                    rules[index] = item._replace(target=new_name)
+        return True
     current = tables.named(chain)
     if current is None:
         return False
@@ -366,6 +432,12 @@ def _apply_iptables(tables: _Tables, command: str) -> bool:
         return False
     if op == "-C":
         return rule in current
+    if op == "-D":
+        try:
+            current.remove(rule)
+        except ValueError:
+            return False
+        return True
     if op == "-A":
         current.append(rule)
         return True
@@ -378,7 +450,22 @@ def _apply_iptables(tables: _Tables, command: str) -> bool:
     return True
 
 
+_WHILE_DELETE = re.compile(
+    r"^while iptables -D (\S+) -j (\S+) 2>/dev/null; do :; done$"
+)
+
+
 def _apply_line(tables: _Tables, command: str) -> None:
+    """Apply one guide line. A while-delete removes every matching jump."""
+    matched = _WHILE_DELETE.fullmatch(command.strip())
+    if matched is not None:
+        chain, target = matched.group(1), matched.group(2)
+        rules = tables.named(chain)
+        jump = _rule_from_rest(["-j", target])
+        if rules is None or jump is None:
+            return
+        rules[:] = [item for item in rules if item != jump]
+        return
     parts = _iptables_parts(command)
     if not parts:
         return
@@ -402,6 +489,7 @@ def _clone_tables(tables: _Tables) -> _Tables:
     clone.docker_user = list(tables.docker_user)
     if tables.sentica is not None:
         clone.sentica = list(tables.sentica)
+    clone.extra = {name: list(rules) for name, rules in tables.extra.items()}
     return clone
 
 
@@ -413,7 +501,11 @@ def idempotent_gaps(commands: list[str]) -> list[str]:
     """
     once = _apply_tables(commands)
     twice = _apply_tables(commands, _clone_tables(once))
-    if once.docker_user != twice.docker_user or once.sentica != twice.sentica:
+    if (
+        once.docker_user != twice.docker_user
+        or once.sentica != twice.sentica
+        or once.extra != twice.extra
+    ):
         return ["firewall rules are not idempotent"]
     return []
 
@@ -930,6 +1022,40 @@ def database_path_gaps(deploy: str) -> list[str]:
     return gaps
 
 
+def certificate_bridge_gaps(deploy: str) -> list[str]:
+    """The certificate proxy is not on a bridge with the gateway.
+
+    The API, deriver, and migrate reach it on one internal bridge. The
+    gateway does not join that bridge, so it has no route to the proxy.
+    """
+    commands = _bash_commands(deploy)
+    topology = _topology(commands)
+    gaps: list[str] = []
+    proxy = "sentica-memory-proxy"
+    gateway = "sentica-memory-gateway"
+    shared = topology.networks_of(proxy) & topology.networks_of(gateway)
+    if shared:
+        gaps.append("certificate proxy shares a bridge with the gateway")
+    clients = [name for name in topology.networks_of(proxy) if name != "sentica-db"]
+    if len(clients) != 1:
+        gaps.append("certificate proxy has no single client bridge")
+        return gaps
+    name = clients[0]
+    net = topology.networks.get(name)
+    if net is None or not net.internal:
+        gaps.append("certificate proxy client bridge is not internal")
+    members = topology.containers_on(name)
+    expected = {
+        "sentica-memory-api",
+        "sentica-memory-deriver",
+        "sentica-memory-migrate",
+        "sentica-memory-proxy",
+    }
+    if members != expected:
+        gaps.append("certificate proxy client bridge has the wrong members")
+    return gaps
+
+
 def _spare_address_gap(
     subnet: ipaddress.IPv4Network,
     gateway: ipaddress.IPv4Address | None,
@@ -1052,12 +1178,15 @@ def test_deploy_firewall_covers_every_container_ip() -> None:
     assert docker_user_order_gaps(deploy) == []
     assert provider_egress_gaps(deploy) == []
     assert database_path_gaps(deploy) == []
+    assert certificate_bridge_gaps(deploy) == []
     assert idempotent_gaps(commands) == []
     sentica = [
-        command for command in commands if command.startswith("iptables -A SENTICA ")
+        command
+        for command in commands
+        if command.startswith("iptables -A SENTICA_NEW ")
     ]
-    routed = "iptables -A SENTICA -s 10.8.0.21/32 -j DROP"
-    assert sentica[7] == routed
+    routed = "iptables -A SENTICA_NEW -s 10.8.0.85/32 -j DROP"
+    assert sentica[11] == routed
     assert not any("--dport 5432" in command for command in sentica)
     assert not any("10.8.0.23" in command for command in sentica)
     topology = _topology(commands)
@@ -1083,6 +1212,24 @@ def test_deploy_firewall_covers_every_container_ip() -> None:
         _packet_path(
             ipaddress.IPv4Address("10.8.0.18"),
             ipaddress.IPv4Address("10.8.0.22"),
+            topology,
+            set(),
+        )
+        == "BRIDGE"
+    )
+    assert (
+        _packet_path(
+            ipaddress.IPv4Address("10.8.0.22"),
+            ipaddress.IPv4Address("10.8.0.85"),
+            topology,
+            set(),
+        )
+        == "UNREACHABLE"
+    )
+    assert (
+        _packet_path(
+            ipaddress.IPv4Address("10.8.0.82"),
+            ipaddress.IPv4Address("10.8.0.85"),
             topology,
             set(),
         )
@@ -1233,6 +1380,407 @@ iptables -A DOCKER-USER -s 10.8.0.14/32 -j DROP
     )
     assert any("10.8.0.10" in item and "DROP" in item for item in limited)
     assert any("no spare address" in item for item in limited)
+    shared_proxy = """```bash
+docker network create --driver bridge --subnet 10.8.0.16/28 --gateway 10.8.0.17 sentica-instance
+docker run --name sentica-memory-proxy --network sentica-instance --ip 10.8.0.21 img
+docker run --name sentica-memory-gateway --network sentica-instance --ip 10.8.0.22 img
+```
+"""
+    assert any(
+        "shares a bridge" in item for item in certificate_bridge_gaps(shared_proxy)
+    )
+
+
+_POSTGRES_IMAGE = (
+    "pgvector/pgvector:pg15"
+    + "@sha256:47af0b65960b14f1c6945aa4ccae37836c632e9a6fe0eea9160936e616e5b2e9"
+)
+_PGBOUNCER_IMAGE = (
+    "edoburu/pgbouncer:v1.24.1-p1"
+    + "@sha256:3db3d7223e93af52b4116f642951a1a5fa44702a88c2a59cf7562cac19320c9e"
+)
+
+
+def _hba_rules(text: str) -> list[str]:
+    rules: list[str] = []
+    for raw in text.splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if line:
+            rules.append(line)
+    return rules
+
+
+def _postgres_run(deploy: str) -> str:
+    for command in _bash_commands(deploy):
+        if (
+            command.startswith("docker run ")
+            and "--name sentica-memory-postgres" in command
+        ):
+            return command
+    return ""
+
+
+def postgres_hardening_gaps(command: str) -> list[str]:
+    """Flags on the Postgres ``docker run``, not on the other containers."""
+    gaps: list[str] = []
+    if not command.startswith("docker run "):
+        gaps.append("postgres command is missing")
+        return gaps
+    if "--read-only" not in command.split():
+        gaps.append("postgres command is not read-only")
+    if "--cap-drop ALL" not in command:
+        gaps.append("postgres command keeps capabilities")
+    if "--auth-local=trust" in command or "--auth-host=trust" in command:
+        gaps.append("postgres initdb uses trust")
+    if "--auth-local=peer --auth-host=scram-sha-256" not in command:
+        gaps.append("postgres initdb auth is not peer and scram")
+    return gaps
+
+
+_HBA_RULES = [
+    "local all sentica peer map=sentica",
+    "host all all 10.8.0.67/32 scram-sha-256",
+    "host all all 0.0.0.0/0 reject",
+    "host all all ::/0 reject",
+]
+_BUSYBOX = (
+    "busybox:1.36"
+    + "@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662"
+)
+_TOPOLOGY_NODEID = (
+    "tests/sentica/test_egress_proxy.py::test_topology_blocks_the_proxy_and_postgres"
+)
+
+
+def test_deploy_postgres_pins_a_digest_and_rejects_trust() -> None:
+    """The Postgres command stays hardened and does not use trust auth."""
+    deploy = " ".join(_text("docs/DEPLOY.md").split())
+    assert _POSTGRES_IMAGE in deploy
+    assert _PGBOUNCER_IMAGE in deploy
+    assert "POSTGRES_PASSWORD_FILE=/run/secrets/password" in deploy
+    assert "POSTGRES_HOST_AUTH_METHOD=" not in deploy
+    assert "does not set `POSTGRES_PASSWORD` or `POSTGRES_HOST_AUTH_METHOD`" in deploy
+    assert "-e POSTGRES_PASSWORD=" not in deploy
+    assert "/var/lib/sentica/postgres:/var/lib/postgresql/data" in deploy
+    assert "--user 999:999" in deploy
+    assert "ident_file=/etc/sentica/pg_ident.conf" in deploy
+    command = _postgres_run(_text("docs/DEPLOY.md"))
+    assert postgres_hardening_gaps(command) == []
+    assert postgres_hardening_gaps(command.replace(" --read-only", "", 1)) != []
+    assert postgres_hardening_gaps(command.replace(" --cap-drop ALL", "", 1)) != []
+    hba = _text("docker/sentica/instance-pg_hba.conf")
+    assert "trust" not in hba.lower()
+    assert _hba_rules(hba) == _HBA_RULES
+    weaker = "host all all 0.0.0.0/0 md5\n" + hba
+    assert _hba_rules(weaker) != _HBA_RULES
+    ident = _text("docker/sentica/instance-pg_ident.conf").lower()
+    assert "trust" not in ident
+    assert "sentica postgres sentica" in ident
+    assert "does not send a password" not in ident
+
+
+def _firewall_rule_index(guide: list[str], prefix: str) -> int:
+    return next(index for index, line in enumerate(guide) if line.startswith(prefix))
+
+
+def _firewall_unit_lines(text: str) -> list[str]:
+    """iptables commands and the while-delete loops around them."""
+    lines: list[str] = []
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if stripped.startswith("iptables ") or stripped.startswith("while iptables "):
+            lines.append(stripped)
+    return lines
+
+
+def _assert_firewall_swap_order(lines: list[str]) -> None:
+    """The old jump is gone before the old chain is flushed."""
+    created = _firewall_rule_index(lines, "iptables -N SENTICA_NEW")
+    filled = _firewall_rule_index(lines, "iptables -A SENTICA_NEW ")
+    inserted = _firewall_rule_index(lines, "iptables -I DOCKER-USER 1 -j SENTICA_NEW")
+    old_jump_removed = next(
+        index
+        for index, line in enumerate(lines)
+        if re.search(r"iptables -D DOCKER-USER -j SENTICA( |$)", line)
+    )
+    flushed = next(
+        index
+        for index, line in enumerate(lines)
+        if line.split()[:3] == ["iptables", "-F", "SENTICA"]
+    )
+    renamed = next(
+        index
+        for index, line in enumerate(lines)
+        if line.split()[:4] == ["iptables", "-E", "SENTICA_NEW", "SENTICA"]
+    )
+    assert created < filled < inserted < old_jump_removed < flushed < renamed
+    for line in lines[:inserted]:
+        assert line.split()[1:3] != ["-F", "SENTICA"]
+
+
+def test_firewall_script_matches_the_guide() -> None:
+    """The unit runs the same rules the guide shows, after Docker."""
+    guide = [
+        command
+        for command in _bash_commands(_text("docs/DEPLOY.md"))
+        if command.startswith("iptables ") or command.startswith("while iptables ")
+    ]
+    script_lines = _firewall_unit_lines(_text("docker/sentica/sentica-firewall.sh"))
+    assert script_lines == guide
+    _assert_firewall_swap_order(script_lines)
+    _assert_firewall_swap_order(guide)
+    unit = _text("docker/sentica/sentica-firewall.service")
+    assert "After=docker.service" in unit
+    assert "Requires=docker.service" in unit
+    assert "Type=oneshot" in unit
+    assert "ExecStart=/usr/local/sbin/sentica-firewall.sh" in unit
+    assert "WantedBy=multi-user.target" in unit
+    deploy = " ".join(_text("docs/DEPLOY.md").split())
+    assert "After=docker.service" in deploy
+    assert "iptables-persistent" in deploy
+    assert "never forwards without drops" in deploy
+
+
+def _jump(target: str) -> _FirewallRule:
+    parsed = _rule_from_rest(["-j", target])
+    assert parsed is not None
+    return parsed
+
+
+def _source_drop(address: str) -> _FirewallRule:
+    parsed = _rule_from_rest(["-s", address, "-j", "DROP"])
+    assert parsed is not None
+    return parsed
+
+
+def _blanket(rule: _FirewallRule) -> bool:
+    return (
+        rule.source is None
+        and rule.dest is None
+        and rule.dport is None
+        and rule.protocol is None
+        and not rule.established
+        and not rule.hostname
+    )
+
+
+def _reaches_source_drop(tables: _Tables, address: str) -> bool:
+    """True when a fresh packet from this source reaches a DROP.
+
+    An empty chain returns to the caller. An established rule does not
+    match. The walk stops at the first chain that drops the source.
+    """
+    source = ipaddress.ip_address(address)
+
+    def chain_drops(name: str, seen: set[str]) -> bool:
+        if name in seen:
+            return False
+        rules = tables.named(name)
+        if rules is None:
+            return False
+        for rule in rules:
+            if _blanket(rule) and rule.target in {"RETURN", "ACCEPT"}:
+                return False
+            if (
+                rule.target == "DROP"
+                and rule.source is not None
+                and source in rule.source
+            ):
+                return True
+            if (
+                _blanket(rule)
+                and tables.named(rule.target) is not None
+                and chain_drops(rule.target, seen | {name})
+            ):
+                return True
+        return False
+
+    for rule in tables.docker_user:
+        if _blanket(rule) and rule.target in {"RETURN", "ACCEPT"}:
+            return False
+        if rule.target == "DROP" and rule.source is not None and source in rule.source:
+            return True
+        if (
+            _blanket(rule)
+            and tables.named(rule.target) is not None
+            and chain_drops(rule.target, set())
+        ):
+            return True
+    return False
+
+
+def _apply_watching_drops(lines: list[str], tables: _Tables) -> None:
+    for line in lines:
+        _apply_line(tables, line)
+        for address in ("10.8.0.18", "10.8.0.67"):
+            assert _reaches_source_drop(tables, address), line
+
+
+def test_firewall_swap_keeps_drops_for_a_duplicate_jump() -> None:
+    """A duplicate jump and a leftover chain never open a forward window."""
+    lines = _firewall_unit_lines(_text("docker/sentica/sentica-firewall.sh"))
+    clean = _apply_tables(lines)
+    drops = [_source_drop("10.8.0.18/32"), _source_drop("10.8.0.67/32")]
+    duplicate = _Tables()
+    duplicate.sentica = list(drops)
+    duplicate.extra["SENTICA_NEW"] = list(drops)
+    duplicate.docker_user = [
+        _jump("SENTICA"),
+        _jump("SENTICA"),
+        _jump("SENTICA_NEW"),
+    ]
+    _apply_watching_drops(lines, duplicate)
+    _apply_watching_drops(lines, duplicate)
+    assert duplicate.docker_user == clean.docker_user
+    assert duplicate.sentica == clean.sentica
+    assert duplicate.extra == {}
+    parked = _Tables()
+    parked.extra["SENTICA_NEW"] = list(drops)
+    parked.docker_user = [_jump("SENTICA_NEW")]
+    _apply_watching_drops(lines, parked)
+    assert parked.docker_user == clean.docker_user
+    assert parked.sentica == clean.sentica
+    assert parked.extra == {}
+    crashed = _Tables()
+    crashed.sentica = []
+    crashed.extra["SENTICA_NEW"] = list(drops)
+    crashed.docker_user = [_jump("SENTICA_NEW"), _jump("SENTICA")]
+    _apply_watching_drops(lines, crashed)
+    assert crashed.docker_user == clean.docker_user
+    assert crashed.sentica == clean.sentica
+    assert crashed.extra == {}
+
+
+def _keyword_selects(expression: str, nodeid: str) -> bool:
+    # Expression is pytest's private API. This -k check relies on the
+    # pytest pin in uv.lock (9.0.3).
+    from _pytest.mark.expression import Expression
+
+    compiled = Expression.compile(expression)
+    folded = nodeid.lower()
+
+    def matches(name: str, /, **kwargs: str | int | bool | None) -> bool:
+        # Call-form keywords are not part of a node id. ExpressionMatcher
+        # requires the kwargs parameter; a one-argument lambda is not that type.
+        if kwargs:
+            return False
+        return name.lower() in folded
+
+    return compiled.evaluate(matches)
+
+
+def firewall_ci_gaps(command: str) -> list[str]:
+    """The main pytest command must collect the topology test."""
+    gaps: list[str] = []
+    if "test_egress_proxy.py" in command:
+        gaps.append("firewall topology test is ignored")
+    tokens = shlex.split(command)
+    if "-k" in tokens:
+        expression = tokens[tokens.index("-k") + 1]
+        if not _keyword_selects(expression, _TOPOLOGY_NODEID):
+            gaps.append("firewall topology test is excluded by -k")
+    return gaps
+
+
+def test_ci_collects_the_firewall_topology_test() -> None:
+    """The main CI job runs the test that applies the firewall."""
+    workflow = _text(".github/workflows/unittest.yml")
+    commands = re.findall(r"uv run pytest[^\n]*", workflow)
+    main = [
+        command
+        for command in commands
+        if "--ignore=tests/sentica/test_m1_stack.py" in command
+    ]
+    assert main == ["uv run pytest -x --ignore=tests/sentica/test_m1_stack.py"]
+    assert firewall_ci_gaps(main[0]) == []
+    excluded = main[0] + " -k 'not topology'"
+    assert firewall_ci_gaps(excluded) != []
+    assert any("excluded by -k" in item for item in firewall_ci_gaps(excluded))
+
+
+def test_deploy_password_file_steps_create_the_file(tmp_path: Path) -> None:
+    """The guide's install creates the password file before anything writes it."""
+    deploy = _text("docs/DEPLOY.md")
+    blocks = re.findall(r"```bash\n(.*?)```", deploy, re.DOTALL)
+    fence = next(block for block in blocks if "sentica-memory-postgres" in block)
+    installs = [
+        command
+        for command in _bash_commands("```bash\n" + fence + "```")
+        if command.startswith("install ")
+    ]
+    password = next(command for command in installs if "postgres.password" in command)
+    assert password.split()[-2:] == ["/dev/null", "/run/sentica/postgres.password"]
+    assert any(command.startswith("install -d ") for command in installs)
+    root = tmp_path / "scratch"
+    root.mkdir()
+    lines = ["set -eu"]
+    for command in installs:
+        lines.append(
+            command.replace("/run/sentica", "/work/run").replace(
+                "/var/lib/sentica", "/work/lib"
+            )
+        )
+    lines.append("stat -c '%u %g %a %s' /work/run/postgres.password")
+    lines.append("printf '%s\\n' one-line > /work/run/postgres.password")
+    lines.append("stat -c '%u %g %a' /work/run/postgres.password")
+    lines.append("cat /work/run/postgres.password")
+    try:
+        completed = subprocess.run(
+            [
+                "docker",
+                "run",
+                "--rm",
+                "--user",
+                "root",
+                "-v",
+                str(root) + ":/work",
+                "--entrypoint",
+                "sh",
+                _BUSYBOX,
+                "-c",
+                "\n".join(lines),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert completed.returncode == 0, completed.stderr
+        empty, written, content = completed.stdout.splitlines()
+        assert empty == "999 999 400 0"
+        assert written == "999 999 400"
+        assert content == "one-line"
+        host_file = root / "run" / "postgres.password"
+        host_stat = host_file.stat()
+        assert host_stat.st_uid == 999
+        assert host_stat.st_gid == 999
+        assert stat.S_IMODE(host_stat.st_mode) == 0o400
+        data = root / "lib" / "postgres"
+        assert data.is_dir()
+        assert data.stat().st_uid == 999
+        assert stat.S_IMODE(data.stat().st_mode) == 0o700
+    finally:
+        removed = subprocess.run(
+            [
+                "docker",
+                "run",
+                "--rm",
+                "--user",
+                "root",
+                "-v",
+                str(root) + ":/work",
+                "--entrypoint",
+                "sh",
+                _BUSYBOX,
+                "-c",
+                "rm -rf /work/run /work/lib",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    assert removed.returncode == 0, removed.stderr
+    assert not (root / "run").exists()
+    assert not (root / "lib").exists()
 
 
 def test_dockerignore_excludes_bytecode() -> None:

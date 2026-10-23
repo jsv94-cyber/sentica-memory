@@ -65,6 +65,8 @@ jobs:
       - name: Install the project
         run: uv sync --all-extras --dev
 
+      # Collects tests/sentica/test_egress_proxy.py, which applies the
+      # SENTICA chain on throwaway addresses and checks the drop counters.
       - name: Run Tests
         run: uv run pytest -x --ignore=tests/sentica/test_m1_stack.py
         env:

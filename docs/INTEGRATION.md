@@ -333,7 +333,7 @@ this sidecar. The model gateway holds those.
 | `SENTICA_BIND_HOST` | no | Private address, `10.8.0.4` in the deploy plan |
 | `SENTICA_TENANT_HASH_KEY` or `SENTICA_TENANT_HASH_KEY_PATH` | yes | HMAC key, at least 32 bytes |
 | `SENTICA_GATEWAY_MODE` | no | `on` |
-| `SENTICA_GATEWAY_BASE_URL` | no | Model gateway, `https://10.8.0.14` in the deploy plan |
+| `SENTICA_GATEWAY_BASE_URL` | no | Model gateway, `https://10.8.0.22` in the deploy plan |
 | `SENTICA_GATEWAY_DERIVER_MODEL` | no | Required model name |
 | `SENTICA_GATEWAY_SUMMARY_MODEL` | no | Required model name |
 | `SENTICA_GATEWAY_DIALECTIC_MODEL` | no | Required model name |
@@ -347,28 +347,32 @@ are in `docs/CONFIG.md`. `docs/DEPLOY.md` has the run flags.
 
 ## Network
 
-One instance network, `10.8.0.8/29`, gateway `10.8.0.9`. The broker
-reaches the API at `10.8.0.4:8000`. That address is not on the bridge.
+The bridges and addresses are in `docs/DEPLOY.md`. The broker reaches
+the API at `10.8.0.4:8000`. That address is not on a bridge.
 
 | Container | Address |
 | --- | --- |
-| API | `10.8.0.10` |
-| Deriver | `10.8.0.11` |
-| Migrate | `10.8.0.12` |
-| Certificate proxy | `10.8.0.13:6432` |
-| Model gateway | `10.8.0.14:443` |
+| API | `10.8.0.18` on `sentica-instance`, `10.8.0.82` on `sentica-clients` |
+| Deriver | `10.8.0.19` on `sentica-instance`, `10.8.0.83` on `sentica-clients` |
+| Migrate | `10.8.0.20` on `sentica-instance`, `10.8.0.84` on `sentica-clients` |
+| Certificate proxy | `10.8.0.85:6432` on `sentica-clients`, `10.8.0.67` on `sentica-db` |
+| Model gateway | `10.8.0.22:443` on `sentica-instance`, `10.8.0.34` on `sentica-egress` |
+| Egress proxy | `10.8.0.35:8443` on `sentica-egress`, `10.8.0.50` on `sentica-wan` |
+| Postgres | `10.8.0.66:5432` on `sentica-db` |
 
-Postgres is on an internal `db` network. The proxy is the only client.
-The API, deriver, and migrate reach Postgres only through the proxy.
-The agent container is on none of these networks.
+`sentica-clients`, `sentica-egress`, and `sentica-db` are internal.
+`sentica-instance` is not, because the API publish cannot come from an
+internal network. The gateway is not on `sentica-clients`. The
+certificate proxy is not on `sentica-instance`. Postgres is only on
+`sentica-db`. The API, deriver, and migrate reach Postgres only through
+the certificate proxy. The agent container is on none of these networks.
 
-Egress from the API and the deriver is the proxy port and the gateway
-port. Migrate may open the proxy. The gateway may open provider hosts
-on 443. Provider hosts (`api.openai.com`, `api.anthropic.com`,
-`generativelanguage.googleapis.com`) stay denied for every other
-container. The `DOCKER-USER` rules are in `docs/DEPLOY.md`. Run the API
-and the deriver read-only, uid 100, capabilities dropped,
-`no-new-privileges`, tmpfs `/tmp`, runtime `runsc`.
+Provider hosts (`api.openai.com`, `api.anthropic.com`,
+`generativelanguage.googleapis.com`) are opened by the egress proxy,
+from the gateway only. The `SENTICA` chain and the unit that restores
+it after `docker.service` are in `docs/DEPLOY.md`. Run the API and the
+deriver read-only, uid 100, capabilities dropped, `no-new-privileges`,
+tmpfs `/tmp`, runtime `runsc`.
 
 ## Health and readiness
 
@@ -472,10 +476,8 @@ every conclusion. A conclusion stores the `source_trust` that was sent.
 5. Break-glass reads, owner sharing rules, and holding a caller-ID
    preload until identity is confirmed are Sentica product behavior.
    The brief is returned to any token that includes the workspace.
-6. The firewall rules in `docs/DEPLOY.md` name provider hosts. Those
-   iptables rules need addresses. The `10.8.0.8/29` plan has no spare
-   address. Both are deploy follow-ups, not part of this contract's
-   request shapes.
+6. The bridges, addresses, and firewall unit are in `docs/DEPLOY.md`.
+   They are not part of this contract's request shapes.
 7. Production refuses a conclusion with no `source_trust`, as ingest
    does. The runtime-role proof sends the label on every conclusion
    body.
