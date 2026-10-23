@@ -122,4 +122,9 @@ release v3.3.0 (`608aec8a928da13c540262ed980c569448fb53ab`).
 | `FORK_CHANGES.md` | Rows for the Redis host port change. | Redis host port |
 | `tests/sentica/test_m9_packaging.py` | The suite command must be `uv run pytest -x --ignore=tests/sentica/test_m1_stack.py`, plus at most one `--deselect` of `context_latency_ci.NODE_ID`. Any `-k`, any other `--deselect`, or any other `--ignore` fails. Removing that deselect still fails the latency guard. | M6, M9 |
 | `.github/workflows/unittest.yml` | Deselect the context-latency node from the suite command and run that node in the next step with `-n0`. The 300 ms assertion stays. | M6 |
+| `docs/RELEASE-v0.2.1-sentica.md` | Release notes for `v0.2.1-sentica`. Sentica swaps the two pin constants. No migrate step. | R6 |
+| `docs/RELEASES.md` | Entry for `v0.2.1-sentica`. The digest stays the value in `docs/image-digest.txt`. | R6 |
+| `docs/image-digest.txt` | The comment names `docs/RELEASE-v0.2.1-sentica.md`. The digest line is unchanged. | R6 |
+| `tests/sentica/test_integration_contract.py` | Release assertions require the v0.2.1 note, the digest comment, and the releases entry. | R6 |
+| `tests/sentica/test_m0_baseline.py` | The v0.2.1 release note is included in the em dash check. | R6 |
 
