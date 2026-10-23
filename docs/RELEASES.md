@@ -1,5 +1,18 @@
 # Releases
 
+## Unreleased
+
+The default image manifest is no longer the one recorded for
+`v0.2.1-sentica`. `docs/RELEASE-v0.2.1-sentica.md` stays as released.
+The next release runs a migrate step from Alembic head `d4a8c1e27b90`
+to `e7c2a91b4d08`. That revision adds
+`ix_documents_workspace_observer_observed` on documents
+`(workspace_name, observer, observed)`. This branch's manifest is
+`sha256:541c0bb686608d3b204e8e08908d89248f1cfde194f6b32cf427b2eab9b124bf`.
+`docs/image-digest.txt` holds that manifest. CI builds the
+image twice from clean builders and fails when those two digests differ
+or when they differ from that file.
+
 ## v0.2.1-sentica
 
 The image manifest is

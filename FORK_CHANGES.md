@@ -131,4 +131,5 @@ release v3.3.0 (`608aec8a928da13c540262ed980c569448fb53ab`).
 | `tests/sentica/test_contract_dedupe_fields.py` | search_memory, brief, and list responses carry `workspace_id`, `subject_ref`, `session_id`, and `content`. A mutated row fails the same check. | R6-7 |
 | `PROGRESS.md` | Records the R6-7 contract. The M-INT decision text is unchanged. | R6-7 |
 | `FORK_CHANGES.md` | Rows for the R6-7 contract. | R6-7 |
+| `migrations/versions/e7c2a91b4d08_documents_workspace_observer_observed.py`, `src/models.py`, `tests/sentica/test_documents_triple_index.py`, `tests/sentica/test_migration_checksums.py`, `docs/image-digest.txt`, `docs/RELEASES.md`, `tests/sentica/test_integration_contract.py` | Composite index on documents `(workspace_name, observer, observed)`, built concurrently. Ten thousand conclusions use it for the triple-filtered reads. The migration runs up and down as the ddl role. The next release migrates from `d4a8c1e27b90` to `e7c2a91b4d08`. The live image digest is the two-build manifest. The v0.2.1 digest stays the tagged constant. | R6-4 |
 
