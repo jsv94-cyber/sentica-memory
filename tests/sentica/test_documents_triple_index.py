@@ -16,7 +16,7 @@ from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from psycopg import sql
-from sqlalchemy import create_engine, select, text, update
+from sqlalchemy import create_engine, select, text
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.dml import Update
@@ -111,6 +111,12 @@ def test_api_and_deriver_share_the_revision_gate() -> None:
     assert f'down_revision: str | None = "{PREVIOUS}"' in source
     assert "autocommit_block()" in source
     assert "postgresql_concurrently=True" in source
+    assert "SET lock_timeout = 0" not in source
+    assert 'LOCK_TIMEOUT = "30s"' in source
+    assert 'STATEMENT_TIMEOUT = "240s"' in source
+    assert "_CONTAINER_LIMIT_SECONDS = 360" in source
+    assert "Refusing to finish migrate" in source
+    assert "The invalid index was dropped" in source
     cfg = Config(str(ROOT / "alembic.ini"))
     cfg.set_main_option("script_location", str(ROOT / "migrations"))
     assert ScriptDirectory.from_config(cfg).get_heads() == [REVISION]
@@ -134,7 +140,10 @@ def test_ddl_role_migrates_the_index_up_and_down(
     monkeypatch.setattr(settings.DB, "CONNECTION_URI", ddl_url)
     monkeypatch.setenv("DB_CONNECTION_URI", ddl_url)
     engine_logger = logging.getLogger("sqlalchemy.engine")
+    engine_impl = logging.getLogger("sqlalchemy.engine.Engine")
     previous_level = engine_logger.level
+    previous_disabled = engine_impl.disabled
+    engine_impl.disabled = True
     cfg = Config(str(ROOT / "alembic.ini"))
     cfg.set_main_option("script_location", str(ROOT / "migrations"))
     cfg.set_main_option("sqlalchemy.url", ddl_url)
@@ -189,7 +198,7 @@ def test_ddl_role_migrates_the_index_up_and_down(
         _check_revision(ddl_url, schema)
     finally:
         engine_logger.setLevel(previous_level)
-        logging.getLogger("sqlalchemy.engine.Engine").disabled = True
+        engine_impl.disabled = previous_disabled
         with psycopg.connect(maintenance, autocommit=True) as conn:
             conn.execute(
                 "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
@@ -433,16 +442,7 @@ async def test_ten_thousand_conclusions_use_the_triple_index(
         ),
     )
     assert removed, removed
-    triple_only = update(models.Document).where(
-        models.Document.workspace_name == workspace,
-        models.Document.observer == observer,
-        models.Document.observed == observed,
-        models.Document.deleted_at.is_(None),
-    )
-    update_plan = await _plan_async(db_session, triple_only)
-    assert INDEX in update_plan, update_plan
-    if INDEX not in removed[0]:
-        assert "pkey" in removed[0] or "pk_documents" in removed[0]
+    _require(removed)
 
 
 async def _plan_async(db: AsyncSession, statement: Any) -> str:

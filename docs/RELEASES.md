@@ -4,15 +4,22 @@
 
 The default image manifest is no longer the one recorded for
 `v0.2.1-sentica`. `docs/RELEASE-v0.2.1-sentica.md` stays as released.
-This branch's image includes the digest-pinned Python stages and the
-other files that image copies, so its manifest is
+Pull request #34 records
 `sha256:2c8bbf29429766bcf1e502d75d03f347b57ad050e48594ca18cd4b9d6895fa97`.
-The next release runs a migrate step from Alembic head `d4a8c1e27b90`
+Pull request #36 records
+`sha256:df87aff25b1da10125bfa9fe4ad12aa3a26531a9b30806c9912926b0bc6c890f`.
+The next release migrates from Alembic head `d4a8c1e27b90`
 to `e7c2a91b4d08`. That revision adds
 `ix_documents_workspace_observer_observed` on documents
-`(workspace_name, observer, observed)`. This branch's manifest is
-`sha256:3ebc526828d32da1bc3256fe352230250eb292395a284e92538f0d38b9456357`.
-`docs/image-digest.txt` holds that manifest. CI builds the
+`(workspace_name, observer, observed)`.
+The migrate container stops at 360 seconds. This revision sets
+`lock_timeout` to 30 seconds and `statement_timeout` to 240 seconds,
+both below that limit. If either fires, migrate refuses to finish and
+drops an invalid index. If a stuck lock still leaves
+`ix_documents_workspace_observer_observed` invalid, connect as the ddl
+role and run `DROP INDEX CONCURRENTLY IF EXISTS
+memory.ix_documents_workspace_observer_observed`, then run migrate again.
+`docs/image-digest.txt` holds the pull request #36 manifest. CI builds the
 image twice from clean builders and fails when those two digests differ
 or when they differ from that file.
 

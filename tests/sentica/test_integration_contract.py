@@ -86,7 +86,7 @@ def test_release_notes_pin_the_base_images() -> None:
     assert 'raise SystemExit("image digest drift")' in checker
     assert "docs/RELEASE-v0.2.0-sentica.md" not in checker
     image = "sha256:522b48cbd15d6ee59b99f0df376fc1e4cdaffd635e8aba66fd45114c6c35ae6d"
-    current = "sha256:3ebc526828d32da1bc3256fe352230250eb292395a284e92538f0d38b9456357"
+    current = "sha256:df87aff25b1da10125bfa9fe4ad12aa3a26531a9b30806c9912926b0bc6c890f"
     tagged = "sha256:65bfe6725581aae41a242f7a14f7f9a4b6deeba2d01bf85577d3286765c615e8"
     assert image in notes
     assert current not in notes
