@@ -255,9 +255,10 @@ One workspace responds `200` with one object:
 }
 ```
 
-`stale` items are `{"id", "subject_ref", "content"}`. A request whose
-`workspaces` array names more than the path returns a JSON array of
-those objects, one per workspace, path workspace first.
+`stale` items are `{"id", "subject_ref", "content"}` and carry no
+`session_id`. A request whose `workspaces` array names more than the
+path returns a JSON array of those objects, one per workspace, path
+workspace first.
 
 Caller-ID preload is this call. The broker still applies the release
 check. The instance returns the package to any token that includes the
@@ -454,15 +455,25 @@ does not also replay that message.
 
 ## Gaps for Jose
 
-These are Section 35 requirements this service does not implement yet.
-The small ones in this release are search_memory and `workspace_id` on
-every conclusion. A conclusion stores the `source_trust` that was sent.
+Item 1 is closed. Item 4 is the read contract. Item 6 is an accepted
+residual risk. Items 2, 3, 5, and 7 are Section 35 requirements this
+service does not implement yet. The small ones in this release are
+search_memory and `workspace_id` on every conclusion. A conclusion
+stores the `source_trust` that was sent.
 
-1. Sensitivity and role are not columns. A conclusion stores
-   `source_trust` and `subject_ref`, and `workspace_id` is the
-   partition. Derived rows inherit an external taint. They do not store
-   General, Internal, Restricted, or Personal, and they do not store a
-   role id. Highest-label inheritance for those two labels is still open.
+1. Closed by design (D5). The workspace is the label. Role and
+   sensitivity stay off the memory row, as recorded in `PROGRESS.md`.
+   A conclusion stores `source_trust` and `subject_ref`, and
+   `workspace_id` is the partition. Derived rows inherit an external
+   taint. They do not store General, Internal, Restricted, or Personal,
+   and they do not store a role id.
+
+   Planned contract for R6-6. The Sentica broker sets an allow-listed
+   ceiling key in workspace metadata
+   (`ALLOWED_WORKSPACE_INTERNAL_METADATA_KEYS` in
+   `src/sentica/workspace_metadata.py`) in `ensurePartition`. The engine
+   treats a missing key as `general` and fails closed. A key that is
+   not on that allow-list is refused.
 2. The classifier that upgrades bank numbers, Social Security numbers,
    salaries, medical terms, and disciplinary language to Restricted is
    not in this service. The storage bans in Section 35.7 are in force:
@@ -470,14 +481,20 @@ every conclusion. A conclusion stores the `source_trust` that was sent.
 3. The release check, redaction, and the Restricted-read audit row are
    the broker's. This service returns the rows the token's workspaces
    allow.
-4. Ingest and conclusion create have no idempotency key. The broker
-   must treat a 2xx body as the only ack. A dropped connection after
-   the server committed can insert a second row on replay.
+4. Dedupe is on read (D9), using `workspace_id`, `subject_ref`,
+   `session_id`, and `content`. search_memory, each brief conclusion,
+   and each conclusion list item carry those four fields. Stale items
+   carry no `session_id`. `Idempotency-Key` is an upstream ask and is
+   not built here. The broker must treat a 2xx body as the only ack. A
+   dropped connection after the server committed can insert a second
+   row on replay.
 5. Break-glass reads, owner sharing rules, and holding a caller-ID
    preload until identity is confirmed are Sentica product behavior.
    The brief is returned to any token that includes the workspace.
-6. The bridges, addresses, and firewall unit are in `docs/DEPLOY.md`.
-   They are not part of this contract's request shapes.
+6. Accepted residual risk. Provider hostnames are not iptables
+   destinations. A hostname in `iptables -d` is resolved once, when the
+   rule is inserted, and the rule keeps that address. Squid enforces
+   hostnames. See the network section of `docs/DEPLOY.md`.
 7. Production refuses a conclusion with no `source_trust`, as ingest
    does. The runtime-role proof sends the label on every conclusion
    body.

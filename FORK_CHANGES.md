@@ -127,4 +127,8 @@ release v3.3.0 (`608aec8a928da13c540262ed980c569448fb53ab`).
 | `docs/image-digest.txt` | The comment names `docs/RELEASE-v0.2.1-sentica.md`. The digest line is unchanged. | R6 |
 | `tests/sentica/test_integration_contract.py` | Release assertions require the v0.2.1 note, the digest comment, and the releases entry. | R6 |
 | `tests/sentica/test_m0_baseline.py` | The v0.2.1 release note is included in the em dash check. | R6 |
+| `docs/INTEGRATION.md` | Close gap 1 under D5, record the R6-6 ceiling key as the planned contract, record D9 dedupe on read, and record gap 6 as an accepted residual risk. | R6-7 |
+| `tests/sentica/test_contract_dedupe_fields.py` | search_memory, brief, and list responses carry `workspace_id`, `subject_ref`, `session_id`, and `content`. A mutated row fails the same check. | R6-7 |
+| `PROGRESS.md` | Records the R6-7 contract. The M-INT decision text is unchanged. | R6-7 |
+| `FORK_CHANGES.md` | Rows for the R6-7 contract. | R6-7 |
 

@@ -538,3 +538,22 @@ Follow-up on 2026-10-22, suite command:
 
 - CI run 39902396740 on 9d03dd0e: serial step 25 s, pytest 15.46 s, 1 collected, cold 145.3 ms, warm p95 112.0 ms; parallel 3509 passed, 53 skipped.
 
+## R6-7. Contract docs. 2026-10-23
+
+Jose, in chat on Oct 23, 2026: "Approve R6-1 to R6-7, Tag v0.2.1-sentica now, the broker sets a ceiling key in the workspace's metadata, and the engine treats a missing key as "general"."
+
+- Gap 1 is closed by design (D5). The workspace is the label. Role and
+  sensitivity stay off the memory row. The planned R6-6 contract is an
+  allow-listed ceiling key in workspace metadata, set by the broker in
+  `ensurePartition`. A missing key is `general`, and the engine fails
+  closed.
+- Gap 4 is dedupe on read (D9) using `workspace_id`, `subject_ref`,
+  `session_id`, and `content`. Stale items carry no `session_id`.
+  `Idempotency-Key` is an upstream ask and is not built here.
+- Gap 6 is an accepted residual risk. Provider hostnames are not
+  iptables destinations. Squid enforces hostnames.
+- `tests/sentica/test_contract_dedupe_fields.py` checks those four
+  fields on search_memory, brief, and the conclusion list.
+  `tests/sentica/rls_job.py` is unchanged. The default image is
+  unchanged.
+
