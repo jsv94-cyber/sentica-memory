@@ -864,7 +864,9 @@ def test_topology_blocks_the_proxy_and_postgres() -> None:
     internal bridge. The gateway is not on that bridge. A source with a
     default route must time out. That proxy has no default route, and its
     failure must be errno 101. Each routed source must move its DROP
-    counter. A throwaway chain with the guide's rule shape drops routed
+    counter. The API probe to Postgres is counted on its own, so a return
+    for that flow cannot hide behind the other probes. A throwaway chain
+    with the guide's rule shape drops routed
     packets from the instance addresses. The test removes that chain and
     does not publish a host port.
     """
@@ -1111,8 +1113,17 @@ def test_topology_blocks_the_proxy_and_postgres() -> None:
             counted = _host_iptables(env, "-L", chain, "-n", "-v", "-x")
             assert counted.returncode == 0, counted.stderr
             opened = counted.stdout
-            for source in (deriver_ip, migrate_ip, gateway_inst):
+            for source in (api_ip, deriver_ip, migrate_ip, gateway_inst):
                 assert _packet_count(opened, source, "DROP") > 0, source + "\n" + opened
+            isolated = _host_iptables(env, "-Z", chain)
+            assert isolated.returncode == 0, isolated.stderr
+            api_pg_probe = _container_open(env, roles["api"], postgres_ip, 5432)
+            api_pg_counted = _host_iptables(env, "-L", chain, "-n", "-v", "-x")
+            assert api_pg_counted.returncode == 0, api_pg_counted.stderr
+            assert api_pg_probe == "FAIL TimeoutError", api_pg_probe
+            assert _packet_count(api_pg_counted.stdout, api_ip, "DROP") > 0, (
+                api_pg_counted.stdout
+            )
             zeroed_again = _host_iptables(env, "-Z", chain)
             assert zeroed_again.returncode == 0, zeroed_again.stderr
             api_out = _container_open(env, roles["api"], "1.1.1.1", 443)
