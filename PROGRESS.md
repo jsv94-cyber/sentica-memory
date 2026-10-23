@@ -557,3 +557,22 @@ Jose, in chat on Oct 23, 2026: "Approve R6-1 to R6-7, Tag v0.2.1-sentica now, th
   `tests/sentica/rls_job.py` is unchanged. The default image is
   unchanged.
 
+## R6-6. Restricted guard on derived conclusions. 2026-10-23
+
+Jose, in chat on Oct 23, 2026: "Approve R6-1 to R6-7, Tag v0.2.1-sentica now, the broker sets a ceiling key in the workspace's metadata, and the engine treats a missing key as "general"."
+
+- The ceiling key is `ceiling` on `workspaces.internal_metadata`.
+  Allowed values are `general`, `internal`, `restricted`, and
+  `personal`. A missing key, a non-string, or any other string is
+  `general`.
+- Derived conclusions, peer-card lines, and dream digests that match
+  a Restricted pattern are dropped when the ceiling ranks below
+  `restricted`. The engine does not move the row. Explicit conclusions
+  the broker creates are left as the broker classified them.
+- Each drop is counted and logged with a reason code. The text is not
+  logged. `tests/sentica/rls_job.py` is unchanged.
+- Only a broker token whose `audience` claim is `broker` may set the
+  ceiling, via `PUT /v3/workspaces/{workspace_id}/ceiling`. A workspace
+  metadata update cannot. Session summaries drop the same patterns.
+  Medical terms stay on the storage ban and are not ceiling hits.
+

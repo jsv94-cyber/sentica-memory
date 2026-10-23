@@ -151,6 +151,17 @@ class WorkspaceUpdate(WorkspaceBase):
     configuration: WorkspaceConfiguration | None = None
 
 
+class WorkspaceCeilingUpdate(BaseModel):
+    """Body for the broker ceiling write. One string field, no extra keys."""
+
+    model_config = ConfigDict(extra="forbid")  # pyright: ignore
+    ceiling: str
+
+
+class WorkspaceCeiling(BaseModel):
+    ceiling: str
+
+
 class SynthesisUpdate(BaseModel):
     """Turn workspace synthesis on or off without deleting earlier dreams."""
 

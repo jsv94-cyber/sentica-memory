@@ -12,6 +12,10 @@ Pull request #38 records
 `sha256:b55df6433b02d465b335351478a15aa8688af3c0d5bf374002b8591f4b271003`.
 The probe fix records
 `sha256:88787f38e3ef3a9071dad3375862e2daa7bf3a959d9a9aed1134dd53e69ea285`.
+R6-6 records
+`sha256:779097b49a1035e542201902aa3b222c968264918e55ffd5c62baabd7ed8beaf`.
+The ceiling write records
+`sha256:23f86925e7c0dcbc7293e3abd39ba2c7b7bb7f7afa10a3fa448cbb726292b486`.
 The next release migrates from Alembic head `d4a8c1e27b90`
 to `e7c2a91b4d08`. That revision adds
 `ix_documents_workspace_observer_observed` on documents
@@ -24,7 +28,7 @@ drops an invalid index. If a stuck lock still leaves
 role and run `DROP INDEX CONCURRENTLY IF EXISTS
 memory.ix_documents_workspace_observer_observed`, then run migrate again.
 This merge also copies the workspace RLS probe. `docs/image-digest.txt`
-holds the probe-fix manifest. CI builds the
+holds the ceiling-write manifest. CI builds the
 image twice from clean builders and fails when those two digests differ
 or when they differ from that file.
 

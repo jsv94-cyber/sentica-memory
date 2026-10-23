@@ -99,6 +99,7 @@ from .workspace import (
     get_or_create_workspace,
     get_workspace,
     get_workspace_stats,
+    set_workspace_ceiling,
     update_workspace,
 )
 
@@ -197,5 +198,6 @@ __all__ = [
     "get_or_create_workspace",
     "get_workspace",
     "get_all_workspaces",
+    "set_workspace_ceiling",
     "update_workspace",
 ]

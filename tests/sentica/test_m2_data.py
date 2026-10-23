@@ -1355,6 +1355,9 @@ def test_summary_check_runs_before_the_save_session() -> None:
     assert summary.index("keep_conclusion") < summary.index(
         'tracked_db("summary.save")'
     )
+    assert summary.index("restricted_drop_reason") < summary.index(
+        'tracked_db("summary.save")'
+    )
     accept = inspect.getsource(
         dreams._accept  # pyright: ignore[reportPrivateUsage]
     )

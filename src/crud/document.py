@@ -561,15 +561,27 @@ class CreateDocumentsResult:
 
 def _without_banned(
     documents: list[schemas.DocumentCreate],
+    *,
+    ceiling: str,
 ) -> list[schemas.DocumentCreate]:
-    from src.sentica.safety import banned_category, note_drop
+    """Drop banned text, and Restricted patterns the ceiling cannot hold.
+
+    Explicit conclusions created by the broker do not come through here.
+    ``create_observations`` writes those, and the broker already
+    classified them.
+    """
+    from src.sentica.restricted import restricted_drop_reason
+    from src.sentica.safety import banned_category, record_drop
 
     kept: list[schemas.DocumentCreate] = []
     for doc in documents:
         category = banned_category(doc.content)
         if category is not None:
-            logger.info("Dropped a conclusion category=%s", category)
-            note_drop(category)
+            record_drop(category)
+            continue
+        reason = restricted_drop_reason(doc.content, ceiling, broker_explicit=False)
+        if reason is not None:
+            record_drop(reason)
             continue
         kept.append(doc)
     return kept
@@ -719,7 +731,10 @@ async def create_documents(
         List of DocumentCreate schemas that were actually inserted (excludes
         duplicates and failures).
     """
-    documents = _without_banned(documents)
+    from src.sentica.workspace_metadata import ceiling_for_workspace
+
+    ceiling = await ceiling_for_workspace(workspace_name, db)
+    documents = _without_banned(documents, ceiling=ceiling)
     if not documents:
         return CreateDocumentsResult()
     honcho_documents: list[models.Document] = []
@@ -1282,6 +1297,9 @@ async def create_observations(
         observations = retained
         if not observations:
             return []
+
+    # These rows are explicit conclusions the broker created. The
+    # restricted-pattern drop in ``_without_banned`` does not run here.
 
     # Collect unique sessions and peer pairs to validate
     sessions_to_validate: set[str] = set()

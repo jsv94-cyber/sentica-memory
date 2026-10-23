@@ -17,6 +17,7 @@ import os
 ALLOW_LIST: frozenset[tuple[str, str]] = frozenset(
     {
         ("src.sentica.db_connect", "proxy tenant=%s connections=%s"),
+        ("src.sentica.safety", "Dropped a conclusion category=%s"),
     }
 )
 _LOCATION = "%s %s %s %s"
