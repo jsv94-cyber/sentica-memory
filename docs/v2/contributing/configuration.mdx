@@ -149,7 +149,7 @@ LOCAL_METRICS_FILE=metrics.jsonl
 DB_CONNECTION_URI=postgresql+psycopg://username:password@host:port/database
 
 # Example for local development
-DB_CONNECTION_URI=postgresql+psycopg://postgres:postgres@localhost:5432/postgres
+DB_CONNECTION_URI=postgresql+psycopg://postgres:postgres@localhost:35432/postgres
 
 # Example for production
 DB_CONNECTION_URI=postgresql+psycopg://honcho_user:secure_password@db.example.com:5432/honcho_prod
@@ -180,7 +180,7 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: honcho
     ports:
-      - "5432:5432"
+      - "35432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql
@@ -216,7 +216,7 @@ Honcho supports Redis caching to improve performance by caching frequently acces
 CACHE_ENABLED=false  # Set to true to enable caching
 
 # Redis connection
-CACHE_URL=redis://localhost:6379/0?suppress=true
+CACHE_URL=redis://localhost:36379/0?suppress=true
 
 # Cache namespace and TTL
 CACHE_NAMESPACE=honcho  # Prefix for all cache keys
@@ -233,7 +233,7 @@ CACHE_DEFAULT_LOCK_TTL_SECONDS=5  # Lock duration when fetching from DB on cache
 
 **Note:** Caching requires a Redis instance. You can run Redis locally with Docker:
 ```bash
-docker run -d -p 6379:6379 redis:latest
+docker run -d -p 36379:6379 redis:latest
 ```
 
 ## LLM Provider Configuration
@@ -444,7 +444,7 @@ SESSION_OBSERVERS_LIMIT = 10
 EMBED_MESSAGES = false
 
 [db]
-CONNECTION_URI = "postgresql+psycopg://postgres:postgres@localhost:5432/honcho_dev"
+CONNECTION_URI = "postgresql+psycopg://postgres:postgres@localhost:35432/honcho_dev"
 POOL_SIZE = 5
 
 [auth]
@@ -493,7 +493,7 @@ ENABLED = false
 ```bash
 # .env.development
 LOG_LEVEL=DEBUG
-DB_CONNECTION_URI=postgresql+psycopg://postgres:postgres@localhost:5432/honcho_dev
+DB_CONNECTION_URI=postgresql+psycopg://postgres:postgres@localhost:35432/honcho_dev
 AUTH_USE_AUTH=false
 CACHE_ENABLED=false
 

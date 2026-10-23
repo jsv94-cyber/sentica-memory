@@ -721,7 +721,7 @@ class DBSettings(HonchoSettings):
     model_config = SettingsConfigDict(env_prefix="DB_", extra="ignore")  # pyright: ignore
 
     CONNECTION_URI: str = (
-        "postgresql+psycopg://postgres:postgres@localhost:5432/postgres"
+        "postgresql+psycopg://postgres:postgres@localhost:35432/postgres"
     )
     SCHEMA: str = "public"
     POOL_CLASS: str = "default"
@@ -1322,7 +1322,7 @@ class CacheSettings(HonchoSettings):
     model_config = SettingsConfigDict(env_prefix="CACHE_", extra="ignore")  # pyright: ignore
 
     ENABLED: bool = False
-    URL: str = "redis://localhost:6379/0?suppress=true"
+    URL: str = "redis://localhost:36379/0?suppress=true"
     # URL points at a Redis Cluster (OSS cluster protocol, e.g. GCP Memorystore
     # for Redis Cluster). A standalone client cannot follow the MOVED redirects
     # such deployments return for keys hashed to another shard.

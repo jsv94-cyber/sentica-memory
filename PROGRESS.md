@@ -38,9 +38,10 @@ Decisions:
 - GCP, Fly, AWS, and live-provider workflows no longer run on push or pull
   request, and their external jobs are `if: false`. The upstream unit-test
   workflow still runs on GitHub-hosted runners with a local Postgres service.
-- `docker-compose.yml.example` is unchanged so the upstream example stays
-  diffable. `docker compose up` uses the tracked `docker-compose.yml`.
-- Host ports default to 8000, 5432, and 6379 and can be moved with
+- `docker-compose.yml.example` publishes Postgres on host port 35432 and
+  Redis on host port 36379, same as the tracked `docker-compose.yml`.
+  `docker compose up` uses the tracked file.
+- Host ports default to 8000, 35432, and 36379 and can be moved with
   `SENTICA_API_PORT`, `SENTICA_POSTGRES_PORT`, and `SENTICA_REDIS_PORT`.
   This machine already had an unrelated Postgres container on 5432. The
   local proof used port 5433 and did not connect to that container.

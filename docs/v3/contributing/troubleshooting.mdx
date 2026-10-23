@@ -183,11 +183,11 @@ The connection URI **must** use the `postgresql+psycopg` prefix:
 
 ```bash
 # Correct
-DB_CONNECTION_URI=postgresql+psycopg://postgres:postgres@localhost:5432/postgres
+DB_CONNECTION_URI=postgresql+psycopg://postgres:postgres@localhost:35432/postgres
 
 # Wrong - will fail
-DB_CONNECTION_URI=postgresql://postgres:postgres@localhost:5432/postgres
-DB_CONNECTION_URI=postgres://postgres:postgres@localhost:5432/postgres
+DB_CONNECTION_URI=postgresql://postgres:postgres@localhost:35432/postgres
+DB_CONNECTION_URI=postgres://postgres:postgres@localhost:35432/postgres
 ```
 
 ### Checking migration status
@@ -251,11 +251,11 @@ If you see Redis connection warnings in logs but `CACHE_ENABLED=false`, they can
 
 ```bash
 # Start Redis via Docker
-docker run -d -p 6379:6379 redis:latest
+docker run -d -p 36379:6379 redis:latest
 
 # Configure Honcho
 CACHE_ENABLED=true
-CACHE_URL=redis://localhost:6379/0
+CACHE_URL=redis://localhost:36379/0
 ```
 
 ## Docker Issues
@@ -357,7 +357,7 @@ The CLI local stack lives under `~/.honcho/profiles/` (default profile `local`) 
 
 ### Port already in use
 
-The CLI remaps 8000/5432/6379 automatically unless you pinned them with `--api-port` / `--db-port` / `--redis-port`. Pass those flags if you need a specific host port.
+The CLI remaps 8000/35432/36379 automatically unless you pinned them with `--api-port` / `--db-port` / `--redis-port`. Pass those flags if you need a specific host port.
 
 ## Getting Help
 

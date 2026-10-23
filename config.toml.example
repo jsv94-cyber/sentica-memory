@@ -21,7 +21,7 @@ NAMESPACE = "honcho"
 
 # Database settings
 [db]
-CONNECTION_URI = "postgresql+psycopg://postgres:postgres@localhost:5432/postgres"
+CONNECTION_URI = "postgresql+psycopg://postgres:postgres@localhost:35432/postgres"
 SCHEMA = "public"
 POOL_CLASS = "default"
 POOL_PRE_PING = true
@@ -272,7 +272,7 @@ MAX_BUFFER_SIZE = 10000
 # Cache settings
 [cache]
 ENABLED = false
-URL = "redis://localhost:6379/0?suppress=true"
+URL = "redis://localhost:36379/0?suppress=true"
 # NAMESPACE = "honcho"  # Inherits from app.NAMESPACE if not set
 DEFAULT_TTL_SECONDS = 300
 DEFAULT_LOCK_TTL_SECONDS = 5

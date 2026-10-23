@@ -558,7 +558,7 @@ REASONING_TRACES_FILE=traces.jsonl
 
 ```bash
 # Connection (required)
-DB_CONNECTION_URI=postgresql+psycopg://postgres:postgres@localhost:5432/postgres
+DB_CONNECTION_URI=postgresql+psycopg://postgres:postgres@localhost:35432/postgres
 
 # Pool settings
 DB_SCHEMA=public
@@ -591,7 +591,7 @@ Redis caching is optional. Honcho works without it but benefits from caching in 
 
 ```bash
 CACHE_ENABLED=false
-CACHE_URL=redis://localhost:6379/0?suppress=true
+CACHE_URL=redis://localhost:36379/0?suppress=true
 CACHE_NAMESPACE=honcho
 CACHE_DEFAULT_TTL_SECONDS=300
 CACHE_DEFAULT_LOCK_TTL_SECONDS=5  # Cache stampede prevention
@@ -745,7 +745,7 @@ EMBED_MESSAGES = true
 NAMESPACE = "honcho"
 
 [db]
-CONNECTION_URI = "postgresql+psycopg://postgres:postgres@localhost:5432/postgres"
+CONNECTION_URI = "postgresql+psycopg://postgres:postgres@localhost:35432/postgres"
 POOL_SIZE = 10
 MAX_OVERFLOW = 20
 
@@ -754,7 +754,7 @@ USE_AUTH = false
 
 [cache]
 ENABLED = false
-URL = "redis://localhost:6379/0?suppress=true"
+URL = "redis://localhost:36379/0?suppress=true"
 DEFAULT_TTL_SECONDS = 300
 
 [deriver]
