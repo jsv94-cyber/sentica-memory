@@ -120,7 +120,7 @@ is observation or document.
   HNSW), `session_name`, `deleted_at`, and vector sync columns. `level` is
   `explicit`, `deductive`, `inductive`, or `contradiction`
   (`src/utils/types.py:294`).
-- `src/models.py:628` `document_sources`: reasoning-tree edges
+- `src/models.py:635` `document_sources`: reasoning-tree edges
   `(derived_id, source_id, position)`.
 
 `src/crud/collection.py:134` `get_or_create_collection` opens the pair's
@@ -131,7 +131,7 @@ and reads them back (`get_working_representation` at
 `src/crud/document.py:387` `query_documents`. Superseded conclusions are
 left out, and stale ones sort after current ones. Hybrid retrieval is
 `src/sentica/retrieval.py:118` `search_conclusions`: keyword search on the
-GIN index at `src/models.py:619`, plus vector neighbors within cosine
+GIN index at `src/models.py:626`, plus vector neighbors within cosine
 distance 0.65, merged by reciprocal rank. Stale rows sort after current
 ones. `POST /peers/{peer_id}/brief` (`src/routers/peers.py:952`
 `get_peer_brief`) returns the card, those conclusions, the latest summary,
@@ -204,10 +204,10 @@ and tenants.
 
 ## Deriver queue
 
-The queue is the Postgres table `queue` (`src/models.py:655` `QueueItem`):
+The queue is the Postgres table `queue` (`src/models.py:662` `QueueItem`):
 `task_type`, JSONB `payload`, `work_unit_key`, `workspace_name`, optional
 `session_id` and `message_id`, `processed`, `error`.
-`src/models.py:714` `active_queue_sessions` is the claim lock, one row per
+`src/models.py:721` `active_queue_sessions` is the claim lock, one row per
 work unit key.
 
 `src/deriver/enqueue.py:27` `enqueue` inserts representation and summary rows
@@ -222,7 +222,7 @@ Payload shapes are `src/utils/queue_payload.py`. Task types: `representation`,
 The representation payload includes the message text
 (`src/utils/queue_payload.py:28` `content: str`). Summary, dream, scope, and
 deletion payloads do not. Every payload is written only to the Postgres
-`queue.payload` column (`src/models.py:666`) by the inserts in
+`queue.payload` column (`src/models.py:673`) by the inserts in
 `src/deriver/enqueue.py`. Redis is the cache (`src/cache/client.py`), not a
 copy of the queue. The message text in that column is in the database, which
 is the store.
