@@ -505,6 +505,7 @@ structural.
   assigned cannot leave the host.
 
 ```bash
+set -eu
 if iptables -L SENTICA_KEEP -n >/dev/null 2>&1; then
   if ! iptables -C DOCKER-USER -j SENTICA_KEEP >/dev/null 2>&1; then
     iptables -F SENTICA_KEEP

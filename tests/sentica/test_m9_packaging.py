@@ -1541,6 +1541,37 @@ def test_firewall_script_matches_the_guide() -> None:
     assert "never forwards without drops" in deploy
 
 
+def _normalized_firewall_logic(text: str) -> list[str]:
+    """Drop blanks, comments, and the shebang. Keep the abort and the rules."""
+    lines: list[str] = []
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        lines.append(stripped)
+    return lines
+
+
+def _deploy_firewall_block(deploy: str) -> str:
+    blocks = re.findall(r"```bash\n(.*?)```", deploy, re.DOTALL)
+    return next(block for block in blocks if "iptables -N SENTICA_NEW" in block)
+
+
+def test_firewall_doc_block_matches_the_shipped_script() -> None:
+    """The guide block is the shipped script, so a paste aborts on failure.
+
+    Comments and blank lines are ignored. ``set -eu`` stays, because a hand
+    paste of the block is the script.
+    """
+    block = _deploy_firewall_block(_text("docs/DEPLOY.md"))
+    script = _text("docker/sentica/sentica-firewall.sh")
+    guide = _normalized_firewall_logic(block)
+    shipped = _normalized_firewall_logic(script)
+    assert guide == shipped
+    assert "set -eu" in guide
+    assert "set -eu" in shipped
+
+
 def _jump(target: str) -> _FirewallRule:
     parsed = _rule_from_rest(["-j", target])
     assert parsed is not None
