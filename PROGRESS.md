@@ -124,7 +124,10 @@ Decisions:
   `test_context_latency_on_ten_thousand_conclusions` and the next step
   runs that node with `-n0`. The 300 ms budget is unchanged. A guard
   fails if the test is skipped, collected zero times, or missing from
-  either step.
+  either step. It also fails on `continue-on-error`, on an `if` that can
+  skip the serial step, on an early exit or a masked pytest status, and
+  when the deselect prefix matches anything other than that one test.
+  Skip detection reads the pytest summary line.
   Image publish workflows stay `if: false` until M9.
 
 Deviations from GOALS.md: the unit suite and `docker-compose.yml` still use

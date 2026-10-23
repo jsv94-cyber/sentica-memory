@@ -110,7 +110,7 @@ jobs:
         run: |
           set -euo pipefail
           sha256sum -c <<'EOF'
-          ad6f0842599cbc36ce72bdfa6b06894ff7c0148a008d441b0f3bf68619e2dd32  tests/sentica/context_latency_ci.py
+          bed7c272f55656cbd002dbf942533b9e03cea84b052d5760d280dc1dbb997e01  tests/sentica/context_latency_ci.py
           EOF
           nodeid="tests/sentica/test_m6_retrieval.py::test_context_latency_on_ten_thousand_conclusions"
           collect_out=""
