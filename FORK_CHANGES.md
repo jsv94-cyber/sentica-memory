@@ -12,6 +12,8 @@ release v3.3.0 (`608aec8a928da13c540262ed980c569448fb53ab`).
 | `docker-compose.yml` | Tracked local stack so `docker compose up` starts the API, deriver, Postgres with pgvector, and Redis. Redis persistence is off and its data directory is tmpfs. API and deriver `/tmp` are tmpfs. No LanceDB volume. Host ports default to 8000, 5432, and 6379 and can be moved with `SENTICA_API_PORT`, `SENTICA_POSTGRES_PORT`, and `SENTICA_REDIS_PORT`. `SENTICA_MODE=test` because the image defaults to production. Postgres `trust` auth on this file is test-only. | M0, M1, ground rule 5 |
 | `.gitignore` | Stop ignoring `/docker-compose.yml` and `/compose.yml` so the local stack can be committed. | M0 |
 | `.github/workflows/unittest.yml` | Run the upstream test suite on every pull request and every push to `main`. Removed path filters and the changes gate. Both jobs set `SENTICA_MODE=test`. The suite job ignores the two-instance proof. A second job runs that proof and fails if it collects zero tests. | M0, M1 |
+| `tests/sentica/context_latency_ci.py` | Require the parallel deselect command and one pinned serial script. Reject `continue-on-error` on `test-python` and its steps, an `if` on that job or either latency step, and a `shell` or `defaults.run.shell` override at workflow, job, or step level. The source must keep the 300 ms assertion and must not skip. Summary lines decide skip and pass. The deselect prefix must match one collected test. The workflow pins this file by sha256. | M6 |
+| `tests/sentica/test_context_latency_ci.py` | Guard for that checker. Mutations cover a dropped serial step, `continue-on-error`, an `if` on the job or either latency step, `shell: true`, `defaults.run.shell`, and edits to the pinned script. | M6 |
 | `.github/workflows/push-gcp-registry-prod.yml` | Manual dispatch only, and both jobs are `if: false`. Do not push to Plastic Labs GCP or call its production webhook. | Ground rule 2 |
 | `.github/workflows/push-gcp-registry-staging.yml` | Same as production, for the staging registry and webhook. | Ground rule 2 |
 | `.github/workflows/unified-tests.yml` | Manual dispatch only. Fly and AWS jobs are `if: false`. | Ground rule 2 |
@@ -118,5 +120,12 @@ release v3.3.0 (`608aec8a928da13c540262ed980c569448fb53ab`).
 | `tests/sentica/test_m2_fix.py` | The runtime-role proof still must not set `DB_CONNECTION_URI`. The check stops at the next job. | Redis host port |
 | `PROGRESS.md` | Records the Redis host port change and Jose's approval. The M0 entry is unchanged. | Redis host port |
 | `FORK_CHANGES.md` | Rows for the Redis host port change. | Redis host port |
+| `tests/sentica/test_m9_packaging.py` | The suite command must be `uv run pytest -x --ignore=tests/sentica/test_m1_stack.py`, plus at most one `--deselect` of `context_latency_ci.NODE_ID`. Any `-k`, any other `--deselect`, or any other `--ignore` fails. Removing that deselect still fails the latency guard. | M6, M9 |
+| `.github/workflows/unittest.yml` | Deselect the context-latency node from the suite command and run that node in the next step with `-n0`. The 300 ms assertion stays. | M6 |
+| `docs/RELEASE-v0.2.1-sentica.md` | Release notes for `v0.2.1-sentica`. Sentica swaps the two pin constants. No migrate step. | R6 |
+| `docs/RELEASES.md` | Entry for `v0.2.1-sentica`. The digest stays the value in `docs/image-digest.txt`. | R6 |
+| `docs/image-digest.txt` | The comment names `docs/RELEASE-v0.2.1-sentica.md`. The digest line is unchanged. | R6 |
+| `tests/sentica/test_integration_contract.py` | Release assertions require the v0.2.1 note, the digest comment, and the releases entry. | R6 |
+| `tests/sentica/test_m0_baseline.py` | The v0.2.1 release note is included in the em dash check. | R6 |
 | `src/utils/filter.py`, `tests/utils/test_filter.py`, `tests/test_advanced_filters.py`, `docs/v3/documentation/features/advanced/using-filters.mdx`, `tests/sentica/test_filter_not_empty.py` | Cherry-pick `47d3eac2`. An empty object or a wildcard is TRUE, so `NOT [{}]` and `NOT [*]` match no rows and an `OR` keeps the wildcard. The new test reads conclusions as a non-superuser inside one workspace. | R6 |
 
