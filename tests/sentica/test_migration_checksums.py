@@ -41,6 +41,7 @@ _EXPECTED: dict[str, str] = {
     "d429de0e5338_adopt_peer_paradigm.py": "a2d224d9cdb03ab5eb0044f043709b2d27a592fc6db9446ebef3cab2ee681943",
     "e4eba9cfaa6f_make_document_session_name_nullable.py": "c66c166914a75c8b737eb6408b4eedaaf658f790877124de69dcfc2df0bdde57",
     "e6b2d8f04a17_dreams_due_superset.py": "537c1c9377c04b03a13f2ff7359f8b5dc9f6c86fc71586ed0f8eb552f3a6fc31",
+    "e7c2a91b4d08_documents_workspace_observer_observed.py": "5026913f5738a749b4c94906d6fdb2ba04520f45f99f7a16e51082b2a1cf383c",
     "e9b705f9adf9_add_server_defaults_to_timestamp_.py": "33302e21eebe2881fb9b0b47a396ad37aaf1bd36c24a475adb33e74a8e0f2af6",
     "ec8f94139b02_codify_workspace_name_and_message_id_in_.py": "e3351c3421681355e52ce44fe29eb84d206072baef4762289d223987f96dc6aa",
     "f1a2b3c4d5e6_add_reasoning_tree_columns.py": "946544475617cca6899566e77e9a4094854493cf85dbe9b254ff8a8d077aa9cc",

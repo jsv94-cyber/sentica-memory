@@ -582,6 +582,13 @@ class Document(Base):
                 + "superseded_by IS NULL AND embedding IS NOT NULL"
             ),
         ),
+        # One lookup for reads filtered by workspace, observer, and observed.
+        Index(
+            "ix_documents_workspace_observer_observed",
+            "workspace_name",
+            "observer",
+            "observed",
+        ),
         # Composite index for efficient reconciliation queries
         Index(
             "ix_documents_sync_state_last_sync_at",
