@@ -343,6 +343,25 @@ Decisions:
   No `tests/sentica/test_m2_*` file, `tests/sentica/rls_job.py`, or the
   `test-m2-rls` job changed.
 
+Follow-up on 2026-10-22:
+
+- The parallel suite deselects
+  `test_context_latency_on_ten_thousand_conclusions`. The next step runs
+  that node with `-n0`. The assertion stays `assert warm_p95 < 0.3`.
+- CI run 39882904117 reported context cold 125.3 ms, warm p95 72.0 ms.
+- The guard requires that deselect command and one pinned serial script.
+  It rejects `continue-on-error` on `test-python` and its steps, an `if`
+  on that job or either latency step, and a `shell` or `defaults.run.shell`
+  override at workflow, job, or step level. The serial step runs
+  `--check-workflow` after the sha256 pin. Collection and pass checks
+  read the pytest summary line. The deselect prefix must match one
+  collected test. The latency test must keep its assertion and must not
+  skip. The two steps share one environment. `test-status` must fail
+  when `test-python` does not succeed.
+- `uv run pytest -n0 tests/sentica/test_context_latency_ci.py` against
+  the local Postgres on host port 55432:
+  **27 passed, 0 failed** (24.44s).
+
 ## M7. Dreams inside each workspace
 
 Built:
@@ -505,6 +524,19 @@ Jose approved item 11 in chat on 2026-10-22: "1 to 12: yes as recommended."
   The M0 note above records the example as it was on that date.
 - The gVisor smoke job sets `DB_CONNECTION_URI` to the runner Postgres
   on port 5432, so that job does not follow a runtime default.
+
+Follow-up on 2026-10-22, suite command:
+
+- `test_ci_collects_the_firewall_topology_test` allows the pinned base
+  command plus one `--deselect` of `context_latency_ci.NODE_ID`, and
+  nothing else. A second `--deselect`, a `-k`, or another `--ignore`
+  fails that check. Removing the latency `--deselect` fails the latency
+  guard and leaves the firewall check green.
+- `uv run pytest -n0` of that test, its mutations, and
+  `tests/sentica/test_context_latency_ci.py`, against the local Postgres
+  on host port 55432: **33 passed, 0 failed** (22.41s).
+
+- CI run 39902396740 on 9d03dd0e: serial step 25 s, pytest 15.46 s, 1 collected, cold 145.3 ms, warm p95 112.0 ms; parallel 3509 passed, 53 skipped.
 
 ## R6-7. Contract docs. 2026-10-23
 
