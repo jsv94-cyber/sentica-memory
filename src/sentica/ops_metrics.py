@@ -25,6 +25,12 @@ FILTER_CATEGORIES: tuple[str, ...] = (
     "finances",
     "leave",
     "model",
+    "card",
+    "routing",
+    "ssn",
+    "account",
+    "salary",
+    "disciplinary",
     "unspecified",
 )
 

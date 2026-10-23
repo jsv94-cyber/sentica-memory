@@ -88,9 +88,23 @@ async def set_peer_card(
         action="No peer card is ever formed about a scope.",
     )
 
-    from src.sentica.safety import banned_category
+    from src.sentica.restricted import restricted_drop_reason
+    from src.sentica.safety import banned_category, record_drop
+    from src.sentica.workspace_metadata import ceiling_for_workspace
 
-    peer_card = [line for line in peer_card if banned_category(line) is None]
+    ceiling = await ceiling_for_workspace(workspace_name, db)
+    kept_lines: list[str] = []
+    for line in peer_card:
+        category = banned_category(line)
+        if category is not None:
+            record_drop(category)
+            continue
+        reason = restricted_drop_reason(line, ceiling, broker_explicit=False)
+        if reason is not None:
+            record_drop(reason)
+            continue
+        kept_lines.append(line)
+    peer_card = kept_lines
 
     # Ensure the peer exists (get-or-create)
     peers_result = await get_or_create_peers(

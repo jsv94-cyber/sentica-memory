@@ -474,6 +474,18 @@ stores the `source_trust` that was sent.
    `src/sentica/workspace_metadata.py`) in `ensurePartition`. The engine
    treats a missing key as `general` and fails closed. A key that is
    not on that allow-list is refused.
+   The key name is `ceiling`. The allowed values are `general`,
+   `internal`, `restricted`, and `personal`. A missing key, a value
+   that is not one of those four strings, or a non-string is
+   `general`. The engine drops a derived conclusion that matches a
+   Restricted pattern when the ceiling ranks below `restricted`, so
+   `general` and `internal` drop it and `restricted` and `personal`
+   keep it. The engine does not move the row to another workspace.
+   An explicit conclusion the broker created is not dropped by this
+   guard. The patterns are a Luhn-valid card number, an ABA routing
+   number whose checksum passes, a US Social Security number in a
+   valid range, a bank-account number next to an account word, a
+   salary figure, and a disciplinary term.
 2. The classifier that upgrades bank numbers, Social Security numbers,
    salaries, medical terms, and disciplinary language to Restricted is
    not in this service. The storage bans in Section 35.7 are in force:
