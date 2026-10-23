@@ -1135,8 +1135,8 @@ Examples:
     parser.add_argument(
         "--redis-port",
         type=int,
-        default=36379,
-        help="Base port for the Redis server (default: 36379)",
+        default=6379,
+        help="Base port for the Redis server (default: 6379)",
     )
 
     parser.add_argument(

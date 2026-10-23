@@ -87,9 +87,7 @@ services:
       driver: none
     restart: unless-stopped
     ports:
-      # 35432 is unused by the other host defaults (5432, sandbox 15432,
-      # PgBouncer 6432). SENTICA_POSTGRES_PORT still overrides it.
-      - "127.0.0.1:${SENTICA_POSTGRES_PORT:-35432}:5432"
+      - "127.0.0.1:${SENTICA_POSTGRES_PORT:-5432}:5432"
     command: ["postgres", "-c", "max_connections=200"]
     environment:
       - POSTGRES_DB=postgres

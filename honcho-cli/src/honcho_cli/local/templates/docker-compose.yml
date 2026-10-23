@@ -64,7 +64,7 @@ services:
     image: pgvector/pgvector:pg15
     restart: unless-stopped
     ports:
-      - "127.0.0.1:${DB_PORT:-35432}:5432"
+      - "127.0.0.1:${DB_PORT:-5432}:5432"
     command: ["postgres", "-c", "max_connections=200"]
     environment:
       - POSTGRES_DB=postgres

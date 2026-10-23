@@ -137,7 +137,7 @@ Download from [postgresql.org](https://www.postgresql.org/download/windows/)
 docker run --name honcho-db \
   -e POSTGRES_USER=postgres \
   -e POSTGRES_PASSWORD=postgres \
-  -p 35432:5432 \
+  -p 5432:5432 \
   -d pgvector/pgvector:pg15
 ```
 
@@ -167,7 +167,7 @@ Edit `.env` with your configuration:
 
 ```bash
 # Database connection
-DB_CONNECTION_URI=postgresql+psycopg://postgres:postgres@localhost:35432/postgres
+DB_CONNECTION_URI=postgresql+psycopg://postgres:postgres@localhost:5432/postgres
 
 # Optional API keys (required for LLM features)
 OPENAI_API_KEY=your-openai-api-key

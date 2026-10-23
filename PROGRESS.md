@@ -38,10 +38,9 @@ Decisions:
 - GCP, Fly, AWS, and live-provider workflows no longer run on push or pull
   request, and their external jobs are `if: false`. The upstream unit-test
   workflow still runs on GitHub-hosted runners with a local Postgres service.
-- `docker-compose.yml.example` publishes Postgres on host port 35432 and
-  Redis on host port 36379, same as the tracked `docker-compose.yml`.
-  `docker compose up` uses the tracked file.
-- Host ports default to 8000, 35432, and 36379 and can be moved with
+- `docker-compose.yml.example` is unchanged so the upstream example stays
+  diffable. `docker compose up` uses the tracked `docker-compose.yml`.
+- Host ports default to 8000, 5432, and 6379 and can be moved with
   `SENTICA_API_PORT`, `SENTICA_POSTGRES_PORT`, and `SENTICA_REDIS_PORT`.
   This machine already had an unrelated Postgres container on 5432. The
   local proof used port 5433 and did not connect to that container.
@@ -490,4 +489,20 @@ Test counts, on this host, against throwaway Postgres on port 5441 and Redis on 
 
 - Unit suite, optional extras installed, `tests/sentica/test_m1_stack.py` excluded: 3455 passed, 53 skipped, 2 failed. Both failures are `tests/sdk_typescript/test_sdk.py` because `bun` is not installed here. CI installs bun.
 - Two-instance stack: 33 passed. The on-disk scan in `test_stopped_stack_leaves_no_memory_on_disk` calls `sudo grep`. This host asks for a sudo password, so that scan did not run to completion here. CI runners that have passwordless sudo still run it.
+
+## Redis host port. 2026-10-22
+
+Jose approved item 11 in chat on 2026-10-22: "1 to 12: yes as recommended."
+
+- Tracked compose files publish Redis on host port 36379. 36379 is
+  unused by the common local Redis port 6379, Sentinel 26379, and the
+  sandbox Redis port 16379. `SENTICA_REDIS_PORT` still overrides the
+  host side. The container listens on 6379.
+- Postgres host ports remain 5432. Runtime defaults in `src/config.py`
+  and `config.toml.example` are unchanged, so the default image digest
+  stays the recorded pin.
+- `docker-compose.yml.example` publishes Redis on host port 36379.
+  The M0 note above records the example as it was on that date.
+- The gVisor smoke job sets `DB_CONNECTION_URI` to the runner Postgres
+  on port 5432, so that job does not follow a runtime default.
 

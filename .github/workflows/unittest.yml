@@ -356,6 +356,7 @@ jobs:
           --health-retries 5
     env:
       SENTICA_MODE: test
+      DB_CONNECTION_URI: postgresql+psycopg://postgres:postgres@localhost:5432/test_db
       AUTH_USE_AUTH: "false"
       SENTRY_ENABLED: "false"
     steps:

@@ -71,7 +71,7 @@ logging.getLogger("sqlalchemy.engine.Engine").disabled = True
 # TODO use environment variable
 DB_URI = (
     settings.DB.CONNECTION_URI
-    or "postgresql+psycopg://postgres:postgres@localhost:35432/postgres"
+    or "postgresql+psycopg://postgres:postgres@localhost:5432/postgres"
 )
 CONNECTION_URI = make_url(DB_URI)
 

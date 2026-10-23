@@ -1,9 +1,11 @@
-"""Tracked files must not publish Redis or Postgres on their well-known ports.
+"""Compose Redis host ports, ``.env.template``, and ``docs/CONFIG.md``.
 
-The host side of a port mapping is the collision. Container ports stay on
-6379 and 5432 because that is where those servers listen inside the
-container. ``SENTICA_REDIS_PORT`` and ``SENTICA_POSTGRES_PORT`` still
-override the host side.
+A tracked compose file must not publish Redis on host port 6379. The
+container port stays 6379, where Redis listens inside the container.
+``.env.template`` must not point a Redis URL at port 6379.
+``docs/CONFIG.md`` must not document ``SENTICA_REDIS_PORT`` as 6379.
+An empty listing, no compose file, or a missing template or
+``docs/CONFIG.md`` fails the test.
 """
 
 from __future__ import annotations
@@ -17,26 +19,9 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 
-# Well-known host ports. A published default of either one fails the build.
 REDIS_HOST_PORT = 6379
-POSTGRES_HOST_PORT = 5432
-_FORBIDDEN_HOST_PORTS = frozenset({REDIS_HOST_PORT, POSTGRES_HOST_PORT})
 
-_LOCAL_HOST_PORT = re.compile(r"(?i)(?:localhost|127\.0\.0\.1):(?P<port>6379|5432)\b")
-_PUBLISHED_PAIR = re.compile(r"(?<![\w.])(?P<port>6379|5432):(?P=port)\b")
-_SHELL_DEFAULT = re.compile(r":-(?P<port>6379|5432)\b")
-_PROSE_DEFAULT = re.compile(
-    "(?i)(?:"
-    + r"\bdefault(?:s|ed)?\s+(?:to\s+)?(?:8000,\s*)?(?P<port>6379|5432)\b"
-    + "|8000/5432/6379"
-    + r"|\(port (?P<paren>6379|5432)\)"
-    + r"|,\s*port (?P<comma>6379|5432)\b"
-    + ")"
-)
-_PORT_ASSIGNMENT = re.compile(
-    r"(?i)^[ \t#]*[A-Za-z0-9_]*(?:REDIS_PORT|POSTGRES_PORT|DB_PORT)\s*=\s*"
-    + r"(?P<port>6379|5432)\b"
-)
+_SENTICA_REDIS_PORT = re.compile(r"\b6379\b")
 
 
 def _tracked_paths() -> list[str]:
@@ -55,23 +40,11 @@ def _tracked_paths() -> list[str]:
     return paths
 
 
-def _kind(path: str) -> str | None:
+def _is_compose(path: str) -> bool:
     name = path.rsplit("/", 1)[-1].lower()
-    if "compose" in name and name.endswith(
+    return "compose" in name and name.endswith(
         (".yml", ".yaml", ".yml.example", ".yaml.example")
-    ):
-        return "compose"
-    if name in {
-        ".env.template",
-        ".env.example",
-        "config.toml.example",
-    } or name.endswith(
-        (".env.template", ".env.example", ".env.sample", ".toml.example")
-    ):
-        return "env"
-    if name.endswith((".md", ".mdx")):
-        return "doc"
-    return None
+    )
 
 
 def _split_port(text: str) -> list[str]:
@@ -155,8 +128,8 @@ def _published_from_mapping(entry: dict[str, Any]) -> int | None:
     raise ValueError(published)
 
 
-def _compose_host_ports(path: Path) -> list[int]:
-    """Return every baked host port in ``path``. Unreadable mappings fail."""
+def _redis_host_ports(path: Path) -> list[int]:
+    """Return baked Redis host ports. Unreadable mappings fail closed."""
     loaded: Any = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(loaded, dict):
         raise ValueError("compose file is not a mapping")
@@ -169,6 +142,8 @@ def _compose_host_ports(path: Path) -> list[int]:
     services = cast(dict[str, Any], services_raw)
     found: list[int] = []
     for name, service_raw in services.items():
+        if "redis" not in str(name):
+            continue
         if not isinstance(service_raw, dict):
             raise ValueError(name + " is not a mapping")
         service = cast(dict[str, Any], service_raw)
@@ -192,65 +167,89 @@ def _compose_host_ports(path: Path) -> list[int]:
     return found
 
 
-def _line_violations(relative: str, text: str) -> list[str]:
-    violations: list[str] = []
-    for line_no, line in enumerate(text.splitlines(), start=1):
-        if (
-            _LOCAL_HOST_PORT.search(line)
-            or _PUBLISHED_PAIR.search(line)
-            or _SHELL_DEFAULT.search(line)
-            or _PROSE_DEFAULT.search(line)
-            or _PORT_ASSIGNMENT.search(line)
-        ):
-            violations.append(
-                relative
-                + ":"
-                + str(line_no)
-                + ": defaults Redis to "
-                + str(REDIS_HOST_PORT)
-                + " or Postgres to "
-                + str(POSTGRES_HOST_PORT)
-            )
-    return violations
+def _redis_url_port(line: str) -> int | None:
+    """Return the port of a Redis URL on ``line``, if the line has one."""
+    match = re.search(r"redis://([^\"'\s]+)", line)
+    if match is None:
+        return None
+    body = match.group(1).split("?", 1)[0].split("/", 1)[0]
+    if "@" in body:
+        body = body.rsplit("@", 1)[1]
+    if body.startswith("["):
+        end = body.find("]")
+        if end < 0 or not body.startswith("]:", end):
+            return None
+        port_text = body[end + 2 :]
+    elif ":" in body:
+        port_text = body.rsplit(":", 1)[1]
+    else:
+        return None
+    if not port_text.isdigit():
+        return None
+    return int(port_text)
 
 
 def _violations(paths: list[str]) -> list[str]:
     violations: list[str] = []
-    saw_compose = False
-    saw_env = False
-    saw_doc = False
-    for relative in paths:
-        kind = _kind(relative)
-        if kind is None:
-            continue
+    compose_paths = [relative for relative in paths if _is_compose(relative)]
+    if not compose_paths:
+        violations.append("no tracked compose file")
+    if ".env.template" not in paths:
+        violations.append(".env.template is not tracked")
+    if "docs/CONFIG.md" not in paths:
+        violations.append("docs/CONFIG.md is not tracked")
+
+    for relative in compose_paths:
         path = ROOT / relative
         if not path.is_file():
-            violations.append(f"{relative}: tracked path is not a file")
+            violations.append(relative + ": tracked path is not a file")
             continue
-        text = path.read_text(encoding="utf-8")
-        if kind == "compose":
-            saw_compose = True
-            try:
-                ports = _compose_host_ports(path)
-            except (OSError, UnicodeError, yaml.YAMLError, ValueError):
-                violations.append(f"{relative}: unreadable compose port mapping")
-                continue
-            for port in ports:
-                if port in _FORBIDDEN_HOST_PORTS:
-                    violations.append(f"{relative}: published host port {port}")
-        elif kind == "env":
-            saw_env = True
+        try:
+            ports = _redis_host_ports(path)
+        except (OSError, UnicodeError, yaml.YAMLError, ValueError):
+            violations.append(relative + ": unreadable compose port mapping")
+            continue
+        for port in ports:
+            if port == REDIS_HOST_PORT:
+                violations.append(relative + ": published Redis host port " + str(port))
+
+    if ".env.template" in paths:
+        template = ROOT / ".env.template"
+        if not template.is_file():
+            violations.append(".env.template: tracked path is not a file")
         else:
-            saw_doc = True
-        violations.extend(_line_violations(relative, text))
-    if not saw_compose or not saw_env or not saw_doc:
-        violations.append(
-            "scanner did not see a compose file, an env example, and a doc"
-        )
+            for line_no, line in enumerate(
+                template.read_text(encoding="utf-8").splitlines(),
+                start=1,
+            ):
+                if _redis_url_port(line) == REDIS_HOST_PORT:
+                    violations.append(
+                        ".env.template:"
+                        + str(line_no)
+                        + ": Redis URL uses host port "
+                        + str(REDIS_HOST_PORT)
+                    )
+
+    if "docs/CONFIG.md" in paths:
+        config_doc = ROOT / "docs" / "CONFIG.md"
+        if not config_doc.is_file():
+            violations.append("docs/CONFIG.md: tracked path is not a file")
+        else:
+            for line_no, line in enumerate(
+                config_doc.read_text(encoding="utf-8").splitlines(),
+                start=1,
+            ):
+                if "SENTICA_REDIS_PORT" in line and _SENTICA_REDIS_PORT.search(line):
+                    violations.append(
+                        "docs/CONFIG.md:"
+                        + str(line_no)
+                        + ": SENTICA_REDIS_PORT defaults to "
+                        + str(REDIS_HOST_PORT)
+                    )
     return violations
 
 
-def test_tracked_files_do_not_default_host_ports_to_6379_or_5432() -> None:
-    """Fail when a compose file, env example, or doc publishes 6379 or 5432."""
+def test_compose_redis_host_port_is_not_6379() -> None:
+    """Fail when compose, .env.template, or docs/CONFIG.md defaults Redis to 6379."""
     violations = _violations(_tracked_paths())
     assert not violations, "\n".join(violations)

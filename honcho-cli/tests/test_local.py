@@ -7,7 +7,6 @@ import os
 import subprocess
 
 import pytest
-from honcho_cli.local import DEFAULT_REDIS_PORT
 from honcho_cli.local.docker import (
     DockerError,
     allocate_host_ports,
@@ -116,11 +115,11 @@ def test_seed_config_toml_writes_once(cfg_dir, monkeypatch):
 def test_busy_port_remaps_unless_pinned(monkeypatch):
     monkeypatch.setattr(
         "honcho_cli.local.docker.port_available",
-        lambda port, host="127.0.0.1": port != DEFAULT_REDIS_PORT,
+        lambda port, host="127.0.0.1": port != 6379,
     )
     profile, remapped = allocate_host_ports(LocalProfile(name="local"))
-    assert profile.redis_port == DEFAULT_REDIS_PORT + 1
-    assert remapped["redis"] == (DEFAULT_REDIS_PORT, DEFAULT_REDIS_PORT + 1)
+    assert profile.redis_port == 6380
+    assert remapped["redis"] == (6379, 6380)
 
     with pytest.raises(DockerError) as exc:
         allocate_host_ports(LocalProfile(name="local"), pinned=frozenset({"redis"}))

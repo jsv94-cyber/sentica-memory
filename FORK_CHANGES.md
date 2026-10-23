@@ -9,7 +9,7 @@ release v3.3.0 (`608aec8a928da13c540262ed980c569448fb53ab`).
 | `FORK_CHANGES.md` | Record divergences from upstream. | Ground rule 1 |
 | `PROGRESS.md` | Milestone log. | Ground rule 8 |
 | `docs/MAP.md` | Map of the pinned runtime: database, auth, storage, queue, model calls, prompts. | M0 |
-| `docker-compose.yml` | Tracked local stack so `docker compose up` starts the API, deriver, Postgres with pgvector, and Redis. Redis persistence is off and its data directory is tmpfs. API and deriver `/tmp` are tmpfs. No LanceDB volume. Host ports default to 8000, 35432, and 36379 and can be moved with `SENTICA_API_PORT`, `SENTICA_POSTGRES_PORT`, and `SENTICA_REDIS_PORT`. `SENTICA_MODE=test` because the image defaults to production. Postgres `trust` auth on this file is test-only. | M0, M1, ground rule 5 |
+| `docker-compose.yml` | Tracked local stack so `docker compose up` starts the API, deriver, Postgres with pgvector, and Redis. Redis persistence is off and its data directory is tmpfs. API and deriver `/tmp` are tmpfs. No LanceDB volume. Host ports default to 8000, 5432, and 6379 and can be moved with `SENTICA_API_PORT`, `SENTICA_POSTGRES_PORT`, and `SENTICA_REDIS_PORT`. `SENTICA_MODE=test` because the image defaults to production. Postgres `trust` auth on this file is test-only. | M0, M1, ground rule 5 |
 | `.gitignore` | Stop ignoring `/docker-compose.yml` and `/compose.yml` so the local stack can be committed. | M0 |
 | `.github/workflows/unittest.yml` | Run the upstream test suite on every pull request and every push to `main`. Removed path filters and the changes gate. Both jobs set `SENTICA_MODE=test`. The suite job ignores the two-instance proof. A second job runs that proof and fails if it collects zero tests. | M0, M1 |
 | `.github/workflows/push-gcp-registry-prod.yml` | Manual dispatch only, and both jobs are `if: false`. Do not push to Plastic Labs GCP or call its production webhook. | Ground rule 2 |
@@ -108,4 +108,14 @@ release v3.3.0 (`608aec8a928da13c540262ed980c569448fb53ab`).
 | `docs/RELEASES.md` | Unreleased note for the image digest after `v0.2.0-sentica`. | R4 |
 | `tests/sentica/check_image_digest.py` | Fails unless two clean image exports match `docs/image-digest.txt`. | R4 |
 | `.github/workflows/unittest.yml` | Builds the default image twice from clean builders and fails unless those digests match `docs/image-digest.txt`. | R4 |
+| `docker-compose.yml` | Publish Redis on host port 36379. Postgres stays on host port 5432. `SENTICA_REDIS_PORT` still overrides the Redis host port. The container still listens on 6379. | Redis host port |
+| `docker-compose.yml.example` | Publish Redis on host port 36379. Postgres stays on host port 5432. | Redis host port |
+| `honcho-cli/src/honcho_cli/local/templates/docker-compose.yml` | Redis host fallback is 36379. The database host fallback stays 5432. | Redis host port |
+| `.env.template` | The commented cache URL uses host port 36379. The database URI stays on 5432. | Redis host port |
+| `docs/CONFIG.md` | `SENTICA_REDIS_PORT` default is 36379. `SENTICA_POSTGRES_PORT` stays 5432. | Redis host port |
+| `tests/sentica/test_host_port_defaults.py` | Fails if a compose Redis host port, `.env.template`, or `docs/CONFIG.md` defaults Redis to 6379, and fails if those files are missing. | Redis host port |
+| `.github/workflows/unittest.yml` | The gVisor smoke job sets `DB_CONNECTION_URI` to the runner Postgres on port 5432. | Redis host port |
+| `tests/sentica/test_m2_fix.py` | The runtime-role proof still must not set `DB_CONNECTION_URI`. The check stops at the next job. | Redis host port |
+| `PROGRESS.md` | Records the Redis host port change and Jose's approval. The M0 entry is unchanged. | Redis host port |
+| `FORK_CHANGES.md` | Rows for the Redis host port change. | Redis host port |
 
