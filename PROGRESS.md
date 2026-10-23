@@ -506,3 +506,22 @@ Jose approved item 11 in chat on 2026-10-22: "1 to 12: yes as recommended."
 - The gVisor smoke job sets `DB_CONNECTION_URI` to the runner Postgres
   on port 5432, so that job does not follow a runtime default.
 
+## R6-7. Contract docs. 2026-10-23
+
+Jose, in chat on Oct 23, 2026: "Approve R6-1 to R6-7, Tag v0.2.1-sentica now, the broker sets a ceiling key in the workspace's metadata, and the engine treats a missing key as "general"."
+
+- Gap 1 is closed by design (D5). The workspace is the label. Role and
+  sensitivity stay off the memory row. The planned R6-6 contract is an
+  allow-listed ceiling key in workspace metadata, set by the broker in
+  `ensurePartition`. A missing key is `general`, and the engine fails
+  closed.
+- Gap 4 is dedupe on read (D9) using `workspace_id`, `subject_ref`,
+  `session_id`, and `content`. Stale items carry no `session_id`.
+  `Idempotency-Key` is an upstream ask and is not built here.
+- Gap 6 is an accepted residual risk. Provider hostnames are not
+  iptables destinations. Squid enforces hostnames.
+- `tests/sentica/test_contract_dedupe_fields.py` checks those four
+  fields on search_memory, brief, and the conclusion list.
+  `tests/sentica/rls_job.py` is unchanged. The default image is
+  unchanged.
+

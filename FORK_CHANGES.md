@@ -118,4 +118,8 @@ release v3.3.0 (`608aec8a928da13c540262ed980c569448fb53ab`).
 | `tests/sentica/test_m2_fix.py` | The runtime-role proof still must not set `DB_CONNECTION_URI`. The check stops at the next job. | Redis host port |
 | `PROGRESS.md` | Records the Redis host port change and Jose's approval. The M0 entry is unchanged. | Redis host port |
 | `FORK_CHANGES.md` | Rows for the Redis host port change. | Redis host port |
+| `docs/INTEGRATION.md` | Close gap 1 under D5, record the R6-6 ceiling key as the planned contract, record D9 dedupe on read, and record gap 6 as an accepted residual risk. | R6-7 |
+| `tests/sentica/test_contract_dedupe_fields.py` | search_memory, brief, and list responses carry `workspace_id`, `subject_ref`, `session_id`, and `content`. A mutated row fails the same check. | R6-7 |
+| `PROGRESS.md` | Records the R6-7 contract. The M-INT decision text is unchanged. | R6-7 |
+| `FORK_CHANGES.md` | Rows for the R6-7 contract. | R6-7 |
 
