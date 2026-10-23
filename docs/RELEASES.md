@@ -4,9 +4,10 @@
 
 The default image manifest is no longer the one recorded for
 `v0.2.1-sentica`. `docs/RELEASE-v0.2.1-sentica.md` stays as released.
-This branch's image includes the digest-pinned Python stages and the
-other files that image copies, so its manifest is
-`sha256:2c8bbf29429766bcf1e502d75d03f347b57ad050e48594ca18cd4b9d6895fa97`.
+This branch's image includes the digest-pinned Python stages, the
+workspace RLS probe, and the other files that image copies, so its
+manifest is
+`sha256:00e7e66e1f5717d4af6b6dddc0ad258a28269072c9893227ff8ae00e703fa937`.
 `docs/image-digest.txt` holds that manifest. CI builds the
 image twice from clean builders and fails when those two digests differ
 or when they differ from that file.

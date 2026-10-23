@@ -133,4 +133,8 @@ release v3.3.0 (`608aec8a928da13c540262ed980c569448fb53ab`).
 | `FORK_CHANGES.md` | Rows for the R6-7 contract. | R6-7 |
 | `src/utils/filter.py`, `tests/utils/test_filter.py`, `tests/test_advanced_filters.py`, `docs/v3/documentation/features/advanced/using-filters.mdx`, `tests/sentica/test_filter_not_empty.py` | Cherry-pick `47d3eac2`. An empty object or a wildcard is TRUE, so `NOT [{}]` and `NOT [*]` match no rows and an `OR` keeps the wildcard. The new test reads conclusions as a non-superuser inside one workspace. | R6 |
 | `docs/image-digest.txt`, `docs/RELEASES.md`, `tests/sentica/test_integration_contract.py` | The live image digest changed to `sha256:2c8bbf29429766bcf1e502d75d03f347b57ad050e48594ca18cd4b9d6895fa97`. `docs/RELEASES.md` records that digest under `## Unreleased`. The contract test updates only its current-digest assertion to that value. | R6 |
+| `scripts/sentica_rls_probe.py` | Read-only report that schema `memory` stays walled off by workspace for the runtime role. Output is table names and booleans. | R6-5 |
+| `tests/sentica/test_rls_probe.py` | The probe exits non-zero when a policy is dropped, FORCE is off, or the role has BYPASSRLS. It runs in the unit job. | R6-5 |
+| `docs/INTEGRATION.md` | Records the probe as the evidence for Sentica's rule 4 exemption (pull request #48, D4). The sections from pull request #32 stay. | R6-5 |
+| `docs/image-digest.txt`, `docs/RELEASES.md`, `tests/sentica/test_integration_contract.py` | The live image digest changed to `sha256:00e7e66e1f5717d4af6b6dddc0ad258a28269072c9893227ff8ae00e703fa937`. `docs/RELEASES.md` records that digest under `## Unreleased`. The v0.2.1 digest stays. | R6-5 |
 

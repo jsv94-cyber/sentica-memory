@@ -86,7 +86,7 @@ def test_release_notes_pin_the_base_images() -> None:
     assert 'raise SystemExit("image digest drift")' in checker
     assert "docs/RELEASE-v0.2.0-sentica.md" not in checker
     image = "sha256:522b48cbd15d6ee59b99f0df376fc1e4cdaffd635e8aba66fd45114c6c35ae6d"
-    current = "sha256:2c8bbf29429766bcf1e502d75d03f347b57ad050e48594ca18cd4b9d6895fa97"
+    current = "sha256:00e7e66e1f5717d4af6b6dddc0ad258a28269072c9893227ff8ae00e703fa937"
     tagged = "sha256:65bfe6725581aae41a242f7a14f7f9a4b6deeba2d01bf85577d3286765c615e8"
     assert image in notes
     assert current not in notes
@@ -118,6 +118,9 @@ def test_release_notes_pin_the_base_images() -> None:
     assert "docs/RELEASE-v0.2.1-sentica.md" in digest_file
     assert "docs/RELEASE-v0.2.0-sentica.md" not in digest_file
     releases = _text("docs/RELEASES.md")
+    unreleased = releases.split("## v0.2.1-sentica", 1)[0]
+    assert current in unreleased
+    assert tagged not in unreleased
     assert "## v0.2.1-sentica" in releases
     assert "v0.2.0-sentica" in releases
     assert "v0.1.0-sentica" in releases
