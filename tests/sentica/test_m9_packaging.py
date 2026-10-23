@@ -1558,18 +1558,20 @@ def _deploy_firewall_block(deploy: str) -> str:
 
 
 def test_firewall_doc_block_matches_the_shipped_script() -> None:
-    """The guide block is the shipped script, so a paste aborts on failure.
+    """The guide runs the script in a subshell, so a paste does not stick.
 
-    Comments and blank lines are ignored. ``set -eu`` stays, because a hand
-    paste of the block is the script.
+    Comments and blank lines are ignored. ``set -eu`` is the first command
+    inside the parentheses, and it ends when that subshell ends.
     """
     block = _deploy_firewall_block(_text("docs/DEPLOY.md"))
     script = _text("docker/sentica/sentica-firewall.sh")
     guide = _normalized_firewall_logic(block)
     shipped = _normalized_firewall_logic(script)
-    assert guide == shipped
-    assert "set -eu" in guide
-    assert "set -eu" in shipped
+    assert guide[0] == "("
+    assert guide[-1] == ")"
+    inner = guide[1:-1]
+    assert inner[0] == "set -eu"
+    assert inner == shipped
 
 
 def _jump(target: str) -> _FirewallRule:

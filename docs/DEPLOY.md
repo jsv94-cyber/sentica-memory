@@ -505,6 +505,7 @@ structural.
   assigned cannot leave the host.
 
 ```bash
+(
 set -eu
 if iptables -L SENTICA_KEEP -n >/dev/null 2>&1; then
   if ! iptables -C DOCKER-USER -j SENTICA_KEEP >/dev/null 2>&1; then
@@ -554,6 +555,7 @@ iptables -X SENTICA_KEEP 2>/dev/null || true
 iptables -F SENTICA_OLD 2>/dev/null || true
 iptables -X SENTICA_OLD 2>/dev/null || true
 iptables -E SENTICA_NEW SENTICA
+)
 ```
 
 `sentica-instance` stays routable because the broker publish cannot come
@@ -564,7 +566,8 @@ above. The egress proxy's `sentica-wan` address may still resolve
 The rules are gone after a reboot. Docker creates `DOCKER-USER` when the
 daemon starts, and it creates the chain empty. `iptables-persistent`
 restores rules before that chain exists, so the jump does not come back.
-`docker/sentica/sentica-firewall.sh` is this block.
+`docker/sentica/sentica-firewall.sh` is the commands inside this block.
+The parentheses run them in a subshell, so `set -eu` ends with the block.
 `docker/sentica/sentica-firewall.service` runs it `After=docker.service`.
 Enable the unit. A second start builds a new chain and swaps the jump.
 Every old jump is removed before the old chain is flushed, so a restart
