@@ -112,6 +112,7 @@ def test_new_docs_have_no_em_dash() -> None:
         "docs/image-digest.txt",
         "docs/INTEGRATION.md",
         "docs/RELEASE-v0.2.0-sentica.md",
+        "docs/RELEASE-v0.2.1-sentica.md",
         ".review/M2-summary.md",
         ".review/R3-summary.md",
         "docker-compose.yml",

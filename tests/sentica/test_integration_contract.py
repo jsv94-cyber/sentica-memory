@@ -90,13 +90,37 @@ def test_release_notes_pin_the_base_images() -> None:
     assert image in notes
     assert current not in notes
     assert re.search(r"sha256:[0-9a-f]{64}", notes)
+    released = _text("docs/RELEASE-v0.2.1-sentica.md")
+    assert "v0.2.1-sentica" in released
+    assert "merge commit" in released
+    assert current in released
+    assert image in released
+    assert "pin.mjs" in released
+    assert "lines 6-9" in released
+    assert "SENTICA_MEMORY_TAG" in released
+    assert "SENTICA_MEMORY_DIGEST" in released
+    assert "no migrate" in released
+    assert "d4a8c1e27b90" in released
+    assert "tool-call arguments" in released
+    assert "HNSW index" in released
+    assert "issue 18" in released
+    assert "*.md" in released
+    assert ".dockerignore" in released
+    ignored = _text(".dockerignore")
+    assert "*.md" in ignored
+    assert "docs/**" in ignored
     digest_file = _text("docs/image-digest.txt")
     assert current in digest_file
-    assert "docs/RELEASE-v0.2.0-sentica.md" in digest_file
+    assert image not in digest_file
+    assert "docs/RELEASE-v0.2.1-sentica.md" in digest_file
+    assert "docs/RELEASE-v0.2.0-sentica.md" not in digest_file
     releases = _text("docs/RELEASES.md")
-    assert "## Unreleased" in releases
+    assert "## v0.2.1-sentica" in releases
+    assert "## Unreleased" not in releases
     assert "v0.2.0-sentica" in releases
+    assert "v0.1.0-sentica" in releases
     assert current in releases
+    assert "no migrate" in releases
 
 
 def _metadata(digest: str) -> str:
