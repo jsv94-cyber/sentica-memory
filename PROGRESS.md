@@ -525,3 +525,14 @@ Jose approved item 11 in chat on 2026-10-22: "1 to 12: yes as recommended."
 - The gVisor smoke job sets `DB_CONNECTION_URI` to the runner Postgres
   on port 5432, so that job does not follow a runtime default.
 
+Follow-up on 2026-10-22, suite command:
+
+- `test_ci_collects_the_firewall_topology_test` allows the pinned base
+  command plus one `--deselect` of `context_latency_ci.NODE_ID`, and
+  nothing else. A second `--deselect`, a `-k`, or another `--ignore`
+  fails that check. Removing the latency `--deselect` fails the latency
+  guard and leaves the firewall check green.
+- `uv run pytest -n0` of that test, its mutations, and
+  `tests/sentica/test_context_latency_ci.py`, against the local Postgres
+  on host port 55432: **33 passed, 0 failed** (22.41s).
+

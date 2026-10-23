@@ -38,12 +38,7 @@ def test_dropping_the_serial_step_fails_the_guard() -> None:
 
 def test_removing_the_deselect_fails_the_guard() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
-    mutated = text.replace(
-        " --deselect tests/sentica/test_m6_retrieval.py::"
-        + "test_context_latency_on_ten_thousand_conclusions",
-        "",
-        1,
-    )
+    mutated = text.replace(" --deselect " + NODE_ID, "", 1)
     with pytest.raises(LatencyCIError, match="parallel"):
         check_workflow(mutated)
 

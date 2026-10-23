@@ -120,4 +120,5 @@ release v3.3.0 (`608aec8a928da13c540262ed980c569448fb53ab`).
 | `tests/sentica/test_m2_fix.py` | The runtime-role proof still must not set `DB_CONNECTION_URI`. The check stops at the next job. | Redis host port |
 | `PROGRESS.md` | Records the Redis host port change and Jose's approval. The M0 entry is unchanged. | Redis host port |
 | `FORK_CHANGES.md` | Rows for the Redis host port change. | Redis host port |
+| `tests/sentica/test_m9_packaging.py` | The suite command must be `uv run pytest -x --ignore=tests/sentica/test_m1_stack.py`, plus at most one `--deselect` of `context_latency_ci.NODE_ID`. Any `-k`, any other `--deselect`, or any other `--ignore` fails. Removing that deselect still fails the latency guard. | M6, M9 |
 

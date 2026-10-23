@@ -24,6 +24,7 @@ from src.sentica.ops_metrics import (
     reset_ops,
 )
 from src.sentica.safety import note_drop, reset_drops
+from tests.sentica.context_latency_ci import NODE_ID, LatencyCIError, check_workflow
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -1682,20 +1683,96 @@ def firewall_ci_gaps(command: str) -> list[str]:
     return gaps
 
 
-def test_ci_collects_the_firewall_topology_test() -> None:
-    """The main CI job runs the test that applies the firewall."""
-    workflow = _text(".github/workflows/unittest.yml")
+_SUITE_BASE = "uv run pytest -x --ignore=tests/sentica/test_m1_stack.py"
+
+
+def _suite_commands(workflow: str) -> list[str]:
     commands = re.findall(r"uv run pytest[^\n]*", workflow)
-    main = [
+    return [
         command
         for command in commands
         if "--ignore=tests/sentica/test_m1_stack.py" in command
     ]
-    assert main == ["uv run pytest -x --ignore=tests/sentica/test_m1_stack.py"]
+
+
+def suite_command_ok(command: str) -> bool:
+    """The pinned base, plus at most one deselect of the latency node."""
+    tokens = shlex.split(command)
+    base = shlex.split(_SUITE_BASE)
+    if tokens[: len(base)] != base:
+        return False
+    extra = tokens[len(base) :]
+    return extra == [] or extra == ["--deselect", NODE_ID]
+
+
+def _suite_workflow(command: str) -> str:
+    workflow = _text(".github/workflows/unittest.yml")
+    needle = _SUITE_BASE + " --deselect " + NODE_ID
+    assert workflow.count(needle) == 1
+    return workflow.replace(needle, command, 1)
+
+
+def test_ci_collects_the_firewall_topology_test() -> None:
+    """The main CI job runs the test that applies the firewall."""
+    workflow = _text(".github/workflows/unittest.yml")
+    main = _suite_commands(workflow)
+    assert main == [_SUITE_BASE + " --deselect " + NODE_ID]
+    assert suite_command_ok(main[0])
     assert firewall_ci_gaps(main[0]) == []
     excluded = main[0] + " -k 'not topology'"
+    assert not suite_command_ok(excluded)
     assert firewall_ci_gaps(excluded) != []
     assert any("excluded by -k" in item for item in firewall_ci_gaps(excluded))
+    check_workflow()
+
+
+def test_a_second_deselect_of_the_topology_test_fails_both_guards() -> None:
+    mutated = _suite_workflow(
+        _SUITE_BASE + " --deselect " + NODE_ID + " --deselect " + _TOPOLOGY_NODEID
+    )
+    command = _suite_commands(mutated)[0]
+    assert not suite_command_ok(command)
+    assert firewall_ci_gaps(command) != []
+    with pytest.raises(LatencyCIError, match="parallel"):
+        check_workflow(mutated)
+
+
+def test_replacing_the_deselect_with_k_fails_both_guards() -> None:
+    mutated = _suite_workflow(_SUITE_BASE + " -k topology")
+    command = _suite_commands(mutated)[0]
+    assert not suite_command_ok(command)
+    with pytest.raises(LatencyCIError, match="parallel"):
+        check_workflow(mutated)
+
+
+def test_another_ignore_fails_the_firewall_guard() -> None:
+    mutated = _suite_workflow(
+        _SUITE_BASE
+        + " --ignore=tests/sentica/test_egress_proxy.py --deselect "
+        + NODE_ID
+    )
+    command = _suite_commands(mutated)[0]
+    assert not suite_command_ok(command)
+    assert firewall_ci_gaps(command) != []
+    with pytest.raises(LatencyCIError, match="parallel"):
+        check_workflow(mutated)
+
+
+def test_removing_the_deselect_fails_only_the_latency_guard() -> None:
+    mutated = _suite_workflow(_SUITE_BASE)
+    command = _suite_commands(mutated)[0]
+    assert suite_command_ok(command)
+    assert firewall_ci_gaps(command) == []
+    with pytest.raises(LatencyCIError, match="parallel"):
+        check_workflow(mutated)
+
+
+def test_restoring_the_suite_command_satisfies_both_guards() -> None:
+    workflow = _text(".github/workflows/unittest.yml")
+    command = _suite_commands(workflow)[0]
+    assert suite_command_ok(command)
+    assert firewall_ci_gaps(command) == []
+    check_workflow()
 
 
 def test_deploy_password_file_steps_create_the_file(tmp_path: Path) -> None:
