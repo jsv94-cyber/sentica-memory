@@ -1658,7 +1658,15 @@ def _keyword_selects(expression: str, nodeid: str) -> bool:
 
     compiled = Expression.compile(expression)
     folded = nodeid.lower()
-    return compiled.evaluate(lambda name: name.lower() in folded)
+
+    def matches(name: str, /, **kwargs: str | int | bool | None) -> bool:
+        # Call-form keywords are not part of a node id. ExpressionMatcher
+        # requires the kwargs parameter; a one-argument lambda is not that type.
+        if kwargs:
+            return False
+        return name.lower() in folded
+
+    return compiled.evaluate(matches)
 
 
 def firewall_ci_gaps(command: str) -> list[str]:

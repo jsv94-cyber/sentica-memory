@@ -569,8 +569,8 @@ def _apply_firewall_script(
                 "sh",
                 "-c",
                 "name=snt-fw-$$.sh; cp /script /host-tmp/$name; "
-                "nsenter -t 1 -m -n -- sh /tmp/$name; rc=$?; "
-                "rm -f /host-tmp/$name; exit $rc",
+                + "nsenter -t 1 -m -n -- sh /tmp/$name; rc=$?; "
+                + "rm -f /host-tmp/$name; exit $rc",
             ],
             env,
             check=False,
