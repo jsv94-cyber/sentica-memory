@@ -536,3 +536,5 @@ Follow-up on 2026-10-22, suite command:
   `tests/sentica/test_context_latency_ci.py`, against the local Postgres
   on host port 55432: **33 passed, 0 failed** (22.41s).
 
+- CI run 39902396740 on 9d03dd0e: serial step 25 s, pytest 15.46 s, 1 collected, cold 145.3 ms, warm p95 112.0 ms; parallel 3509 passed, 53 skipped.
+
