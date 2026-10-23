@@ -127,5 +127,10 @@ release v3.3.0 (`608aec8a928da13c540262ed980c569448fb53ab`).
 | `docs/image-digest.txt` | The comment names `docs/RELEASE-v0.2.1-sentica.md`. The digest line is unchanged. | R6 |
 | `tests/sentica/test_integration_contract.py` | Release assertions require the v0.2.1 note, the digest comment, and the releases entry. | R6 |
 | `tests/sentica/test_m0_baseline.py` | The v0.2.1 release note is included in the em dash check. | R6 |
+| `docs/INTEGRATION.md` | Close gap 1 under D5, record the R6-6 ceiling key as the planned contract, record D9 dedupe on read, and record gap 6 as an accepted residual risk. | R6-7 |
+| `tests/sentica/test_contract_dedupe_fields.py` | search_memory, brief, and list responses carry `workspace_id`, `subject_ref`, `session_id`, and `content`. A mutated row fails the same check. | R6-7 |
+| `PROGRESS.md` | Records the R6-7 contract. The M-INT decision text is unchanged. | R6-7 |
+| `FORK_CHANGES.md` | Rows for the R6-7 contract. | R6-7 |
 | `src/utils/filter.py`, `tests/utils/test_filter.py`, `tests/test_advanced_filters.py`, `docs/v3/documentation/features/advanced/using-filters.mdx`, `tests/sentica/test_filter_not_empty.py` | Cherry-pick `47d3eac2`. An empty object or a wildcard is TRUE, so `NOT [{}]` and `NOT [*]` match no rows and an `OR` keeps the wildcard. The new test reads conclusions as a non-superuser inside one workspace. | R6 |
+| `docs/image-digest.txt`, `docs/RELEASES.md`, `tests/sentica/test_integration_contract.py` | The live image digest changed to `sha256:2c8bbf29429766bcf1e502d75d03f347b57ad050e48594ca18cd4b9d6895fa97`. `docs/RELEASES.md` records that digest under `## Unreleased`. The contract test updates only its current-digest assertion to that value. | R6 |
 
