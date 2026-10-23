@@ -175,14 +175,15 @@ def test_serial_step_if_fails_the_guard() -> None:
         check_workflow(mutated)
 
 
-def test_an_if_on_run_tests_does_not_skip_the_serial_step() -> None:
+def test_run_tests_if_fails_the_guard() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
     mutated = text.replace(
         "      - name: Run Tests\n",
-        "      - name: Run Tests\n        if: success()\n",
+        "      - name: Run Tests\n        if: false\n",
         1,
     )
-    check_workflow(mutated)
+    with pytest.raises(LatencyCIError, match="skip the serial step"):
+        check_workflow(mutated)
 
 
 def test_exit_zero_in_the_serial_script_fails_the_guard() -> None:
@@ -190,7 +191,7 @@ def test_exit_zero_in_the_serial_script_fails_the_guard() -> None:
     needle = "          set -euo pipefail\n"
     assert text.count(needle) == 1
     mutated = text.replace(needle, needle + "          exit 0\n", 1)
-    with pytest.raises(LatencyCIError, match="exits early"):
+    with pytest.raises(LatencyCIError, match="pinned script"):
         check_workflow(mutated)
 
 
@@ -199,5 +200,61 @@ def test_pytest_or_true_masks_the_serial_status() -> None:
     needle = 'uv run pytest "$nodeid" -n0 --collect-only -q >"$collect_out" 2>&1\n'
     assert text.count(needle) == 1
     mutated = text.replace(needle, needle.replace("\n", " || true\n", 1), 1)
-    with pytest.raises(LatencyCIError, match="masks"):
+    with pytest.raises(LatencyCIError, match="pinned script"):
+        check_workflow(mutated)
+
+
+def test_serial_step_shell_true_fails_the_guard() -> None:
+    text = WORKFLOW.read_text(encoding="utf-8")
+    mutated = text.replace(
+        "      - name: Run context-latency test serially\n",
+        "      - name: Run context-latency test serially\n        shell: true\n",
+        1,
+    )
+    with pytest.raises(LatencyCIError, match="shell"):
+        check_workflow(mutated)
+
+
+def test_job_defaults_run_shell_fails_the_guard() -> None:
+    text = WORKFLOW.read_text(encoding="utf-8")
+    mutated = text.replace(
+        "  test-python:\n    runs-on: ubuntu-24.04\n",
+        "  test-python:\n"
+        + "    runs-on: ubuntu-24.04\n"
+        + "    defaults:\n"
+        + "      run:\n"
+        + "        shell: true\n",
+        1,
+    )
+    with pytest.raises(LatencyCIError, match="shell"):
+        check_workflow(mutated)
+
+
+def test_workflow_defaults_run_shell_fails_the_guard() -> None:
+    text = WORKFLOW.read_text(encoding="utf-8")
+    assert text.count("\njobs:\n") == 1
+    mutated = text.replace(
+        "\njobs:\n",
+        "\ndefaults:\n  run:\n    shell: true\n\njobs:\n",
+        1,
+    )
+    with pytest.raises(LatencyCIError, match="shell"):
+        check_workflow(mutated)
+
+
+def test_exec_true_fails_the_guard() -> None:
+    text = WORKFLOW.read_text(encoding="utf-8")
+    needle = "          set -euo pipefail\n"
+    assert text.count(needle) == 1
+    mutated = text.replace(needle, needle + "          exec true\n", 1)
+    with pytest.raises(LatencyCIError, match="pinned script"):
+        check_workflow(mutated)
+
+
+def test_uv_function_override_fails_the_guard() -> None:
+    text = WORKFLOW.read_text(encoding="utf-8")
+    needle = "          set -euo pipefail\n"
+    assert text.count(needle) == 1
+    mutated = text.replace(needle, needle + "          uv() { true; }\n", 1)
+    with pytest.raises(LatencyCIError, match="pinned script"):
         check_workflow(mutated)

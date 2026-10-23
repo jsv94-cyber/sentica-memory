@@ -120,14 +120,6 @@ Decisions:
 - The two-instance proof is `tests/sentica/test_m1_stack.py`. CI job
   `test-python` ignores that file. Job `test-m1-stack` sets
   `SENTICA_MODE=test` and runs it, and fails if it collects zero tests.
-  The parallel suite command deselects
-  `test_context_latency_on_ten_thousand_conclusions` and the next step
-  runs that node with `-n0`. The 300 ms budget is unchanged. A guard
-  fails if the test is skipped, collected zero times, or missing from
-  either step. It also fails on `continue-on-error`, on an `if` that can
-  skip the serial step, on an early exit or a masked pytest status, and
-  when the deselect prefix matches anything other than that one test.
-  Skip detection reads the pytest summary line.
   Image publish workflows stay `if: false` until M9.
 
 Deviations from GOALS.md: the unit suite and `docker-compose.yml` still use
@@ -351,6 +343,25 @@ Decisions:
   No `tests/sentica/test_m2_*` file, `tests/sentica/rls_job.py`, or the
   `test-m2-rls` job changed.
 
+Follow-up on 2026-10-22:
+
+- The parallel suite deselects
+  `test_context_latency_on_ten_thousand_conclusions`. The next step runs
+  that node with `-n0`. The assertion stays `assert warm_p95 < 0.3`.
+- CI run 39882904117 reported context cold 125.3 ms, warm p95 72.0 ms.
+- The guard requires that deselect command and one pinned serial script.
+  It rejects `continue-on-error` on `test-python` and its steps, an `if`
+  on that job or either latency step, and a `shell` or `defaults.run.shell`
+  override at workflow, job, or step level. The serial step runs
+  `--check-workflow` after the sha256 pin. Collection and pass checks
+  read the pytest summary line. The deselect prefix must match one
+  collected test. The latency test must keep its assertion and must not
+  skip. The two steps share one environment. `test-status` must fail
+  when `test-python` does not succeed.
+- `uv run pytest -n0 tests/sentica/test_context_latency_ci.py` against
+  the local Postgres on host port 55432:
+  **27 passed, 0 failed** (24.44s).
+
 ## M7. Dreams inside each workspace
 
 Built:
@@ -497,4 +508,20 @@ Test counts, on this host, against throwaway Postgres on port 5441 and Redis on 
 
 - Unit suite, optional extras installed, `tests/sentica/test_m1_stack.py` excluded: 3455 passed, 53 skipped, 2 failed. Both failures are `tests/sdk_typescript/test_sdk.py` because `bun` is not installed here. CI installs bun.
 - Two-instance stack: 33 passed. The on-disk scan in `test_stopped_stack_leaves_no_memory_on_disk` calls `sudo grep`. This host asks for a sudo password, so that scan did not run to completion here. CI runners that have passwordless sudo still run it.
+
+## Redis host port. 2026-10-22
+
+Jose approved item 11 in chat on 2026-10-22: "1 to 12: yes as recommended."
+
+- Tracked compose files publish Redis on host port 36379. 36379 is
+  unused by the common local Redis port 6379, Sentinel 26379, and the
+  sandbox Redis port 16379. `SENTICA_REDIS_PORT` still overrides the
+  host side. The container listens on 6379.
+- Postgres host ports remain 5432. Runtime defaults in `src/config.py`
+  and `config.toml.example` are unchanged, so the default image digest
+  stays the recorded pin.
+- `docker-compose.yml.example` publishes Redis on host port 36379.
+  The M0 note above records the example as it was on that date.
+- The gVisor smoke job sets `DB_CONNECTION_URI` to the runner Postgres
+  on port 5432, so that job does not follow a runtime default.
 

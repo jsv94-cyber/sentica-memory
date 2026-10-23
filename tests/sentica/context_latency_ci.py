@@ -181,125 +181,102 @@ def _step_index(steps: list[dict[str, Any]], name: str) -> int | None:
 
 
 def _reject_fail_open(
-    job: dict[str, Any], steps: list[dict[str, Any]], serial_index: int
+    job: dict[str, Any],
+    steps: list[dict[str, Any]],
+    parallel_index: int,
+    serial_index: int,
 ) -> None:
-    """Fail if the job can ignore a red step or skip the serial step."""
+    """Fail if the job can ignore a red step or skip either latency step."""
     if "continue-on-error" in job or any("continue-on-error" in step for step in steps):
         raise LatencyCIError(
             "test-python continue-on-error lets the context-latency step fail open"
         )
-    if "if" in job or "if" in steps[serial_index]:
-        raise LatencyCIError("a test-python if can skip the serial step")
+    if "if" in job or "if" in steps[parallel_index] or "if" in steps[serial_index]:
+        raise LatencyCIError(
+            "a test-python if can skip the serial step or the parallel step"
+        )
 
 
-_HEREDOC_OPEN = re.compile(r"<<\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
-_EXIT_WORD = re.compile(r"\bexit\b")
-_GUARDED_EXIT = {
-    'if [ "$collect_status" -ne 0 ]; then': 'exit "$collect_status"',
-    'if [ "$run_status" -ne 0 ]; then': 'exit "$run_status"',
-}
-_STATUS_CAPTURES = (
-    (
-        'uv run pytest "$nodeid" -n0 --collect-only -q >"$collect_out" 2>&1',
-        "collect_status=$?",
-    ),
-    (
-        'uv run pytest "$nodeid" -n0 -v --tb=short >"$run_out" 2>&1',
-        "run_status=$?",
-    ),
-)
+def _defaults_shell(value: object) -> bool:
+    if not isinstance(value, dict):
+        return False
+    defaults = cast(dict[str, Any], value)
+    run = defaults.get("run")
+    if not isinstance(run, dict):
+        return False
+    return "shell" in cast(dict[str, Any], run)
 
 
-def _strip_comment(line: str) -> str:
-    quote: str | None = None
-    for index, char in enumerate(line):
-        if quote is not None:
-            if char == quote:
-                quote = None
+def _reject_shell_overrides(document: dict[str, Any]) -> None:
+    """A shell override can ignore the serial script and exit 0."""
+    if _defaults_shell(document.get("defaults")):
+        raise LatencyCIError("a shell override can skip the serial script")
+    raw_jobs = document.get("jobs")
+    if not isinstance(raw_jobs, dict):
+        return
+    jobs = cast(dict[str, Any], raw_jobs)
+    for raw_job in jobs.values():
+        if not isinstance(raw_job, dict):
             continue
-        if char in {"'", '"'}:
-            quote = char
+        job = cast(dict[str, Any], raw_job)
+        if _defaults_shell(job.get("defaults")):
+            raise LatencyCIError("a shell override can skip the serial script")
+        raw_steps = job.get("steps")
+        if not isinstance(raw_steps, list):
             continue
-        if char == "#":
-            return line[:index].strip()
-    return line.strip()
+        for raw_step in cast(list[object], raw_steps):
+            if not isinstance(raw_step, dict):
+                continue
+            if "shell" in cast(dict[str, Any], raw_step):
+                raise LatencyCIError("a shell override can skip the serial script")
 
 
-def _script_lines(script: str) -> list[str]:
-    """Executable lines, with heredoc bodies and comments removed."""
-    lines: list[str] = []
-    heredoc: str | None = None
-    for raw in script.splitlines():
-        stripped = raw.strip()
-        if heredoc is not None:
-            if stripped == heredoc:
-                heredoc = None
-            continue
-        code = _strip_comment(stripped)
-        if not code:
-            continue
-        opened = _HEREDOC_OPEN.search(code)
-        if opened is not None:
-            heredoc = opened.group(2)
-        lines.append(code)
-    return lines
+# The digest is filled in at check time. The file cannot contain its own hash.
+_SERIAL_RUN = """\
+set -euo pipefail
+sha256sum -c <<'EOF'
+@@CHECKER_SHA256@@  tests/sentica/context_latency_ci.py
+EOF
+uv run python tests/sentica/context_latency_ci.py --check-workflow
+nodeid="tests/sentica/test_m6_retrieval.py::test_context_latency_on_ten_thousand_conclusions"
+collect_out=""
+run_out=""
+trap 'rm -f "$collect_out" "$run_out"' EXIT
+collect_out="$(mktemp)"
+run_out="$(mktemp)"
+set +e
+uv run pytest "$nodeid" -n0 --collect-only -q >"$collect_out" 2>&1
+collect_status=$?
+set -e
+cat "$collect_out"
+if [ "$collect_status" -ne 0 ]; then
+  exit "$collect_status"
+fi
+uv run python tests/sentica/context_latency_ci.py --require-collected "$collect_out"
+set +e
+uv run pytest "$nodeid" -n0 -v --tb=short >"$run_out" 2>&1
+run_status=$?
+set -e
+cat "$run_out"
+if [ "$run_status" -ne 0 ]; then
+  exit "$run_status"
+fi
+uv run python tests/sentica/context_latency_ci.py --require-passed "$run_out"
+"""
 
 
-def _reject_early_exit(lines: list[str]) -> None:
-    for index, line in enumerate(lines):
-        if _EXIT_WORD.search(line) is None:
-            continue
-        previous = lines[index - 1] if index else ""
-        following = lines[index + 1] if index + 1 < len(lines) else ""
-        if line != _GUARDED_EXIT.get(previous) or following != "fi":
-            raise LatencyCIError("serial script exits early")
-
-
-def _reject_status_mask(lines: list[str]) -> None:
-    message = "serial script masks pytest status"
-    for line in lines:
-        if "|" in line or "&&" in line:
-            raise LatencyCIError(message)
-        if ";" in line and line not in _GUARDED_EXIT:
-            raise LatencyCIError(message)
-        if line.startswith("set +") and line != "set +e":
-            raise LatencyCIError(message)
-        if line.startswith("collect_status=") and line != "collect_status=$?":
-            raise LatencyCIError(message)
-        if line.startswith("run_status=") and line != "run_status=$?":
-            raise LatencyCIError(message)
-    captures = [index for index, line in enumerate(lines) if line == "set +e"]
-    if len(captures) != len(_STATUS_CAPTURES):
-        raise LatencyCIError(message)
-    for index, (pytest_line, status_line) in zip(
-        captures, _STATUS_CAPTURES, strict=True
-    ):
-        window = lines[index + 1 : index + 4]
-        if window != [pytest_line, status_line, "set -e"]:
-            raise LatencyCIError(message)
+def expected_serial_run() -> str:
+    """The only serial script the workflow may run."""
+    if NODE_ID not in _SERIAL_RUN or _SERIAL_RUN.count("@@CHECKER_SHA256@@") != 1:
+        raise LatencyCIError("pinned serial script is not intact")
+    digest = hashlib.sha256((ROOT / CHECKER_PATH).read_bytes()).hexdigest()
+    return _SERIAL_RUN.replace("@@CHECKER_SHA256@@", digest)
 
 
 def require_serial_script(script: str) -> None:
-    """The serial step must run pytest and return pytest's status."""
-    digest = hashlib.sha256((ROOT / CHECKER_PATH).read_bytes()).hexdigest()
-    pin = digest + "  " + CHECKER_PATH.as_posix()
-    required = (
-        "set -euo pipefail",
-        "sha256sum -c",
-        pin,
-        'nodeid="' + NODE_ID + '"',
-        'uv run pytest "$nodeid" -n0 --collect-only -q',
-        "context_latency_ci.py --require-collected",
-        'uv run pytest "$nodeid" -n0 -v --tb=short',
-        "context_latency_ci.py --require-passed",
-        'exit "$collect_status"',
-        'exit "$run_status"',
-    )
-    if any(item not in script for item in required):
-        raise LatencyCIError("context-latency test is missing from the serial step")
-    lines = _script_lines(script)
-    _reject_early_exit(lines)
-    _reject_status_mask(lines)
+    """The serial step's run block must equal the pinned script."""
+    if script != expected_serial_run():
+        raise LatencyCIError("serial script does not match the pinned script")
 
 
 def _check_status(document: dict[str, Any]) -> None:
@@ -343,7 +320,8 @@ def check_workflow(text: str | None = None) -> None:
             else "context-latency test is missing from the serial step"
         )
     serial = steps[serial_index]
-    _reject_fail_open(job, steps, serial_index)
+    _reject_fail_open(job, steps, parallel_index, serial_index)
+    _reject_shell_overrides(document)
     require_serial_script(_run(serial))
     parallel_env = steps[parallel_index].get("env")
     if serial.get("env") != parallel_env:
