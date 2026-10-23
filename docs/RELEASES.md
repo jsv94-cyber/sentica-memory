@@ -4,15 +4,15 @@
 
 The image manifest is
 `sha256:65bfe6725581aae41a242f7a14f7f9a4b6deeba2d01bf85577d3286765c615e8`,
-the same value `docs/image-digest.txt` already records.
+the value `docs/image-digest.txt` recorded at tag time.
 `docs/RELEASE-v0.2.0-sentica.md` stays as released. The broker contract
 is unchanged. There is no migrate step. The Alembic head stays
 `d4a8c1e27b90`.
 
-Sentica swaps the two constants in `pin.mjs` lines 6-9. The note is
-`docs/RELEASE-v0.2.1-sentica.md`. `docs/image-digest.txt` is the current
-expected digest. CI builds the image twice from clean builders and fails
-when those two digests differ or when they differ from that file.
+Sentica swaps the two constants in `pin.mjs` lines 6-9 and repoints
+the comment on line 2. The note is `docs/RELEASE-v0.2.1-sentica.md`.
+CI builds the image twice from clean builders and fails when those two
+digests differ or when they differ from `docs/image-digest.txt`.
 
 ## v0.1.0-sentica
 

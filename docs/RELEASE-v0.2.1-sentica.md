@@ -37,9 +37,12 @@ The image manifest digest is:
 ## Upgrade
 
 Sentica swaps the two constants in
-`packages/api/src/memory-broker/pin.mjs` lines 6-9 and leaves the rest
-of that file alone. Those lines are at Sentica commit
-`9bb2d1429266a1401c45255516db6d58025307e0`:
+`packages/api/src/memory-broker/pin.mjs` lines 6-9 and repoints the
+comment on line 2. Those lines are at Sentica commit
+`9bb2d1429266a1401c45255516db6d58025307e0`. Line 2 cites
+`docs/RELEASE-v0.2.0-sentica.md:57`. Point it at
+`docs/RELEASE-v0.2.1-sentica.md:35`, the manifest digest in this note.
+Leave every other line in that file alone.
 
 `SENTICA_MEMORY_TAG` is `v0.2.0-sentica`. Set it to `v0.2.1-sentica`.
 

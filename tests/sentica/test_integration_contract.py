@@ -87,16 +87,19 @@ def test_release_notes_pin_the_base_images() -> None:
     assert "docs/RELEASE-v0.2.0-sentica.md" not in checker
     image = "sha256:522b48cbd15d6ee59b99f0df376fc1e4cdaffd635e8aba66fd45114c6c35ae6d"
     current = "sha256:65bfe6725581aae41a242f7a14f7f9a4b6deeba2d01bf85577d3286765c615e8"
+    tagged = "sha256:65bfe6725581aae41a242f7a14f7f9a4b6deeba2d01bf85577d3286765c615e8"
     assert image in notes
     assert current not in notes
     assert re.search(r"sha256:[0-9a-f]{64}", notes)
     released = _text("docs/RELEASE-v0.2.1-sentica.md")
     assert "v0.2.1-sentica" in released
     assert "merge commit" in released
-    assert current in released
+    assert tagged in released
     assert image in released
     assert "pin.mjs" in released
     assert "lines 6-9" in released
+    assert "line 2" in released
+    assert "docs/RELEASE-v0.2.1-sentica.md:35" in released
     assert "SENTICA_MEMORY_TAG" in released
     assert "SENTICA_MEMORY_DIGEST" in released
     assert "no migrate" in released
@@ -116,11 +119,12 @@ def test_release_notes_pin_the_base_images() -> None:
     assert "docs/RELEASE-v0.2.0-sentica.md" not in digest_file
     releases = _text("docs/RELEASES.md")
     assert "## v0.2.1-sentica" in releases
-    assert "## Unreleased" not in releases
     assert "v0.2.0-sentica" in releases
     assert "v0.1.0-sentica" in releases
-    assert current in releases
+    assert tagged in releases
     assert "no migrate" in releases
+    assert "recorded at tag time" in releases
+    assert "current expected digest" not in releases
 
 
 def _metadata(digest: str) -> str:
