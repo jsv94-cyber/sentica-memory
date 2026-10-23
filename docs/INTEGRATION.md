@@ -517,12 +517,17 @@ the USING and WITH CHECK clauses from
 36-47, and whether a count with `sentica.workspace` unset is zero.
 Tables exempted by `test_every_memory_table_has_rls_or_a_reason` (pull
 request #5) are `workspaces`, `active_queue_sessions`, and
-`alembic_version`, with the reasons on that guard. The probe prints
-table names and booleans only. Any failure exits non-zero.
+`alembic_version`. Those reasons live in `EXEMPT_TABLES` in
+`scripts/sentica_rls_probe.py`. The probe prints table names and
+booleans only. Any failure exits non-zero.
 
 `tests/sentica/test_rls_probe.py` runs in the unit job. A passing run
 is followed by a dropped `sentica_workspace` policy, by
 `NO FORCE ROW LEVEL SECURITY`, and by `BYPASSRLS` on the runtime role.
-Each mutation makes the probe exit non-zero, and restoring the wall
-makes the next run pass. `tests/sentica/rls_job.py` is unchanged, so
-the runtime-role job's node list stays the same.
+An extra permissive policy that applies to the runtime role, membership
+in the table owner, a partitioned table without that policy, and a view
+in schema `memory` each make the probe exit non-zero as well. A
+partitioned table that has the wall is reported and does not fail the
+probe. Restoring the wall makes the next run pass.
+`tests/sentica/rls_job.py` is unchanged, so the runtime-role job's node
+list stays the same.

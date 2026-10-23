@@ -47,6 +47,10 @@ EXEMPT_TABLES: dict[str, str] = {
 }
 
 _SCHEMA = "memory"
+# Ordinary and partitioned tables are walled. Indexes, sequences, toast,
+# and composite types are not tables. Any other kind fails closed.
+_TABLE_KINDS = frozenset({"r", "p"})
+_IGNORED_KINDS = frozenset({"i", "I", "S", "t", "c"})
 _NAME = re.compile(r"[a-z_][a-z0-9_]*\Z")
 _HOST = re.compile(r"[A-Za-z0-9.-]+\Z")
 _IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
@@ -70,11 +74,10 @@ _PRODUCTION_IMAGE = Path("/app/.sentica-production-image")
 
 _CATALOG = """
 SELECT c.relname,
+    c.relkind,
     c.relrowsecurity,
     c.relforcerowsecurity,
-    c.relowner = (
-        SELECT oid FROM pg_roles WHERE rolname = current_user
-    ),
+    pg_has_role(current_user, c.relowner, 'MEMBER'),
     EXISTS (
         SELECT 1
         FROM information_schema.columns AS cols
@@ -96,10 +99,25 @@ SELECT c.relname,
         SELECT pg_get_expr(p.polwithcheck, p.polrelid)
         FROM pg_policy AS p
         WHERE p.polrelid = c.oid AND p.polname = 'sentica_workspace'
+    ),
+    (
+        SELECT count(*)
+        FROM pg_policy AS p
+        WHERE p.polrelid = c.oid
+            AND p.polname <> 'sentica_workspace'
+            AND (
+                0::oid = ANY (p.polroles)
+                OR EXISTS (
+                    SELECT 1
+                    FROM unnest(p.polroles) AS role_oid
+                    WHERE role_oid <> 0::oid
+                        AND pg_has_role(current_user, role_oid, 'MEMBER')
+                )
+            )
     )
 FROM pg_class AS c
 JOIN pg_namespace AS n ON n.oid = c.relnamespace
-WHERE n.nspname = 'memory' AND c.relkind = 'r'
+WHERE n.nspname = 'memory'
 ORDER BY c.relname
 """
 
@@ -204,37 +222,50 @@ def _run() -> int:
         ok = runtime and not superuser and not bypass
         owns_any = False
         seen: set[str] = set()
+        recognised = 0
         for row in rows:
             name = str(row[0])
             if _NAME.fullmatch(name) is None:
                 raise RuntimeError("unexpected table name")
+            relkind = str(row[1])
+            if relkind in _IGNORED_KINDS:
+                continue
             seen.add(name)
-            enabled = bool(row[1])
-            forced = bool(row[2])
-            owned = bool(row[3])
-            has_workspace = bool(row[4])
-            policy_count = int(row[5])
-            using = str(row[6] or "")
-            check = str(row[7] or "")
+            enabled = bool(row[2])
+            forced = bool(row[3])
+            owned = bool(row[4])
+            has_workspace = bool(row[5])
+            policy_count = int(row[6])
+            using = str(row[7] or "")
+            check = str(row[8] or "")
+            other_policies = int(row[9])
+            table_kind = relkind in _TABLE_KINDS
             policy = (
-                policy_count == 1
+                table_kind
+                and policy_count == 1
+                and other_policies == 0
                 and using == _EXPECTED_CLAUSE
                 and check == _EXPECTED_CLAUSE
             )
-            counted = conn.execute(
-                sql.SQL("SELECT count(*) FROM {}.{}").format(
-                    sql.Identifier(_SCHEMA),
-                    sql.Identifier(name),
-                )
-            ).fetchone()
-            if counted is None:
-                raise RuntimeError("missing count")
-            unset_zero = int(counted[0]) == 0
+            if table_kind:
+                recognised += 1
+                counted = conn.execute(
+                    sql.SQL("SELECT count(*) FROM {}.{}").format(
+                        sql.Identifier(_SCHEMA),
+                        sql.Identifier(name),
+                    )
+                ).fetchone()
+                if counted is None:
+                    raise RuntimeError("missing count")
+                unset_zero = int(counted[0]) == 0
+            else:
+                ok = False
+                unset_zero = False
             exempt = name in EXEMPT_TABLES
             if owned:
                 owns_any = True
                 ok = False
-            if exempt:
+            if exempt and table_kind:
                 if has_workspace:
                     ok = False
             elif not (enabled and forced and policy and unset_zero and has_workspace):
@@ -254,6 +285,8 @@ def _run() -> int:
                 + " exempt="
                 + _flag(exempt)
             )
+        if recognised == 0:
+            raise RuntimeError("no tables")
         if not set(EXEMPT_TABLES).issubset(seen):
             raise RuntimeError("missing exempt table")
         if owns_any or superuser or bypass or not runtime:

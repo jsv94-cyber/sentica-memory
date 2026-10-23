@@ -212,7 +212,10 @@ def test_rls_probe_fails_when_the_wall_is_opened(
 
     The planted peer is visible to the migration owner and hidden from the
     runtime role while the wall is intact. Dropping the policy, turning
-    force off, and granting BYPASSRLS each make the probe exit non-zero.
+    force off, granting BYPASSRLS, adding a permissive policy that applies
+    to the runtime role, granting the owner role, leaving a partitioned
+    table without the wall, and adding a view each make the probe exit
+    non-zero.
     """
     module = _load_probe()
     assert module.EXEMPT_TABLES == TABLES_WITHOUT_WORKSPACE_RLS
@@ -223,11 +226,13 @@ def test_rls_probe_fails_when_the_wall_is_opened(
     token = uuid.uuid4().hex
     runtime_role = "r6p" + token[:8]
     ddl_role = runtime_role + "_ddl"
+    bystander = "r6b" + token[:8]
     database = "r6prd_" + token[:8]
     workspace_id = token[:21]
     peer_id = token[11:32]
     secrets = (workspace_id, peer_id)
     password = admin.password
+    admin_dsn = ""
     previous_uri = settings.DB.CONNECTION_URI
     previous_schema = settings.DB.SCHEMA
     previous_metadata = Base.metadata.schema
@@ -337,6 +342,105 @@ def test_rls_probe_fails_when_the_wall_is_opened(
             sql.SQL("ALTER ROLE {} NOBYPASSRLS").format(sql.Identifier(runtime_role)),
         )
         _passing(runtime_dsn, secrets)
+
+        _exec_sql(
+            admin_dsn,
+            sql.SQL("CREATE ROLE {} NOLOGIN NOBYPASSRLS").format(
+                sql.Identifier(bystander)
+            ),
+        )
+        _exec_sql(
+            admin_dsn,
+            sql.SQL(
+                "CREATE POLICY probe_bystander ON memory.peers "
+                + "AS PERMISSIVE FOR ALL TO {} USING (true) WITH CHECK (true)"
+            ).format(sql.Identifier(bystander)),
+        )
+        _passing(runtime_dsn, secrets)
+        _exec_sql(
+            admin_dsn,
+            sql.SQL(
+                "CREATE POLICY probe_open ON memory.peers "
+                + "AS PERMISSIVE FOR ALL TO {} USING (false) WITH CHECK (false)"
+            ).format(sql.Identifier(runtime_role)),
+        )
+        opened, _role = _failing(runtime_dsn, secrets)
+        assert opened["peers"]["policy"] is False
+        assert opened["peers"]["rls"] is True
+        assert opened["peers"]["forced"] is True
+        assert opened["peers"]["unset_zero"] is True
+        assert opened["messages"]["policy"] is True
+        _exec(admin_dsn, "DROP POLICY probe_open ON memory.peers")
+        _exec(admin_dsn, "DROP POLICY probe_bystander ON memory.peers")
+        _exec_sql(
+            admin_dsn,
+            sql.SQL("DROP ROLE {}").format(sql.Identifier(bystander)),
+        )
+        _passing(runtime_dsn, secrets)
+
+        _exec_sql(
+            admin_dsn,
+            sql.SQL("GRANT {} TO {}").format(
+                sql.Identifier(ddl_role), sql.Identifier(runtime_role)
+            ),
+        )
+        member, role = _failing(runtime_dsn, secrets)
+        assert role["owns_table"] is True
+        assert role["nobypassrls"] is True
+        assert member["peers"]["owned"] is True
+        assert member["peers"]["policy"] is True
+        assert member["peers"]["unset_zero"] is True
+        _exec_sql(
+            admin_dsn,
+            sql.SQL("REVOKE {} FROM {}").format(
+                sql.Identifier(ddl_role), sql.Identifier(runtime_role)
+            ),
+        )
+        _passing(runtime_dsn, secrets)
+
+        _exec(
+            admin_dsn,
+            "CREATE TABLE memory.probe_parts ("
+            + "id text NOT NULL, workspace_name text NOT NULL"
+            + ") PARTITION BY LIST (workspace_name)",
+        )
+        for statement in _policy_sql("memory", "probe_parts").split(";"):
+            piece = statement.strip()
+            if piece:
+                _exec(admin_dsn, piece)
+        _exec_sql(
+            admin_dsn,
+            sql.SQL(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON memory.probe_parts TO {}"
+            ).format(sql.Identifier(runtime_role)),
+        )
+        walled, _role = _passing(runtime_dsn, secrets)
+        assert walled["probe_parts"]["rls"] is True
+        assert walled["probe_parts"]["forced"] is True
+        assert walled["probe_parts"]["policy"] is True
+        assert walled["probe_parts"]["unset_zero"] is True
+        assert walled["probe_parts"]["exempt"] is False
+        _exec(admin_dsn, "DROP POLICY sentica_workspace ON memory.probe_parts")
+        parted, _role = _failing(runtime_dsn, secrets)
+        assert parted["probe_parts"]["policy"] is False
+        assert parted["probe_parts"]["rls"] is True
+        assert parted["peers"]["policy"] is True
+        _exec(admin_dsn, "DROP TABLE memory.probe_parts")
+        restored, _role = _passing(runtime_dsn, secrets)
+        assert "probe_parts" not in restored
+
+        _exec(
+            admin_dsn,
+            "CREATE VIEW memory.probe_view AS "
+            + "SELECT ''::text AS id, ''::text AS workspace_name WHERE false",
+        )
+        unknown, _role = _failing(runtime_dsn, secrets)
+        assert unknown["probe_view"]["rls"] is False
+        assert unknown["probe_view"]["policy"] is False
+        assert unknown["probe_view"]["unset_zero"] is False
+        assert unknown["peers"]["policy"] is True
+        _exec(admin_dsn, "DROP VIEW memory.probe_view")
+        _passing(runtime_dsn, secrets)
     finally:
         settings.DB.CONNECTION_URI = previous_uri
         settings.DB.SCHEMA = previous_schema
@@ -346,6 +450,13 @@ def test_rls_probe_fails_when_the_wall_is_opened(
             os.environ["DB_SCHEMA"] = previous_schema
         else:
             os.environ.pop("DB_SCHEMA", None)
+        if created_db and admin_dsn:
+            with psycopg.connect(admin_dsn, autocommit=True) as conn:
+                conn.execute(
+                    sql.SQL("REVOKE {} FROM {}").format(
+                        sql.Identifier(ddl_role), sql.Identifier(runtime_role)
+                    )
+                )
         with psycopg.connect(_sync(admin), autocommit=True) as conn:
             if created_db:
                 conn.execute(
@@ -353,6 +464,9 @@ def test_rls_probe_fails_when_the_wall_is_opened(
                         sql.Identifier(database)
                     )
                 )
+            conn.execute(
+                sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(bystander))
+            )
             conn.execute(
                 sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(ddl_role))
             )
