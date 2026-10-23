@@ -118,4 +118,5 @@ release v3.3.0 (`608aec8a928da13c540262ed980c569448fb53ab`).
 | `tests/sentica/test_m2_fix.py` | The runtime-role proof still must not set `DB_CONNECTION_URI`. The check stops at the next job. | Redis host port |
 | `PROGRESS.md` | Records the Redis host port change and Jose's approval. The M0 entry is unchanged. | Redis host port |
 | `FORK_CHANGES.md` | Rows for the Redis host port change. | Redis host port |
+| `src/utils/filter.py`, `tests/utils/test_filter.py`, `tests/test_advanced_filters.py`, `docs/v3/documentation/features/advanced/using-filters.mdx`, `tests/sentica/test_filter_not_empty.py` | Cherry-pick `47d3eac2`. An empty object or a wildcard is TRUE, so `NOT [{}]` and `NOT [*]` match no rows and an `OR` keeps the wildcard. The new test reads conclusions as a non-superuser inside one workspace. | R6 |
 
