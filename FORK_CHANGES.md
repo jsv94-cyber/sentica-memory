@@ -131,4 +131,6 @@ release v3.3.0 (`608aec8a928da13c540262ed980c569448fb53ab`).
 | `tests/sentica/test_contract_dedupe_fields.py` | search_memory, brief, and list responses carry `workspace_id`, `subject_ref`, `session_id`, and `content`. A mutated row fails the same check. | R6-7 |
 | `PROGRESS.md` | Records the R6-7 contract. The M-INT decision text is unchanged. | R6-7 |
 | `FORK_CHANGES.md` | Rows for the R6-7 contract. | R6-7 |
+| `src/utils/filter.py`, `tests/utils/test_filter.py`, `tests/test_advanced_filters.py`, `docs/v3/documentation/features/advanced/using-filters.mdx`, `tests/sentica/test_filter_not_empty.py` | Cherry-pick `47d3eac2`. An empty object or a wildcard is TRUE, so `NOT [{}]` and `NOT [*]` match no rows and an `OR` keeps the wildcard. The new test reads conclusions as a non-superuser inside one workspace. | R6 |
+| `docs/image-digest.txt`, `docs/RELEASES.md`, `tests/sentica/test_integration_contract.py` | The live image digest changed to `sha256:2c8bbf29429766bcf1e502d75d03f347b57ad050e48594ca18cd4b9d6895fa97`. `docs/RELEASES.md` records that digest under `## Unreleased`. The contract test updates only its current-digest assertion to that value. | R6 |
 
