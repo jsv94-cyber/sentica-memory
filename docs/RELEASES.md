@@ -4,11 +4,14 @@
 
 The default image manifest is no longer the one recorded for
 `v0.2.1-sentica`. `docs/RELEASE-v0.2.1-sentica.md` stays as released.
+This branch's image includes the digest-pinned Python stages and the
+other files that image copies, so its manifest is
+`sha256:2c8bbf29429766bcf1e502d75d03f347b57ad050e48594ca18cd4b9d6895fa97`.
 The next release runs a migrate step from Alembic head `d4a8c1e27b90`
 to `e7c2a91b4d08`. That revision adds
 `ix_documents_workspace_observer_observed` on documents
 `(workspace_name, observer, observed)`. This branch's manifest is
-`sha256:541c0bb686608d3b204e8e08908d89248f1cfde194f6b32cf427b2eab9b124bf`.
+`sha256:3ebc526828d32da1bc3256fe352230250eb292395a284e92538f0d38b9456357`.
 `docs/image-digest.txt` holds that manifest. CI builds the
 image twice from clean builders and fails when those two digests differ
 or when they differ from that file.

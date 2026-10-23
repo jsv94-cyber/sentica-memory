@@ -1,2 +1,2 @@
 # Tagged versions record their manifest digest in docs/RELEASE-v0.2.1-sentica.md.
-sha256:541c0bb686608d3b204e8e08908d89248f1cfde194f6b32cf427b2eab9b124bf
+sha256:3ebc526828d32da1bc3256fe352230250eb292395a284e92538f0d38b9456357
