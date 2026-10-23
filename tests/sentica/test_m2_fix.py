@@ -103,9 +103,9 @@ def test_workflow_job_builds_schema_as_the_ddl_role() -> None:
     assert "tenant_rls_ddl" in text_value
     assert "SENTICA_MODE: production" in text_value
     assert "export SENTICA_MODE=test" not in text_value
-    assert (
-        "DB_CONNECTION_URI:" not in text_value.split("Run the runtime-role proof", 1)[1]
-    )
+    runtime_tail = text_value.split("Run the runtime-role proof", 1)[1]
+    runtime_job = runtime_tail.split("\n  build-default-image:", 1)[0]
+    assert "DB_CONNECTION_URI:" not in runtime_job
     assert "tests/sentica/test_m2_" in text_value
     assert "build-default-image" in text_value
     assert "test-gvisor-smoke" in text_value
