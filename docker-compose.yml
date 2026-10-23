@@ -111,7 +111,9 @@ services:
     restart: unless-stopped
     command: ["redis-server", "--save", "", "--appendonly", "no"]
     ports:
-      - "127.0.0.1:${SENTICA_REDIS_PORT:-6379}:6379"
+      # 36379 is unused by the other host defaults (6379, Sentinel 26379,
+      # sandbox 16379). SENTICA_REDIS_PORT still overrides it.
+      - "127.0.0.1:${SENTICA_REDIS_PORT:-36379}:6379"
     tmpfs:
       - /data
     healthcheck:

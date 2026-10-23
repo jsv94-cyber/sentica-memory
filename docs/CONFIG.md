@@ -48,7 +48,7 @@ the groups at the end of this file. A name not listed here is not read.
 | `SENTICA_GATEWAY_TOKENIZER_ALIASES` | Comma-separated `alias=encoding` pairs, for example `sentica-embed=cl100k_base`. |
 | `SENTICA_API_PORT` | Host port for the local API. Default 8000. |
 | `SENTICA_POSTGRES_PORT` | Host port for the local database. Default 5432. |
-| `SENTICA_REDIS_PORT` | Host port for the local Redis. Default 6379. |
+| `SENTICA_REDIS_PORT` | Host port for the local Redis. Default 36379. |
 | `SENTICA_API_A_PORT` | Host port for instance A in the two-instance proof. |
 | `SENTICA_API_B_PORT` | Host port for instance B in the two-instance proof. |
 | `SENTICA_PROXY_A_PORT` | Host port for A's certificate proxy. |

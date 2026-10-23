@@ -110,4 +110,14 @@ release v3.3.0 (`608aec8a928da13c540262ed980c569448fb53ab`).
 | `docs/RELEASES.md` | Unreleased note for the image digest after `v0.2.0-sentica`. | R4 |
 | `tests/sentica/check_image_digest.py` | Fails unless two clean image exports match `docs/image-digest.txt`. | R4 |
 | `.github/workflows/unittest.yml` | Builds the default image twice from clean builders and fails unless those digests match `docs/image-digest.txt`. | R4 |
+| `docker-compose.yml` | Publish Redis on host port 36379. Postgres stays on host port 5432. `SENTICA_REDIS_PORT` still overrides the Redis host port. The container still listens on 6379. | Redis host port |
+| `docker-compose.yml.example` | Publish Redis on host port 36379. Postgres stays on host port 5432. | Redis host port |
+| `honcho-cli/src/honcho_cli/local/templates/docker-compose.yml` | Redis host fallback is 36379. The database host fallback stays 5432. | Redis host port |
+| `.env.template` | The commented cache URL uses host port 36379. The database URI stays on 5432. | Redis host port |
+| `docs/CONFIG.md` | `SENTICA_REDIS_PORT` default is 36379. `SENTICA_POSTGRES_PORT` stays 5432. | Redis host port |
+| `tests/sentica/test_host_port_defaults.py` | Fails if a compose Redis host port, `.env.template`, or `docs/CONFIG.md` defaults Redis to 6379, and fails if those files are missing. | Redis host port |
+| `.github/workflows/unittest.yml` | The gVisor smoke job sets `DB_CONNECTION_URI` to the runner Postgres on port 5432. | Redis host port |
+| `tests/sentica/test_m2_fix.py` | The runtime-role proof still must not set `DB_CONNECTION_URI`. The check stops at the next job. | Redis host port |
+| `PROGRESS.md` | Records the Redis host port change and Jose's approval. The M0 entry is unchanged. | Redis host port |
+| `FORK_CHANGES.md` | Rows for the Redis host port change. | Redis host port |
 
