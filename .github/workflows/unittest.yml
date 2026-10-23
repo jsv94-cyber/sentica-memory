@@ -66,7 +66,76 @@ jobs:
         run: uv sync --all-extras --dev
 
       - name: Run Tests
-        run: uv run pytest -x --ignore=tests/sentica/test_m1_stack.py
+        run: uv run pytest -x --ignore=tests/sentica/test_m1_stack.py --deselect tests/sentica/test_m6_retrieval.py::test_context_latency_on_ten_thousand_conclusions
+        env:
+          DB_CONNECTION_URI: postgresql+psycopg://postgres:postgres@localhost:5432/test_db
+          AUTH_USE_AUTH: false
+          SENTICA_MODE: test
+          SENTRY_ENABLED: false
+          LLM_OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          LLM_ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          LLM_OPENAI_COMPATIBLE_API_KEY: test-key
+          LLM_OPENAI_COMPATIBLE_BASE_URL: http://localhost:8000
+          DERIVER_PROVIDER: openai
+          DERIVER_MODEL: test
+          DIALECTIC_LEVELS__minimal__PROVIDER: openai
+          DIALECTIC_LEVELS__minimal__MODEL: test
+          DIALECTIC_LEVELS__minimal__THINKING_BUDGET_TOKENS: 0
+          DIALECTIC_LEVELS__minimal__MAX_TOOL_ITERATIONS: 2
+          DIALECTIC_LEVELS__low__PROVIDER: openai
+          DIALECTIC_LEVELS__low__MODEL: test
+          DIALECTIC_LEVELS__low__THINKING_BUDGET_TOKENS: 0
+          DIALECTIC_LEVELS__low__MAX_TOOL_ITERATIONS: 5
+          DIALECTIC_LEVELS__medium__PROVIDER: openai
+          DIALECTIC_LEVELS__medium__MODEL: test
+          DIALECTIC_LEVELS__medium__THINKING_BUDGET_TOKENS: 0
+          DIALECTIC_LEVELS__medium__MAX_TOOL_ITERATIONS: 4
+          DIALECTIC_LEVELS__high__PROVIDER: openai
+          DIALECTIC_LEVELS__high__MODEL: test
+          DIALECTIC_LEVELS__high__THINKING_BUDGET_TOKENS: 0
+          DIALECTIC_LEVELS__high__MAX_TOOL_ITERATIONS: 4
+          DIALECTIC_LEVELS__max__PROVIDER: openai
+          DIALECTIC_LEVELS__max__MODEL: test
+          DIALECTIC_LEVELS__max__THINKING_BUDGET_TOKENS: 0
+          DIALECTIC_LEVELS__max__MAX_TOOL_ITERATIONS: 10
+          DIALECTIC_QUERY_GENERATION_PROVIDER: openai
+          DIALECTIC_QUERY_GENERATION_MODEL: test
+          SUMMARY_PROVIDER: openai
+          SUMMARY_MODEL: test
+          SENTICA_BUDGET_TEST_REDIS_URL: redis://127.0.0.1:6379/0
+
+      # The 300 ms budget misses under xdist. Run this node alone with -n0.
+      # A failure fails this job, which test-status requires.
+      - name: Run context-latency test serially
+        run: |
+          set -euo pipefail
+          sha256sum -c <<'EOF'
+          ad6f0842599cbc36ce72bdfa6b06894ff7c0148a008d441b0f3bf68619e2dd32  tests/sentica/context_latency_ci.py
+          EOF
+          nodeid="tests/sentica/test_m6_retrieval.py::test_context_latency_on_ten_thousand_conclusions"
+          collect_out=""
+          run_out=""
+          trap 'rm -f "$collect_out" "$run_out"' EXIT
+          collect_out="$(mktemp)"
+          run_out="$(mktemp)"
+          set +e
+          uv run pytest "$nodeid" -n0 --collect-only -q >"$collect_out" 2>&1
+          collect_status=$?
+          set -e
+          cat "$collect_out"
+          if [ "$collect_status" -ne 0 ]; then
+            exit "$collect_status"
+          fi
+          uv run python tests/sentica/context_latency_ci.py --require-collected "$collect_out"
+          set +e
+          uv run pytest "$nodeid" -n0 -v --tb=short >"$run_out" 2>&1
+          run_status=$?
+          set -e
+          cat "$run_out"
+          if [ "$run_status" -ne 0 ]; then
+            exit "$run_status"
+          fi
+          uv run python tests/sentica/context_latency_ci.py --require-passed "$run_out"
         env:
           DB_CONNECTION_URI: postgresql+psycopg://postgres:postgres@localhost:5432/test_db
           AUTH_USE_AUTH: false

@@ -120,6 +120,11 @@ Decisions:
 - The two-instance proof is `tests/sentica/test_m1_stack.py`. CI job
   `test-python` ignores that file. Job `test-m1-stack` sets
   `SENTICA_MODE=test` and runs it, and fails if it collects zero tests.
+  The parallel suite command deselects
+  `test_context_latency_on_ten_thousand_conclusions` and the next step
+  runs that node with `-n0`. The 300 ms budget is unchanged. A guard
+  fails if the test is skipped, collected zero times, or missing from
+  either step.
   Image publish workflows stay `if: false` until M9.
 
 Deviations from GOALS.md: the unit suite and `docker-compose.yml` still use
