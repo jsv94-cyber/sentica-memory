@@ -149,4 +149,10 @@ release v3.3.0 (`608aec8a928da13c540262ed980c569448fb53ab`).
 | `tests/sentica/test_restricted_guard.py` | Each pattern drops under `general` and stays under `restricted`. A broker explicit conclusion stays. A missing or malformed key is `general`. Each save-point guard has a mutation that fails. Logs have no content. | R6-6 |
 | `docs/MAP.md`, `PROGRESS.md` | Record the ceiling key and the drop. Map citations that moved stay on the named functions. | R6-6 |
 | `docs/image-digest.txt`, `docs/RELEASES.md`, `tests/sentica/test_integration_contract.py` | Two clean builds record `sha256:779097b49a1035e542201902aa3b222c968264918e55ffd5c62baabd7ed8beaf`. `docs/RELEASES.md` records that digest for R6-6 under `## Unreleased`. The v0.2.1 digest stays. | R6-6 |
+| `src/sentica/tokens.py`, `src/security.py`, `src/routers/workspaces.py`, `src/crud/workspace.py`, `src/schemas/api.py` | `PUT /v3/workspaces/{workspace_id}/ceiling` stores `internal_metadata.ceiling`. Only a broker token whose `audience` claim is `broker` may call it. A workspace metadata update cannot. | R6-6 |
+| `src/utils/summarizer.py` | A session summary that matches a restricted pattern is not stored when the ceiling ranks below `restricted`. The drop is counted. | R6-6 |
+| `src/sentica/restricted.py` | Match after NFKC and after format characters are removed. Digit classes are ASCII. Account numbers of 4, 5, and 6 digits are reachable. | R6-6 |
+| `docs/INTEGRATION.md` | Records the ceiling request, the status codes, and why medical terms stay on the storage ban instead of the ceiling guard. | R6-6 |
+| `docs/v3/openapi.json` | The ceiling route is in the generated spec. | R6-6 |
+| `docs/image-digest.txt`, `docs/RELEASES.md`, `tests/sentica/test_integration_contract.py` | Two clean builds record `sha256:23f86925e7c0dcbc7293e3abd39ba2c7b7bb7f7afa10a3fa448cbb726292b486`. `docs/RELEASES.md` keeps the earlier R6-6 digest and records this one. The v0.2.1 digest stays. | R6-6 |
 

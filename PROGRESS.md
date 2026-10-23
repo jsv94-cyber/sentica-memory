@@ -571,4 +571,8 @@ Jose, in chat on Oct 23, 2026: "Approve R6-1 to R6-7, Tag v0.2.1-sentica now, th
   the broker creates are left as the broker classified them.
 - Each drop is counted and logged with a reason code. The text is not
   logged. `tests/sentica/rls_job.py` is unchanged.
+- Only a broker token whose `audience` claim is `broker` may set the
+  ceiling, via `PUT /v3/workspaces/{workspace_id}/ceiling`. A workspace
+  metadata update cannot. Session summaries drop the same patterns.
+  Medical terms stay on the storage ban and are not ceiling hits.
 

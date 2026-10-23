@@ -36,6 +36,7 @@ _GUARDS = (
     "src/crud/document.py",
     "src/crud/peer_card.py",
     "src/sentica/dreams.py",
+    "src/utils/summarizer.py",
 )
 
 _CARD = "4111111111111111"
@@ -483,3 +484,281 @@ async def test_dream_guard_and_its_mutation(
     third = await run_dreams(workspace.name, now=datetime(2026, 10, 14, tzinfo=UTC))
     assert any(item["content"] == _SSN and not item["skipped"] for item in third)
     assert drops() == 0
+
+
+def test_normalized_text_and_short_accounts_match() -> None:
+    """NFKC and format characters still hit. Other scripts do not. 4 to 6 digit accounts hit."""
+    fullwidth = "".join(chr(0xFF10 + int(char)) for char in _CARD)
+    assert restricted_reason(fullwidth) == "card"
+    assert restricted_reason("4111\u200b1111\u200b1111\u200b1111") == "card"
+    assert restricted_reason("123\u200b-45-6789") == "ssn"
+    assert restricted_reason("hourly rate is \uff14\uff12") == "salary"
+    assert restricted_reason("acct 1234") == "account"
+    assert restricted_reason("acct 12345") == "account"
+    assert restricted_reason("acct 123456") == "account"
+    assert restricted_reason("acct 12\u200b34") == "account"
+    assert restricted_reason("acct 123") is None
+    assert (
+        restricted_reason("acct \u0661\u0662\u0663\u0664\u0665\u0666\u0667\u0668")
+        is None
+    )
+    assert restricted_reason("1234") is None
+
+
+async def test_obfuscated_number_is_dropped_at_the_save_point(
+    db_session: AsyncSession,
+    sample_data: tuple[models.Workspace, models.Peer],
+) -> None:
+    workspace, peer = sample_data
+    await _ready(db_session, workspace, peer)
+    await _set_ceiling(db_session, workspace, None)
+    reset_drops()
+    await crud.create_documents(
+        db_session,
+        [_document("4111\u200b1111\u200b1111\u200b1111")],
+        workspace.name,
+        observer=peer.name,
+        observed=peer.name,
+    )
+    assert await _stored(db_session, workspace.name) == []
+    assert drops() == 1
+
+
+async def test_summary_drops_restricted_text_when_the_ceiling_is_general(
+    db_session: AsyncSession,
+    sample_data: tuple[models.Workspace, models.Peer],
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.llm.types import HonchoLLMCallResponse as Response
+    from src.schemas.configuration import (
+        ResolvedConfiguration,
+        ResolvedDreamConfiguration,
+        ResolvedPeerCardConfiguration,
+        ResolvedReasoningConfiguration,
+        ResolvedSummaryConfiguration,
+    )
+    from src.utils.summarizer import (
+        SummaryType,
+        _create_and_save_summary,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    workspace, peer = sample_data
+    await _ready(db_session, workspace, peer)
+    db_session.add(
+        models.Message(
+            session_name="s1",
+            peer_name=peer.name,
+            content="desk note",
+            workspace_name=workspace.name,
+            token_count=2,
+            seq_in_session=1,
+        )
+    )
+    await db_session.commit()
+    message = await db_session.scalar(
+        select(models.Message).where(models.Message.workspace_name == workspace.name)
+    )
+    assert message is not None
+    configuration = ResolvedConfiguration(
+        reasoning=ResolvedReasoningConfiguration(enabled=True),
+        peer_card=ResolvedPeerCardConfiguration(use=False, create=False),
+        summary=ResolvedSummaryConfiguration(
+            enabled=True,
+            messages_per_short_summary=20,
+            messages_per_long_summary=60,
+        ),
+        dream=ResolvedDreamConfiguration(enabled=False),
+    )
+
+    async def _summary(*_args: object, **_kwargs: object) -> Response[str]:
+        return Response(
+            content=_SSN,
+            output_tokens=4,
+            input_tokens=6,
+            finish_reasons=["stop"],
+        )
+
+    monkeypatch.setattr("src.utils.summarizer.create_short_summary", _summary)
+    await _set_ceiling(db_session, workspace, "general")
+    reset_drops()
+    caplog.set_level(logging.INFO)
+    await _create_and_save_summary(
+        workspace.name,
+        "s1",
+        message_id=message.id,
+        message_seq_in_session=message.seq_in_session,
+        message_public_id=message.public_id,
+        summary_type=SummaryType.SHORT,
+        configuration=configuration,
+    )
+    stored = await db_session.scalar(
+        select(models.Session.internal_metadata)
+        .where(
+            models.Session.workspace_name == workspace.name,
+            models.Session.name == "s1",
+        )
+        .execution_options(populate_existing=True)
+    )
+    assert isinstance(stored, dict)
+    assert "summaries" not in stored or stored["summaries"] == {}
+    assert drops() == 1
+    assert _SSN not in caplog.text
+    assert "category=ssn" in caplog.text
+
+    await _set_ceiling(db_session, workspace, "restricted")
+    reset_drops()
+    caplog.clear()
+    await _create_and_save_summary(
+        workspace.name,
+        "s1",
+        message_id=message.id,
+        message_seq_in_session=message.seq_in_session,
+        message_public_id=message.public_id,
+        summary_type=SummaryType.SHORT,
+        configuration=configuration,
+    )
+    kept = await db_session.scalar(
+        select(models.Session.internal_metadata)
+        .where(
+            models.Session.workspace_name == workspace.name,
+            models.Session.name == "s1",
+        )
+        .execution_options(populate_existing=True)
+    )
+    assert isinstance(kept, dict)
+    summary = kept["summaries"]["honcho_chat_summary_short"]
+    assert summary["content"] == _SSN
+    assert drops() == 0
+    assert _SSN not in caplog.text
+
+
+async def test_only_a_broker_audience_can_set_the_ceiling(
+    client: object,
+    db_session: AsyncSession,
+    sample_data: tuple[models.Workspace, models.Peer],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fastapi.testclient import TestClient
+
+    from src.exceptions import AuthenticationException, ResourceNotFoundException
+    from src.routers.workspaces import put_workspace_ceiling
+    from src.schemas.api import WorkspaceCeilingUpdate
+    from src.security import JWTParams, create_jwt, verify_jwt
+    from src.sentica.tokens import require_broker_audience, verify_sentica_token
+    from tests.sentica.test_m1_tokens import (
+        _instance,  # pyright: ignore[reportPrivateUsage]
+        _keys,  # pyright: ignore[reportPrivateUsage]
+        _token,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    assert isinstance(client, TestClient)
+    workspace, _peer = sample_data
+    await _set_ceiling(db_session, workspace, "general")
+
+    refused = client.put(
+        f"/v3/workspaces/{workspace.name}/ceiling",
+        json={"ceiling": "restricted"},
+    )
+    assert refused.status_code == 401
+    assert refused.json()["detail"] == "broker audience required"
+    metadata_update = client.put(
+        f"/v3/workspaces/{workspace.name}",
+        json={"metadata": {"ceiling": "personal"}},
+    )
+    assert metadata_update.status_code == 200
+    internal = await db_session.scalar(
+        select(models.Workspace.internal_metadata)
+        .where(models.Workspace.name == workspace.name)
+        .execution_options(populate_existing=True)
+    )
+    public = await db_session.scalar(
+        select(models.Workspace.h_metadata)
+        .where(models.Workspace.name == workspace.name)
+        .execution_options(populate_existing=True)
+    )
+    assert workspace_ceiling(internal) == "general"
+    assert isinstance(public, dict)
+    assert public.get("ceiling") == "personal"
+
+    ordinary = JWTParams(t="1", ad=True, w=workspace.name)
+    with pytest.raises(AuthenticationException, match="broker audience required"):
+        require_broker_audience(ordinary)
+    with pytest.raises(AuthenticationException, match="broker audience required"):
+        await put_workspace_ceiling(
+            workspace.name,
+            WorkspaceCeilingUpdate(ceiling="restricted"),
+            ordinary,
+            db_session,
+        )
+    monkeypatch.setattr("src.config.settings.AUTH.JWT_SECRET", "test-secret")
+    minted = create_jwt(JWTParams(t="1", w=workspace.name, audience="broker"))
+    decoded = verify_jwt(minted)
+    assert decoded.audience is None
+    with pytest.raises(AuthenticationException, match="broker audience required"):
+        require_broker_audience(decoded)
+
+    private, public_pem = _keys()
+    instance = _instance(tmp_path, public_pem)
+    conversation = verify_sentica_token(
+        _token(private, extra={"audience": "general", "w": workspace.name}),
+        instance,
+    )
+    with pytest.raises(AuthenticationException, match="broker audience required"):
+        require_broker_audience(conversation)
+    missing = verify_sentica_token(
+        _token(private, extra={"w": workspace.name}), instance
+    )
+    assert missing.audience is None
+    broker = verify_sentica_token(
+        _token(private, extra={"audience": "broker", "w": workspace.name}),
+        instance,
+    )
+    assert broker.audience == "broker"
+    stored = await put_workspace_ceiling(
+        workspace.name,
+        WorkspaceCeilingUpdate(ceiling="restricted"),
+        broker,
+        db_session,
+    )
+    assert stored.ceiling == "restricted"
+    raised = await db_session.scalar(
+        select(models.Workspace.internal_metadata)
+        .where(models.Workspace.name == workspace.name)
+        .execution_options(populate_existing=True)
+    )
+    assert workspace_ceiling(raised) == "restricted"
+
+    still_refused = client.put(
+        f"/v3/workspaces/{workspace.name}/ceiling",
+        json={"ceiling": "general"},
+    )
+    assert still_refused.status_code == 401
+    unchanged = await db_session.scalar(
+        select(models.Workspace.internal_metadata)
+        .where(models.Workspace.name == workspace.name)
+        .execution_options(populate_existing=True)
+    )
+    assert workspace_ceiling(unchanged) == "restricted"
+
+    with pytest.raises(ValidationException, match="allowed value"):
+        await put_workspace_ceiling(
+            workspace.name,
+            WorkspaceCeilingUpdate(ceiling="Restricted"),
+            broker,
+            db_session,
+        )
+    after_bad = await db_session.scalar(
+        select(models.Workspace.internal_metadata)
+        .where(models.Workspace.name == workspace.name)
+        .execution_options(populate_existing=True)
+    )
+    assert workspace_ceiling(after_bad) == "restricted"
+    with pytest.raises(ResourceNotFoundException):
+        await put_workspace_ceiling(
+            "missing-workspace",
+            WorkspaceCeilingUpdate(ceiling="general"),
+            broker,
+            db_session,
+        )

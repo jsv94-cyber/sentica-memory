@@ -41,9 +41,10 @@ different algorithm is refused.
 The conversation audience (the people on the call, or the customer on a
 channel) is computed by the broker. The authorization boundary for that
 audience is this token: `workspaces` contains only the partitions that
-audience may read. The instance does not take a second audience claim.
+audience may read. Other routes do not read an `audience` claim.
 Database verification of a signed audience value is a later Sentica
-phase and is not part of this service.
+phase and is not part of this service. The ceiling write below is the
+exception: it requires the claim `audience` with the value `broker`.
 
 Lifetime over 5 minutes, a bad signature, a wrong issuer, a wrong
 audience, a wrong tenant, a missing request id, and a workspace outside
@@ -485,7 +486,50 @@ stores the `source_trust` that was sent.
    guard. The patterns are a Luhn-valid card number, an ABA routing
    number whose checksum passes, a US Social Security number in a
    valid range, a bank-account number next to an account word, a
-   salary figure, and a disciplinary term.
+   salary figure, and a disciplinary term. Text is normalized with
+   NFKC and format characters, including zero-width characters, are
+   removed before the match. Digit checks use ASCII `0-9` only.
+   A contiguous account number of 4 to 17 digits next to an account
+   word matches, including lengths 4, 5, and 6.
+
+   The broker sets the key with `PUT /v3/workspaces/{workspace_id}/ceiling`.
+   The header is `Authorization: Bearer <token>`. The token is a broker
+   token (`aud` is `sentica-memory`, and the other checks on this page
+   still apply) and its `audience` claim is the string `broker`. Leave
+   `p` and `s` unset. `w` is the path workspace, and that name is in
+   `workspaces`. The body is an object with one key:
+
+   `{"ceiling": "general"}`
+
+   The allowed values are `general`, `internal`, `restricted`, and
+   `personal`. Success is HTTP 200 `{"ceiling": "<value>"}`. The value
+   is stored on `workspaces.internal_metadata.ceiling`. Other internal
+   keys are left in place.
+   A missing `audience` claim, any other string, a non-string, a Honcho
+   JWT, and an admin caller are HTTP 401
+   `{"detail": "broker audience required"}`.
+   A string that is not one of the four values is HTTP 422
+   `{"detail": "ceiling is not an allowed value"}`. The stored ceiling
+   does not change. A body that is not an object with a string
+   `ceiling` and no other keys is HTTP 422. A missing workspace is
+   HTTP 404. A peer or session claim on this path is HTTP 401.
+   `PUT /v3/workspaces/{workspace_id}` writes public metadata
+   (`h_metadata`) and configuration. It cannot set or change
+   `internal_metadata.ceiling`.
+
+   The broker function `hitsRestricted` also matches these medical
+   terms: diagnosis, prescription, medication, diabetes, cancer, hiv,
+   pregnancy, psychiatric, chemotherapy, insulin, and blood pressure.
+   This ceiling guard does not. Section 35.7 forbids storing medical
+   text, and the storage ban in `src/sentica/safety.py` drops health
+   inferences in every workspace, including `restricted` and
+   `personal`. Copying the medical list onto this guard would keep a
+   term when the ceiling is `restricted` or `personal` if the ban does
+   not already spell that term. That would store medical text. The
+   ban remains the medical control. The spellings `psychiatric`,
+   `blood pressure`, and `chemotherapy` are on the broker list and are
+   not the same patterns as the storage ban. They stay off this guard
+   for the same reason.
 2. The classifier that upgrades bank numbers, Social Security numbers,
    salaries, medical terms, and disciplinary language to Restricted is
    not in this service. The storage bans in Section 35.7 are in force:

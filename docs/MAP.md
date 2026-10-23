@@ -40,7 +40,7 @@ extension before migrations run.
 
 Auth is off unless `AUTH_USE_AUTH` is set. `src/config.py:753` `AuthSettings`
 defaults `USE_AUTH` to false at `src/config.py:756`. When auth is off and `SENTICA_MODE=test`,
-`src/security.py:216` treats every caller as an admin JWT and does not read a
+`src/security.py:217` treats every caller as an admin JWT and does not read a
 token. `SENTICA_MODE=production` is checked first and does not take that path.
 Unset, empty, and any other mode refuse to start.
 
@@ -55,15 +55,16 @@ When auth is on, tokens are HS256 JWTs signed with `AUTH_JWT_SECRET`.
 | `w` | Workspace name. |
 | `p` | Peer name. |
 | `s` | Session name. |
+| `audience` | Present on a broker token. The ceiling write requires the string `broker`. |
 
-`src/security.py:74` `create_jwt` encodes the claims.
-`src/security.py:67` `create_admin_jwt` sets `ad=True` and an empty timestamp.
-`src/security.py:106` `verify_jwt` decodes HS256, rejects expired and malformed
+`src/security.py:75` `create_jwt` encodes the claims.
+`src/security.py:68` `create_admin_jwt` sets `ad=True` and an empty timestamp.
+`src/security.py:107` `verify_jwt` decodes HS256, rejects expired and malformed
 tokens, and rejects a peer or session claim that has no workspace
-(`scope_requires_workspace` at `src/security.py:84`).
+(`scope_requires_workspace` at `src/security.py:85`).
 
-`src/security.py:144` `require_auth` is the route dependency.
-`src/security.py:198` `auth` compares the token's narrowest claim to the route.
+`src/security.py:145` `require_auth` is the route dependency.
+`src/security.py:199` `auth` compares the token's narrowest claim to the route.
 An admin token returns immediately. A peer-scoped token cannot act on a
 sibling peer. `allow_member_read=True` is an extra grant for read-only session
 routes when the token's peer is a member of the session.
@@ -244,9 +245,11 @@ run inside the API process unless `DERIVER.SCHEDULER` is set to `api`.
 
 New conclusions pass `src/sentica/safety.py:74` `banned_category` before
 they are stored. The deriver, summary, and dream prompts include that rule.
-A derived conclusion also passes `src/sentica/restricted.py:81`
+A derived conclusion also passes `src/sentica/restricted.py:99`
 `restricted_reason` when the workspace ceiling ranks below `restricted`.
-The ceiling is the `ceiling` key on `workspaces.internal_metadata`.
+Session summaries pass that check before they are stored. The ceiling
+is the `ceiling` key on `workspaces.internal_metadata`. Only a broker
+token whose `audience` claim is `broker` may set it.
 
 Chat completions go through `src/llm/api.py:147` `honcho_llm_call`. When
 `SENTICA_GATEWAY_MODE` is on, `src/llm/api.py:201` returns before any
