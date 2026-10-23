@@ -336,7 +336,9 @@ Touches a path we use: no. Conflicts: no.
 
 Recommendation: skip. Sentica calls the HTTP API.
 
-#### `58b679b9` feat(dreamer): working memory — budget, write window, brief, and notes (#1378)
+#### `58b679b9` feat(dreamer): working memory - budget, write window, brief, and notes (#1378)
+
+The hyphen in that heading is paraphrased punctuation. The upstream subject uses an em dash.
 
 Opt-in dreamer and dialectic working memory: a remaining tool budget, a memory brief, a reserved write window, and capped notes carried from one dream to the next. Off by default. New module `src/dreamer/working_memory.py`.
 
@@ -444,7 +446,7 @@ Recommendation: skip. Copying the workflow would fight that job. The memory serv
 
 Files: `src/llm/api.py`, `src/llm/errors.py`, `src/llm/tool_loop.py`, and the retry tests.
 
-Touches a path we use: yes (`src/llm/api.py`, `src/llm/tool_loop.py`). Conflicts: yes, both. Production returns from `complete_llm` before those retry decorators. The gateway retries 401, 403, 404, 408, and 429, and a 400 fails on the first response.
+Touches a path we use: yes (`src/llm/api.py`, `src/llm/tool_loop.py`). Conflicts: yes, both. Production returns from `complete_llm` before those retry decorators. The gateway retries 401, 403, 404, 408, 429, and every 5xx, and a 400 fails on the first response.
 
 Recommendation: skip. The commit does not edit `src/sentica/gateway.py`, which is where production retries live. Applying the upstream condition would fight the gateway early-return and the R3 tool loop, and it would not change the gateway's status set.
 
