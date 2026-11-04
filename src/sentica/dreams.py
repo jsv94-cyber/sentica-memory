@@ -16,7 +16,7 @@ from src import models
 from src.config import settings
 from src.dependencies import tracked_db
 from src.llm.types import LLMTelemetryContext
-from src.sentica.safety import banned_category, note_drop
+from src.sentica.safety import banned_category
 from src.sentica.workspace_scope import reset_workspace, set_workspace
 
 logger = logging.getLogger(__name__)
@@ -341,12 +341,19 @@ async def _accept(
     now: datetime,
 ) -> dict[str, Any]:
     """Store the digest, or an empty attempt when the output cannot be kept."""
-    from src.sentica.safety import keep_conclusion
+    from src.sentica.restricted import restricted_drop_reason
+    from src.sentica.safety import keep_conclusion, record_drop
+    from src.sentica.workspace_metadata import ceiling_for_workspace
 
     category = banned_category(text)
     if category is not None:
-        logger.info("Dropped a conclusion category=%s", category)
-        note_drop(category)
+        record_drop(category)
+    else:
+        ceiling = await ceiling_for_workspace(workspace_name)
+        reason = restricted_drop_reason(text, ceiling, broker_explicit=False)
+        if reason is not None:
+            record_drop(reason)
+            category = reason
     kept = bool(text.strip()) and category is None
     if kept and not await keep_conclusion(text, workspace_name=workspace_name):
         kept = False

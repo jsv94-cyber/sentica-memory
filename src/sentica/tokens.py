@@ -21,6 +21,7 @@ from .runtime import (
 )
 
 _MAX_LIFETIME = datetime.timedelta(minutes=5)
+BROKER_AUDIENCE = "broker"
 
 
 def _refuse(reason: str, detail: str) -> NoReturn:
@@ -103,10 +104,22 @@ def verify_sentica_token(
     params.p = peer or None
     params.s = session or None
     params.ad = False
+    audience = decoded.get("audience")
+    params.audience = audience if isinstance(audience, str) else None
     from src.sentica.workspace_scope import allowed_from_claims
 
     params.workspaces = sorted(allowed_from_claims(params.w, decoded.get("workspaces")))
     return params
+
+
+def require_broker_audience(params: JWTParams) -> None:
+    """Refuse every caller except a broker token whose audience is broker.
+
+    A Honcho JWT, an admin caller, and a conversation token do not carry
+    this claim. A missing or non-string claim was already stored as absent.
+    """
+    if params.audience != BROKER_AUDIENCE:
+        _refuse("broker_audience", "broker audience required")
 
 
 def production_token_required() -> bool:

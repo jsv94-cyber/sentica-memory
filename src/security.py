@@ -62,6 +62,7 @@ class JWTParams(BaseModel):
     p: str | None = None
     s: str | None = None
     workspaces: list[str] | None = None
+    audience: str | None = None
 
 
 def create_admin_jwt() -> str:

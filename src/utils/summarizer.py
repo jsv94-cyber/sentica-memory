@@ -553,9 +553,18 @@ async def _create_and_save_summary(
         ),
     )
 
-    from src.sentica.safety import keep_conclusion
+    from src.sentica.restricted import restricted_drop_reason
+    from src.sentica.safety import keep_conclusion, record_drop
+    from src.sentica.workspace_metadata import ceiling_for_workspace
 
     if not await keep_conclusion(new_summary["content"], workspace_name=workspace_name):
+        return
+    ceiling = await ceiling_for_workspace(workspace_name)
+    reason = restricted_drop_reason(
+        new_summary["content"], ceiling, broker_explicit=False
+    )
+    if reason is not None:
+        record_drop(reason)
         return
 
     # Compute scaffold tokens up front (cheap + idempotent) so both the

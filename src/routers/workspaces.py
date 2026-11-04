@@ -119,6 +119,24 @@ async def update_workspace(
     return honcho_workspace
 
 
+@router.put(
+    "/{workspace_id}/ceiling",
+    response_model=schemas.WorkspaceCeiling,
+)
+async def put_workspace_ceiling(
+    workspace_id: str = Path(...),
+    body: schemas.WorkspaceCeilingUpdate = Body(..., description="Workspace ceiling"),
+    jwt_params: JWTParams = Depends(require_auth(workspace_name="workspace_id")),
+    db: AsyncSession = db,
+) -> schemas.WorkspaceCeiling:
+    """Store the ceiling. Only a broker-audience token may call this."""
+    from src.sentica.tokens import require_broker_audience
+
+    require_broker_audience(jwt_params)
+    stored = await crud.set_workspace_ceiling(db, workspace_id, body.ceiling)
+    return schemas.WorkspaceCeiling(ceiling=stored)
+
+
 @router.delete(
     "/{workspace_id}",
     status_code=202,

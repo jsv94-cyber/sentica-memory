@@ -7,7 +7,7 @@ from logging import getLogger
 from typing import Any
 
 from cashews import NOT_NONE
-from sqlalchemy import Select, delete, exists, func, select
+from sqlalchemy import Select, delete, exists, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import make_transient_to_detached
@@ -280,6 +280,32 @@ async def update_workspace(
 
     logger.debug("Workspace with id %s updated successfully", honcho_workspace.id)
     return honcho_workspace
+
+
+async def set_workspace_ceiling(
+    db: AsyncSession, workspace_name: str, ceiling: str
+) -> str:
+    """Store one allow-listed ceiling. A bad value is refused and not written."""
+    from src.exceptions import ValidationException
+    from src.sentica.workspace_metadata import CEILING_KEY, CEILING_VALUES
+
+    if ceiling not in CEILING_VALUES:
+        raise ValidationException("ceiling is not an allowed value")
+    updated = await db.scalar(
+        update(models.Workspace)
+        .where(models.Workspace.name == workspace_name)
+        .values(
+            internal_metadata=models.Workspace.internal_metadata.op("||")(
+                {CEILING_KEY: ceiling}
+            )
+        )
+        .returning(models.Workspace.name)
+    )
+    if updated is None:
+        raise ResourceNotFoundException(f"Workspace {workspace_name} not found")
+    await db.commit()
+    await safe_cache_delete(workspace_cache_key(workspace_name))
+    return ceiling
 
 
 async def check_no_active_sessions(db: AsyncSession, workspace_name: str) -> None:

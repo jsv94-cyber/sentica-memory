@@ -97,6 +97,19 @@ def note_drop(category: str = "unspecified") -> None:
     note_filtered(category)
 
 
+def record_drop(category: str) -> None:
+    """Count one drop and log its reason code. The text is not logged."""
+    from src.sentica.ops_metrics import FILTER_CATEGORIES
+
+    allowed = frozenset(FILTER_CATEGORIES) | {"unparseable"}
+    code = category if category in allowed else "unspecified"
+    logger.info("Dropped a conclusion category=%s", code)
+    if code == "unparseable":
+        note_unparseable()
+        return
+    note_drop(code)
+
+
 def drops(tenant: str | None = None) -> int:
     """How many conclusions this process has dropped for the tenant."""
     key = tenant if tenant is not None else _tenant()
@@ -248,16 +261,13 @@ async def keep_conclusion(text: str, *, workspace_name: str | None) -> bool:
     """Rules first, then the optional model check. A drop is counted."""
     category = banned_category(text)
     if category is not None:
-        logger.info("Dropped a conclusion category=%s", category)
-        note_drop(category)
+        record_drop(category)
         return False
     verdict = await model_check_bans(text, workspace_name=workspace_name)
     if verdict == "yes":
-        logger.info("Dropped a conclusion category=%s", "model")
-        note_drop("model")
+        record_drop("model")
         return False
     if verdict == "unparseable":
-        logger.info("Dropped a conclusion category=%s", "unparseable")
-        note_unparseable()
+        record_drop("unparseable")
         return False
     return True

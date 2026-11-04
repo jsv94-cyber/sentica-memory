@@ -295,6 +295,65 @@
         }
       }
     },
+    "/v3/workspaces/{workspace_id}/ceiling": {
+      "put": {
+        "tags": [
+          "workspaces"
+        ],
+        "summary": "Put Workspace Ceiling",
+        "description": "Store the ceiling. Only a broker-audience token may call this.",
+        "operationId": "put_workspace_ceiling_v3_workspaces__workspace_id__ceiling_put",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Workspace Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkspaceCeilingUpdate",
+                "description": "Workspace ceiling"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceCeiling"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v3/workspaces/{workspace_id}/search": {
       "post": {
         "tags": [
@@ -8427,6 +8486,34 @@
           "created_at"
         ],
         "title": "Workspace"
+      },
+      "WorkspaceCeiling": {
+        "properties": {
+          "ceiling": {
+            "type": "string",
+            "title": "Ceiling"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ceiling"
+        ],
+        "title": "WorkspaceCeiling"
+      },
+      "WorkspaceCeilingUpdate": {
+        "properties": {
+          "ceiling": {
+            "type": "string",
+            "title": "Ceiling"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "ceiling"
+        ],
+        "title": "WorkspaceCeilingUpdate",
+        "description": "Body for the broker ceiling write. One string field, no extra keys."
       },
       "WorkspaceChatOptions": {
         "properties": {
