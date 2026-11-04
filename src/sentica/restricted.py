@@ -32,10 +32,31 @@ _SALARY = re.compile(
     r"\b(?:salary|wage|paycheck|pay rate|hourly rate|annual pay)\b",
     re.IGNORECASE,
 )
-# Four digits is the shortest account. The middle run is two characters
-# so a contiguous 4, 5, or 6 digit account is reachable.
-_DIGIT_RUN = re.compile(r"[0-9][0-9 \t-]{2,30}[0-9]")
-_ACCOUNT_CONTEXT = re.compile(r"routing|account|acct", re.IGNORECASE)
+# Digit groups joined by one to three separator characters. Space, tab,
+# newline, dash, the Unicode dash range, dot, slash, underscore, pipe and
+# comma all count, so a card is found beside a CVV, an expiry or a date.
+_SEPARATORS = " \t\r\n.,/_|\\-\u2010-\u2015"
+_GROUP_RUN = re.compile(rf"[0-9]+(?:[{_SEPARATORS}]{{1,3}}[0-9]+)*")
+_GROUP = re.compile(r"[0-9]+")
+# A sub-sequence of a longer run only counts when every group has three or
+# more digits, so a day, a month or a quantity is never peeled into a card.
+_MIN_PEELED_GROUP = 3
+# The context word must sit right before the number: at most a label
+# word, a colon, a hash sign or "is" between them.
+_ACCOUNT_NUMBER = re.compile(
+    "".join(
+        (
+            r"\b(?:routing|account|acct)\b",
+            r"(?:\s*(?:number|num|no\.?|#))?",
+            r"(?:\s*(?:is|was))?",
+            r"[\s:#=-]*",
+            r"([0-9](?:[0-9 \t-]{2,30}[0-9])?)",
+        )
+    ),
+    re.IGNORECASE,
+)
+_YEAR = re.compile(r"(?:19|20)[0-9]{2}")
+_ISO_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 _DISCIPLINARY: tuple[str, ...] = (
     "written warning",
     "suspension",
@@ -96,6 +117,26 @@ def _ssn_in_range(area: str, group: str, serial: str) -> bool:
     return not (group == "00" or serial == "0000")
 
 
+def _card_in(text: str) -> bool:
+    """True when a run of digit groups holds a Luhn-valid 13-19 digit number."""
+    for run in _GROUP_RUN.finditer(text):
+        groups = _GROUP.findall(run.group(0))
+        count = len(groups)
+        if _luhn_ok("".join(groups)):
+            return True
+        for start in range(count):
+            total = ""
+            for end in range(start, count):
+                if len(groups[end]) < _MIN_PEELED_GROUP:
+                    break
+                total += groups[end]
+                if len(total) > 19:
+                    break
+                if (start, end) != (0, count - 1) and _luhn_ok(total):
+                    return True
+    return False
+
+
 def restricted_reason(text: str) -> str | None:
     """Return a reason code, or None when the text is not Restricted."""
     if not text:
@@ -111,12 +152,12 @@ def restricted_reason(text: str) -> str | None:
             return "disciplinary"
     if _SALARY.search(normalized) is not None and re.search(r"[0-9]", normalized):
         return "salary"
-    near_account = _ACCOUNT_CONTEXT.search(normalized) is not None
-    for run in _DIGIT_RUN.finditer(normalized):
-        digits = re.sub(r"[^0-9]", "", run.group(0))
-        if _luhn_ok(digits):
-            return "card"
-        if not near_account:
+    if _card_in(normalized):
+        return "card"
+    for match in _ACCOUNT_NUMBER.finditer(normalized):
+        number = match.group(1)
+        digits = re.sub(r"[^0-9]", "", number)
+        if _YEAR.fullmatch(number) or _ISO_DATE.fullmatch(number):
             continue
         if _aba_ok(digits):
             return "routing"

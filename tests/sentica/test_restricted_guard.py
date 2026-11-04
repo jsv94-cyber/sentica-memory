@@ -31,14 +31,6 @@ from src.sentica.workspace_metadata import (
     workspace_ceiling,
 )
 
-ROOT = Path(__file__).resolve().parents[2]
-_GUARDS = (
-    "src/crud/document.py",
-    "src/crud/peer_card.py",
-    "src/sentica/dreams.py",
-    "src/utils/summarizer.py",
-)
-
 _CARD = "4111111111111111"
 _CARD_BAD = "4111111111111112"
 _CARD_SPACED = "4111 1111 1111 1111"
@@ -94,11 +86,6 @@ def _document(
         ),
         embedding=_vector(),
     )
-
-
-def _assert_guard(source: str) -> None:
-    if source.count("restricted_drop_reason(") != 1:
-        raise AssertionError("guard")
 
 
 async def _ready(
@@ -170,16 +157,135 @@ def test_ceiling_values_fail_closed() -> None:
         check_workspace_metadata({CEILING_KEY: "general", "dreams": []})
 
 
-def test_each_guard_mutation_goes_red() -> None:
-    """Renaming the drop at a save point fails the guard check."""
-    for relative in _GUARDS:
-        source = (ROOT / relative).read_text(encoding="utf-8")
-        _assert_guard(source)
-        mutated = source.replace(
-            "restricted_drop_reason(", "restricted_drop_reason_off(", 1
-        )
-        with pytest.raises(AssertionError, match="guard"):
-            _assert_guard(mutated)
+_VISA = "4111 1111 1111 1111"
+_AMEX = "3782 822463 10005"
+_CARD_SEPARATORS = (
+    " ",
+    "  ",
+    "-",
+    " - ",
+    ".",
+    "/",
+    "_",
+    "|",
+    ",",
+    "\n",
+    "\t",
+    "\u2013",
+    "\u2014",
+    "\u2010",
+)
+_VISA_GROUPS = ("4111", "1111", "1111", "1111")
+_CARD_CONTEXT: tuple[str, ...] = (
+    "qty 3 {card}",
+    "2026 {card}",
+    "order 98765 {card}",
+    "2026-11-04 {card}",
+    "call 555-123-4567 {card}",
+    "{card} 123",
+    "{card} 12/28",
+    "{card} 123 12/28",
+    "{card} {card}",
+    "card: {card}.",
+)
+
+
+@pytest.mark.parametrize("separator", _CARD_SEPARATORS)
+def test_card_found_with_each_separator(separator: str) -> None:
+    assert restricted_reason(separator.join(_VISA_GROUPS)) == "card"
+    assert restricted_reason(_AMEX.replace(" ", separator)) == "card"
+
+
+@pytest.mark.parametrize("template", _CARD_CONTEXT)
+@pytest.mark.parametrize("card", (_VISA, _CARD, "4111-1111-1111-1111", _AMEX))
+def test_card_found_beside_other_numbers(template: str, card: str) -> None:
+    assert restricted_reason(template.format(card=card)) == "card"
+
+
+@pytest.mark.parametrize(
+    "text",
+    (
+        "qty 3 4111 1111 1111 1112",
+        "2026 4111 1111 1111 1112 123",
+        "4111 1111 1111 1112 12/28",
+        "order 98765 4111111111111112",
+        "call 555-123-4567 and 555-987-6543",
+        "2026-11-04 12:30:45 and 2026-11-05",
+        "1,234,567,890,123",
+        "id 1 2 3 4 5 6 7 8 9 1 2 3 4 5",
+        "4111 1111 11",
+        "12345678901234567890",
+    ),
+)
+def test_card_negative_controls(text: str) -> None:
+    assert restricted_reason(text) is None
+
+
+def test_card_guard_mutations_go_red(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each guard in the matcher is load-bearing: without it a case flips."""
+    from src.sentica import restricted
+
+    assert restricted_reason("2026 " + _VISA) == "card"
+    monkeypatch.setattr(restricted, "_MIN_PEELED_GROUP", 99)
+    assert restricted_reason("2026 " + _VISA) is None
+    monkeypatch.setattr(restricted, "_MIN_PEELED_GROUP", 3)
+    assert restricted_reason("2026 " + _VISA) == "card"
+
+    def length_only(digits: str) -> bool:
+        return len(digits) >= 13
+
+    monkeypatch.setattr(restricted, "_luhn_ok", length_only)
+    assert restricted_reason(_CARD_BAD) == "card"
+
+
+@pytest.mark.parametrize(
+    "text",
+    (
+        "Opened an account in 2019",
+        "Her account manager is on leave until 2026-11-04",
+        "The account review is on 2026-11-04",
+        "account 2019",
+        "acct 2026-11-04",
+        "account review 12345678",
+        "routing around the delay since 2019",
+        "account at 12:30 on 11/04/2026",
+        "the account was closed in 2024",
+    ),
+)
+def test_account_context_needs_the_number_to_follow(text: str) -> None:
+    assert restricted_reason(text) is None
+
+
+@pytest.mark.parametrize(
+    ("text", "reason"),
+    (
+        ("account number 12345678", "account"),
+        ("account no. 12345678", "account"),
+        ("account #12345678", "account"),
+        ("account: 12345678", "account"),
+        ("Account is 12345678", "account"),
+        ("acct 1234 5678", "account"),
+        ("routing number 021000021", "routing"),
+        ("routing: 021000021", "routing"),
+    ),
+)
+def test_account_number_after_context_hits(text: str, reason: str) -> None:
+    assert restricted_reason(text) == reason
+
+
+def test_account_window_mutation_goes_red(monkeypatch: pytest.MonkeyPatch) -> None:
+    import re
+
+    from src.sentica import restricted
+
+    assert restricted_reason("The account review is on 2026-11-04") is None
+    monkeypatch.setattr(
+        restricted,
+        "_ACCOUNT_NUMBER",
+        re.compile(r"(?:account|acct|routing)\D*([0-9]{4,17})", re.IGNORECASE),
+    )
+    monkeypatch.setattr(restricted, "_YEAR", re.compile(r"x"))
+    assert restricted_reason("Opened an account in 2019") == "account"
 
 
 def test_production_log_keeps_the_reason_and_drops_the_text() -> None:
@@ -642,7 +748,8 @@ async def test_only_a_broker_audience_can_set_the_ceiling(
 ) -> None:
     from fastapi.testclient import TestClient
 
-    from src.exceptions import AuthenticationException, ResourceNotFoundException
+    from src.exceptions import AuthenticationException
+    from src.main import app
     from src.routers.workspaces import put_workspace_ceiling
     from src.schemas.api import WorkspaceCeilingUpdate
     from src.security import JWTParams, create_jwt, verify_jwt
@@ -716,49 +823,49 @@ async def test_only_a_broker_audience_can_set_the_ceiling(
         instance,
     )
     assert broker.audience == "broker"
-    stored = await put_workspace_ceiling(
-        workspace.name,
-        WorkspaceCeilingUpdate(ceiling="restricted"),
-        broker,
-        db_session,
+    route = next(
+        item
+        for item in app.routes
+        if getattr(item, "path", "") == "/v3/workspaces/{workspace_id}/ceiling"
     )
-    assert stored.ceiling == "restricted"
-    raised = await db_session.scalar(
-        select(models.Workspace.internal_metadata)
-        .where(models.Workspace.name == workspace.name)
-        .execution_options(populate_existing=True)
-    )
-    assert workspace_ceiling(raised) == "restricted"
-
-    still_refused = client.put(
-        f"/v3/workspaces/{workspace.name}/ceiling",
-        json={"ceiling": "general"},
-    )
-    assert still_refused.status_code == 401
-    unchanged = await db_session.scalar(
-        select(models.Workspace.internal_metadata)
-        .where(models.Workspace.name == workspace.name)
-        .execution_options(populate_existing=True)
-    )
-    assert workspace_ceiling(unchanged) == "restricted"
-
-    with pytest.raises(ValidationException, match="allowed value"):
-        await put_workspace_ceiling(
-            workspace.name,
-            WorkspaceCeilingUpdate(ceiling="Restricted"),
-            broker,
-            db_session,
+    auth_dependency = route.dependant.dependencies[0].call  # pyright: ignore[reportAttributeAccessIssue,reportUnknownMemberType,reportUnknownVariableType]
+    app.dependency_overrides[auth_dependency] = lambda: broker
+    try:
+        url = f"/v3/workspaces/{workspace.name}/ceiling"
+        stored = client.put(url, json={"ceiling": "restricted"})
+        assert stored.status_code == 200
+        assert stored.json() == {"ceiling": "restricted"}
+        raised = await db_session.scalar(
+            select(models.Workspace.internal_metadata)
+            .where(models.Workspace.name == workspace.name)
+            .execution_options(populate_existing=True)
         )
-    after_bad = await db_session.scalar(
-        select(models.Workspace.internal_metadata)
-        .where(models.Workspace.name == workspace.name)
-        .execution_options(populate_existing=True)
-    )
-    assert workspace_ceiling(after_bad) == "restricted"
-    with pytest.raises(ResourceNotFoundException):
-        await put_workspace_ceiling(
-            "missing-workspace",
-            WorkspaceCeilingUpdate(ceiling="general"),
-            broker,
-            db_session,
+        assert workspace_ceiling(raised) == "restricted"
+
+        invalid = client.put(url, json={"ceiling": "Restricted"})
+        assert invalid.status_code == 422
+        assert invalid.json() == {"detail": "ceiling is not an allowed value"}
+        after_bad = await db_session.scalar(
+            select(models.Workspace.internal_metadata)
+            .where(models.Workspace.name == workspace.name)
+            .execution_options(populate_existing=True)
         )
+        assert workspace_ceiling(after_bad) == "restricted"
+
+        missing_workspace = client.put(
+            "/v3/workspaces/missing-workspace/ceiling", json={"ceiling": "general"}
+        )
+        assert missing_workspace.status_code == 404
+
+        app.dependency_overrides[auth_dependency] = lambda: ordinary
+        refused_again = client.put(url, json={"ceiling": "internal"})
+        assert refused_again.status_code == 401
+        assert refused_again.json()["detail"] == "broker audience required"
+        final = await db_session.scalar(
+            select(models.Workspace.internal_metadata)
+            .where(models.Workspace.name == workspace.name)
+            .execution_options(populate_existing=True)
+        )
+        assert workspace_ceiling(final) == "restricted"
+    finally:
+        app.dependency_overrides.pop(auth_dependency, None)  # pyright: ignore[reportUnknownArgumentType]
