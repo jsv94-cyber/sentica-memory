@@ -156,3 +156,5 @@ release v3.3.0 (`608aec8a928da13c540262ed980c569448fb53ab`).
 | `docs/v3/openapi.json` | The ceiling route is in the generated spec. | R6-6 |
 | `docs/image-digest.txt`, `docs/RELEASES.md`, `tests/sentica/test_integration_contract.py` | Two clean builds record `sha256:23f86925e7c0dcbc7293e3abd39ba2c7b7bb7f7afa10a3fa448cbb726292b486`. `docs/RELEASES.md` keeps the earlier R6-6 digest and records this one. The v0.2.1 digest stays. | R6-6 |
 
+| `src/sentica/restricted.py` | A card is found beside other numbers (CVV, expiry, quantity, year, date) and across space, dash, Unicode dash, dot, slash, underscore, pipe, comma, and newline separators. An account or routing number must follow its label closely. A four-digit year or an ISO date after the label is not a number. | R6-6 |
+| `docs/image-digest.txt`, `docs/RELEASES.md`, `tests/sentica/test_integration_contract.py` | `src/` changed, so the image content changed. Two clean builds record `sha256:e4492b624df4dd71a190773809087a0a849dd908c8132bde7bdaf719e01a8807`. `docs/RELEASES.md` keeps the earlier digests and records this one. `docker/` is unchanged. | R6-6 |

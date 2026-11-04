@@ -16,6 +16,8 @@ R6-6 records
 `sha256:779097b49a1035e542201902aa3b222c968264918e55ffd5c62baabd7ed8beaf`.
 The ceiling write records
 `sha256:23f86925e7c0dcbc7293e3abd39ba2c7b7bb7f7afa10a3fa448cbb726292b486`.
+The card and account matcher fix records
+`sha256:e4492b624df4dd71a190773809087a0a849dd908c8132bde7bdaf719e01a8807`.
 The next release migrates from Alembic head `d4a8c1e27b90`
 to `e7c2a91b4d08`. That revision adds
 `ix_documents_workspace_observer_observed` on documents

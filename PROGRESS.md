@@ -576,3 +576,23 @@ Jose, in chat on Oct 23, 2026: "Approve R6-1 to R6-7, Tag v0.2.1-sentica now, th
   metadata update cannot. Session summaries drop the same patterns.
   Medical terms stay on the storage ban and are not ceiling hits.
 
+
+## R6-6 fix round. 2026-11-04
+
+- Card detection splits a run into digit groups and Luhn-checks every
+  contiguous group span of 13 to 19 digits. Separators are space, tab,
+  newline, dash, U+2010 to U+2015, dot, slash, underscore, pipe, and
+  comma. A card beside a CVV, an expiry, a quantity, a year, or a date is
+  found. A peeled span needs every group to hold three or more digits, so
+  a day or a month is never merged into a card.
+- The account and routing rule needs the number right after the label,
+  with at most "number", "no.", "#", ":", or "is" between. A four-digit
+  year or an ISO date after the label is not an account number.
+- The ceiling route is proven at the HTTP layer for 200, 401, 422, and
+  404. The source-text mutation test is gone. The guards are mutation
+  checked by behaviour.
+- Mutation checks: the old matcher, the year and date exclusion, and the
+  broker-audience check on the route each turn the tests red and go green
+  when restored.
+- `src/` changed, so the image digest was re-pinned. `docker/` did not
+  change.
