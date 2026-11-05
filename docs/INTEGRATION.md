@@ -108,6 +108,20 @@ Request:
 fields on each message are `metadata` (object) and `created_at`
 (ISO-8601).
 
+`metadata.subject_ref` is optional. When set it must be a string with
+something in it, the same rule the subject-changed route applies. Any
+other value (blank, number, null, array, object) is HTTP 422 and the
+whole batch is refused. The value is kept with the message. A deletion
+by `subject_ref` removes those messages and every conclusion that cites
+them, and what was derived from those conclusions. `POST
+/subjects/{subject_ref}/changed` marks those conclusions and their
+descendants stale. A message without `subject_ref` is unchanged by
+both. The deletion record still holds counts only. A conclusion that
+cites messages from more than one subject is removed with the first
+subject deleted, together with the messages it cites. Changing
+`metadata` on an existing message does not change which subject it
+belongs to.
+
 Response `201`, an array:
 
 ```json

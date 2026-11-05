@@ -145,7 +145,10 @@ Creating conclusions calls `src/crud/document.py:1262` `create_observations`.
 A new conclusion with a `subject_ref` can supersede the nearest older one
 for that subject (`src/sentica/freshness.py:104` `supersede_similar`).
 `POST /subjects/{ref}/changed` marks them stale
-(`src/sentica/freshness.py:87` `mark_subject_changed`). Decay and hard
+(`src/sentica/freshness.py:87` `mark_subject_changed`). A message that carried
+`metadata.subject_ref` at ingest is reached the same way
+(`src/sentica/freshness.py` `_subject_messages`,
+`_documents_from_messages`; `src/sentica/subject_ref.py`). Decay and hard
 deletion live in the same module.
 
 `src/models.py:300` `message_embeddings` stores a chunk of message text and its

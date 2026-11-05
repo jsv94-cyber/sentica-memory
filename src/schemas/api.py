@@ -376,6 +376,14 @@ class MessageCreate(MessageBase):
     def sanitize_content(cls, v: str) -> str:
         return strip_nul(v)
 
+    @field_validator("metadata", mode="after")
+    @classmethod
+    def validate_subject_ref(cls, v: dict[str, Any] | None) -> dict[str, Any] | None:
+        from src.sentica.subject_ref import check_metadata_subject_ref
+
+        check_metadata_subject_ref(v)
+        return v
+
     @property
     def encoded_message(self) -> list[int]:
         return self._encoded_message
@@ -431,6 +439,14 @@ class MessageUploadCreate(BaseModel):
     created_at: datetime.datetime | None = None
 
     model_config = ConfigDict(populate_by_name=True)  # pyright: ignore
+
+    @field_validator("metadata", mode="after")
+    @classmethod
+    def validate_subject_ref(cls, v: dict[str, Any] | None) -> dict[str, Any] | None:
+        from src.sentica.subject_ref import check_metadata_subject_ref
+
+        check_metadata_subject_ref(v)
+        return v
 
 
 # ---------------------------------------------------------------------------
