@@ -618,3 +618,18 @@ Jose, in chat on Oct 23, 2026: "Approve R6-1 to R6-7, Tag v0.2.1-sentica now, th
   Both are possible follow-ups.
 - Tests: `tests/sentica/test_r6_message_subject_ref.py`. Six mutations
   each turn it red and green when restored.
+
+
+## R6 message subject_ref: cross-workspace isolation test. 2026-11-05
+
+- Added `test_subject_ref_never_crosses_workspaces`. Workspace B holds the
+  same `subject_ref` on its messages and a conclusion citing a workspace A
+  message by public id. Subject-changed and deletion in A act on A (positive
+  control: 2 stale, 2 conclusions deleted, the subject messages removed) and
+  leave every B message and conclusion unchanged.
+- Mutation: removing the workspace filter from `_subject_messages` and
+  `_documents_from_messages` turns the test red (`4 == 2`). Restored, the
+  file is green (14 passed).
+- Image digest: only a test changed, and `tests/` is not copied into the
+  image. The recorded `sha256:fe1cb954...ab3c` matches the CI
+  `build-default-image` output for the previous head, where the job passed.
