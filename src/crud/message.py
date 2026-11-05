@@ -382,6 +382,19 @@ async def _build_merged_snippets(
     return snippets
 
 
+def _message_internal_metadata(message: schemas.MessageCreate) -> dict[str, Any]:
+    """Copy a validated ``subject_ref`` out of the metadata for erasure lookups.
+
+    The metadata copy is what the client sent and a later metadata update can
+    change it. This copy is what deletion and subject-changed read.
+    """
+    from src.sentica.subject_ref import KEY, validate_subject_ref
+
+    if message.metadata is None or KEY not in message.metadata:
+        return {}
+    return {KEY: validate_subject_ref(message.metadata[KEY])}
+
+
 async def create_messages(
     db: AsyncSession,
     messages: list[schemas.MessageCreate],
@@ -462,6 +475,7 @@ async def create_messages(
             peer_name=message.peer_name,
             content=message.content,
             h_metadata=message.metadata or {},
+            internal_metadata=_message_internal_metadata(message),
             workspace_name=workspace_name,
             public_id=generate_nanoid(),
             token_count=len(message.encoded_message),

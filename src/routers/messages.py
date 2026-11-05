@@ -74,6 +74,8 @@ async def parse_upload_form(
             parsed_metadata = json.loads(metadata)
         except json.JSONDecodeError:
             logger.warning(f"Failed to parse metadata JSON: {metadata}")
+            if '"subject_ref"' in metadata:
+                raise ValidationException("subject_ref could not be read") from None
             parsed_metadata = None
 
     parsed_configuration = None

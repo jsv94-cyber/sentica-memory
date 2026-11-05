@@ -158,3 +158,7 @@ release v3.3.0 (`608aec8a928da13c540262ed980c569448fb53ab`).
 
 | `src/sentica/restricted.py` | A card is found beside other numbers (CVV, expiry, quantity, year, date) and across space, dash, Unicode dash, dot, slash, underscore, pipe, comma, and newline separators. An account or routing number must follow its label closely. A four-digit year or an ISO date after the label is not a number. | R6-6 |
 | `docs/image-digest.txt`, `docs/RELEASES.md`, `tests/sentica/test_integration_contract.py` | `src/` changed, so the image content changed. Two clean builds record `sha256:e4492b624df4dd71a190773809087a0a849dd908c8132bde7bdaf719e01a8807`. `docs/RELEASES.md` keeps the earlier digests and records this one. `docker/` is unchanged. | R6-6 |
+
+| `src/sentica/subject_ref.py`, `src/schemas/api.py`, `src/crud/message.py`, `src/routers/messages.py` | Ingest accepts an optional `metadata.subject_ref`, refuses a malformed one with 422, and keeps a copy in `messages.internal_metadata`. | R6 |
+| `src/sentica/freshness.py` | Deletion by `subject_ref` and subject-changed also reach the messages that carried it, the conclusions citing them, and their descendants. | R6 |
+| `tests/sentica/test_r6_message_subject_ref.py`, `docs/INTEGRATION.md`, `docs/MAP.md`, `PROGRESS.md` | Tests with mutation checks, and the contract text. | R6 |

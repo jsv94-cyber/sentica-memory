@@ -17,6 +17,7 @@ from typing import Any, cast
 
 from nanoid import generate as generate_nanoid
 from sqlalchemy import delete, func, select, text, update
+from sqlalchemy.dialects.postgresql import array as pg_array
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -104,10 +105,43 @@ def _aware(value: datetime) -> datetime:
     return value
 
 
+async def _subject_messages(
+    db: AsyncSession, workspace_name: str, subject_ref: str
+) -> list[tuple[int, str]]:
+    """Messages that carried this ``subject_ref`` at ingest, as (id, public id)."""
+    rows = await db.execute(
+        select(models.Message.id, models.Message.public_id)
+        .where(models.Message.workspace_name == workspace_name)
+        .where(models.Message.internal_metadata["subject_ref"].astext == subject_ref)
+        .order_by(models.Message.id)
+    )
+    return [(int(row[0]), str(row[1])) for row in rows.all()]
+
+
+async def _documents_from_messages(
+    db: AsyncSession, workspace_name: str, public_ids: set[str]
+) -> list[models.Document]:
+    """Conclusions whose provenance cites any of these messages."""
+    if not public_ids:
+        return []
+    cited = models.Document.internal_metadata["message_public_ids"]
+    return list(
+        await db.scalars(
+            select(models.Document)
+            .where(models.Document.workspace_name == workspace_name)
+            .where(cited.has_any(pg_array(sorted(public_ids))))
+        )
+    )
+
+
 async def mark_subject_changed(
     db: AsyncSession, workspace_name: str, subject_ref: str
 ) -> int:
-    """Flag every live conclusion for this subject as stale, including copies."""
+    """Flag every live conclusion for this subject as stale, including copies.
+
+    Conclusions derived from messages that carried the subject, and what was
+    derived from those, are flagged too.
+    """
     from sqlalchemy import or_
 
     sources = (
@@ -115,18 +149,28 @@ async def mark_subject_changed(
         .where(models.Document.workspace_name == workspace_name)
         .where(models.Document.subject_ref == subject_ref)
     )
+    public_ids = {
+        public_id
+        for _, public_id in await _subject_messages(db, workspace_name, subject_ref)
+    }
+    from_messages = await _documents_from_messages(db, workspace_name, public_ids)
+    derived_ids = sorted(
+        document.id
+        for document in await _with_descendants(db, workspace_name, from_messages)
+    )
     copied_from = models.Document.internal_metadata["copied_from"].astext
+    clauses = [
+        models.Document.subject_ref == subject_ref,
+        copied_from.in_(sources),
+    ]
+    if derived_ids:
+        clauses.append(models.Document.id.in_(derived_ids))
     result = await db.execute(
         update(models.Document)
         .where(models.Document.workspace_name == workspace_name)
         .where(models.Document.deleted_at.is_(None))
         .where(models.Document.superseded_by.is_(None))
-        .where(
-            or_(
-                models.Document.subject_ref == subject_ref,
-                copied_from.in_(sources),
-            )
-        )
+        .where(or_(*clauses))
         .values(stale=True)
     )
     await db.commit()
@@ -338,9 +382,23 @@ async def forget(
             )
         )
     )
+    subject_messages: list[tuple[int, str]] = []
+    if subject_ref is not None:
+        subject_messages = await _subject_messages(db, workspace_name, subject_ref)
+        known = {document.id for document in documents}
+        documents.extend(
+            document
+            for document in await _documents_from_messages(
+                db, workspace_name, {public_id for _, public_id in subject_messages}
+            )
+            if document.id not in known
+        )
     documents = await _with_descendants(db, workspace_name, documents)
     texts = [document.content for document in documents if document.content]
     message_ids, public_ids = _message_keys(documents)
+    for message_id, public_id in subject_messages:
+        message_ids.add(message_id)
+        public_ids.add(public_id)
     known_earliest = _earliest_deleted_messages(documents)
     session_names = {
         document.session_name

@@ -596,3 +596,25 @@ Jose, in chat on Oct 23, 2026: "Approve R6-1 to R6-7, Tag v0.2.1-sentica now, th
   when restored.
 - `src/` changed, so the image digest was re-pinned. `docker/` did not
   change.
+
+
+## R6 message subject_ref. 2026-11-05
+
+- Design: ingest accepts an optional `metadata.subject_ref`. It is
+  validated with the rule the subject-changed route already applies to a
+  conclusion's `subject_ref` (a string with content). A malformed value
+  is HTTP 422 and nothing is stored, including for the rest of a batch.
+  The upload route refuses it too, and refuses unreadable metadata JSON
+  that mentions it.
+- Storage: the value is copied to `messages.internal_metadata`, so no
+  migration. The client-visible metadata copy is untouched and later
+  metadata edits do not move a message to another subject.
+- Reach: deletion and subject-changed find messages by that copy, then
+  conclusions whose `message_public_ids` cite them, then descendants and
+  copies. Deletion removes the messages, queue items, embeddings counts,
+  and summaries as the peer path does. The record holds counts only.
+- Not done: no index on the JSONB key, so lookup scans the workspace's
+  messages. Derived conclusions do not get `subject_ref` set on the row.
+  Both are possible follow-ups.
+- Tests: `tests/sentica/test_r6_message_subject_ref.py`. Six mutations
+  each turn it red and green when restored.
